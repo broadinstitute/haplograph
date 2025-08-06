@@ -1,15 +1,8 @@
 use std::collections::HashMap;
-use std::io::Result;
-use std::path::Path;
-use std::fs::File;
-use std::io::{BufReader, BufWriter};
-use std::io::{Read, Write};
-use std::io::{Seek, SeekFrom};
 use bio::io::fastq;
-use rust_htslib::bam::{self, FetchDefinition, IndexedReader, Read as BamRead, record::Aux};
+use rust_htslib::bam::{self, IndexedReader, Read as BamRead, record::Aux};
 use rust_htslib::faidx::Reader;
-use anyhow::{Result as AnyhowResult, Context};
-use log::info;
+use anyhow::{Result as AnyhowResult};
 use indicatif::{ProgressBar, ProgressStyle};
 
 
@@ -194,7 +187,7 @@ pub fn extract_fasta_seqs(
     let id = format!("{chr}:{start}-{stop}|{name}|{basename}");
     let seq = fasta.fetch_seq_string(chr, usize::try_from(*start)?, usize::try_from(*stop - 1).unwrap()).unwrap();
 
-    if seq.len() > 0 {
+    if !seq.is_empty() {
         let records = vec![fastq::Record::with_attrs(id.as_str(), None, seq.as_bytes(), vec![30; seq.len()].as_slice())];
 
         return Ok(records);
