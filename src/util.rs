@@ -1,16 +1,10 @@
 use std::collections::HashMap;
-use std::io::Result;
-use std::path::Path;
-use std::fs::File;
-use std::io::{BufReader, BufWriter};
-use std::io::{Read, Write};
-use std::io::{Seek, SeekFrom};
 use bio::io::fastq;
-use rust_htslib::bam::{self, FetchDefinition, IndexedReader, Read as BamRead, record::Aux};
+use rust_htslib::bam::{self, IndexedReader, Read as BamRead, record::Aux};
 use rust_htslib::faidx::Reader;
-use anyhow::{Result as AnyhowResult, Context};
-use log::info;
+use anyhow::{Result as AnyhowResult};
 use indicatif::{ProgressBar, ProgressStyle};
+
 
 
 pub fn gcs_gcloud_is_installed() -> bool {
@@ -206,15 +200,15 @@ pub fn extract_reads_at_single_locus(
         .iter()
         .map(|sq| fastq::Record::with_attrs(sq.0.as_str(), None, sq.1.0.as_bytes(), &sq.1.1))
         .collect();
-    let filtered_read_span: Vec<(String, u64, u64)> = filtered_bmap.iter().map(|(seq_name, _)| {
+    let filtered_read_span: Vec<(String, u64, u64)> = filtered_bmap.keys().map(|seq_name| {
         let read_name = seq_name.split('|').next().unwrap();
         let read_span = read_spans.get(read_name).unwrap();
         (read_name.to_string(), read_span.0, read_span.1)
-    }).collect();
-    // println!("read_span: {:?}", filtered_read_span);
+        }).collect();
+    println!("read_span: {:?}", filtered_read_span);
     println!("original_bmap{:?}, filtered_bmap: {:?}", bmap.len(), filtered_bmap.len());
 
-    Ok((records))
+    Ok(records)
 }
 // Function to extract seqs from a FASTA file within a specified genomic region.
 pub fn extract_fasta_seqs(
@@ -228,7 +222,7 @@ pub fn extract_fasta_seqs(
     let id = format!("{chr}:{start}-{stop}|{name}|{basename}");
     let seq = fasta.fetch_seq_string(chr, usize::try_from(*start)?, usize::try_from(*stop - 1).unwrap()).unwrap();
 
-    if seq.len() > 0 {
+    if !seq.is_empty() {
         let records = vec![fastq::Record::with_attrs(id.as_str(), None, seq.as_bytes(), vec![30; seq.len()].as_slice())];
 
         return Ok(records);
