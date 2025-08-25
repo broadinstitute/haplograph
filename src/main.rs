@@ -28,19 +28,11 @@ pub struct Cli {
     
     /// Chromosome name
     #[arg(short, long)]
-    chromosome: String,
-    
-    /// Start position
-    #[arg(short, long)]
-    begin: usize,
-    
-    /// End position
-    #[arg(short, long)]
-    end: usize,
+    locus: String,
 
     /// Limited size of the region
-    #[arg(short, long, default_value = "20000")]
-    limited_size: usize,
+    #[arg(short, long, default_value = "0.01")]
+    frequency_min: f64,
     
     /// Minimal Supported Reads
     #[arg(short, long, default_value = "2")]
@@ -67,6 +59,7 @@ pub struct Cli {
 fn main() -> Result<()> {
     // Parse command line arguments
     let cli = Cli::parse();
+    let (chromosome, start, end) = util::split_locus(cli.locus.clone());
     
     // Initialize logging
     if cli.verbose {
@@ -78,24 +71,26 @@ fn main() -> Result<()> {
     
     info!("Starting Haplograph analysis");
     info!("Input BAM: {}", cli.alignment_bam);
-    info!("Region: {}:{}-{}", cli.chromosome, cli.begin, cli.end);
-    info!("Locus size: {}", cli.end - cli.begin);
+    info!("Region: {}:{}-{}", chromosome, start, end);
+    info!("Locus size: {}", end - start);
+    info!("Minimal vaf : {}", cli.frequency_min);
     info!("Minimal supported reads: {}", cli.min_reads);
+
     info!("Window size: {}", cli.window_size);
     info!("Pad size: {}", cli.pad_size);
 
-    if cli.window_size  > cli.end  - cli.begin  {
+    if cli.window_size  > end  - start  {
         // if the window size is larger than the region size, call the function directly
-        hap::start(&cli, cli.begin as usize, cli.end as usize)?;
+        hap::start(&cli, &chromosome, start as usize, end as usize)?;
     } else {
         let mut windows = Vec::new();
-        let window_num = (cli.end - cli.begin) / cli.window_size ;
-        for i in (cli.begin..cli.end).step_by(cli.window_size as usize) {
-            let end_pos = std::cmp::min(i + cli.window_size , cli.end);
+        let window_num = (end - start) / cli.window_size ;
+        for i in (start..end).step_by(cli.window_size as usize) {
+            let end_pos = std::cmp::min(i + cli.window_size , end);
             windows.push((i, end_pos));
         }
         for window in windows {
-            hap::start(&cli, window.0 as usize, window.1 as usize)?;
+            hap::start(&cli, &chromosome, window.0 as usize, window.1 as usize)?;
         }
     }
 
