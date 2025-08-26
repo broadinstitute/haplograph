@@ -1,6 +1,7 @@
 use clap::Parser;
 use log::{info};
 use anyhow::{Result};
+use std::path::PathBuf;
 
 mod util;
 mod hap;
@@ -50,6 +51,10 @@ pub struct Cli {
     #[arg(short, long, default_value = "100")]
     pad_size:i64, 
 
+    ///output file format
+    #[arg(short, long, default_value = "gfa")]
+    default_file_format: String, 
+
 
     /// Verbose output
     #[arg(short, long)]
@@ -59,6 +64,12 @@ pub struct Cli {
 fn main() -> Result<()> {
     // Parse command line arguments
     let cli = Cli::parse();
+    
+    // Validate format
+    if cli.default_file_format != "fasta" && cli.default_file_format != "gfa" {
+        anyhow::bail!("Format must be either 'fasta' or 'gfa', got: {}", cli.default_file_format);
+    }
+    
     let (chromosome, start, end) = util::split_locus(cli.locus.clone());
     
     // Initialize logging
@@ -79,18 +90,32 @@ fn main() -> Result<()> {
     info!("Window size: {}", cli.window_size);
     info!("Pad size: {}", cli.pad_size);
 
+    
+
     if cli.window_size  > end  - start  {
         // if the window size is larger than the region size, call the function directly
-        hap::start(&cli, &chromosome, start as usize, end as usize)?;
+        let mut windows = Vec::new();
+        windows.push((start as usize, end as usize));
+        hap::start(&cli, &chromosome, &windows)?;
     } else {
         let mut windows = Vec::new();
-        let window_num = (end - start) / cli.window_size ;
         for i in (start..end).step_by(cli.window_size as usize) {
             let end_pos = std::cmp::min(i + cli.window_size , end);
             windows.push((i, end_pos));
         }
-        for window in windows {
-            hap::start(&cli, &chromosome, window.0 as usize, window.1 as usize)?;
+        if cli.default_file_format == "fasta" {
+            hap::start(&cli, &chromosome, &windows)?;
+
+        } else if cli.default_file_format == "gfa" {
+            
+            // Process each window
+            let final_hap_list = hap::extract_haplotypes(&cli, &chromosome, &windows)?;
+
+            let (node_info, edge_info) = hap::get_node_edge_info(&cli, &windows, &final_hap_list,);
+            let gfa_output = PathBuf::from(format!("{}/{}_{}_{}_{}_haplograph.gfa", cli.output, cli.sampleid, chromosome, start, end));
+            hap::write_gfa_output(&node_info, &edge_info, &gfa_output);
+
+
         }
     }
 

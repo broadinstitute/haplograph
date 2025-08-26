@@ -373,3 +373,14 @@ pub fn extract_read_sequences_from_region(
     
     Ok(read_sequences)
 }
+
+/// Find overlapping reads between two read vectors
+pub fn find_overlapping_reads(read_vector1: &[String], read_vector2: &[String]) -> Vec<String> {
+    let set1: std::collections::HashSet<String> = read_vector1.iter().map(|s| s.split('|').next().unwrap().to_string()).collect();
+    let set2: std::collections::HashSet<String> = read_vector2.iter().map(|s| s.split('|').next().unwrap().to_string()).collect();
+    
+    set1.intersection(&set2)
+        .map(|read_name| read_name.clone())
+        .collect()
+}
+
