@@ -32,7 +32,7 @@ pub fn process_bam_file(cli: &Cli, bam: &mut IndexedReader, chromosome: &str, wi
     // Extract reads from the specified region
     let mut reads_list = Vec::new();
     for (start, end) in windows {
-        let (reads, read_coordinates) = util::extract_reads(
+        let (reads, read_coordinates, read_sequence_dictionary) = util::extract_haplotypes_coordinates_from_bam(
             bam,
             &chromosome,
             start as u64,
@@ -41,25 +41,23 @@ pub fn process_bam_file(cli: &Cli, bam: &mut IndexedReader, chromosome: &str, wi
         ).unwrap();
         
         info!("Extracted {} reads from region", reads.len());
-
-        // Extract read sequences from BAM file using utility function
-        let read_sequence_dictionary = util::extract_read_sequences_from_region(
-             bam,
-            &chromosome,
-            start as u64,
-            end as u64,
-        ).unwrap();
-
+        let mut filtered_reads = Vec::new();
         for r in reads.iter() {
             let r_name = r.id().to_string().split('|').next().unwrap().to_string();
             let r_seq = read_sequence_dictionary.get(&r_name).unwrap();
             let r_start = read_coordinates.get(&r_name).unwrap().0;
             let r_end = read_coordinates.get(&r_name).unwrap().1 + 1;
             let reconstructed_seq = String::from_utf8_lossy(r.seq()).to_string();
-            
-            assert_eq!(r_seq[r_start as usize..r_end as usize], reconstructed_seq);
+            // println!("r_seq: {}, reconstructed_seq: {}, readname: {}", r_seq.contains(reconstructed_seq.as_str()), reconstructed_seq, r_name );
+            let r_sub_seq = r_seq[r_start as usize..r_end as usize].to_string();
+            // sanity check if the reconstructed sequence is the same as the read sequence
+            if r_sub_seq == reconstructed_seq{
+                filtered_reads.push(r.clone())
+            }else{
+                println!("r_seq: {}, reconstructed_seq: {}, readname: {}", r_sub_seq, reconstructed_seq, r_name );
+            }
         }
-        reads_list.push(reads);
+        reads_list.push(filtered_reads);
     }
     reads_list
 }
@@ -169,6 +167,9 @@ pub fn collapse_haplotypes(cli: &Cli, reads: &Vec<fastq::Record>, reference: &fa
 pub fn extract_haplotypes (cli: &Cli, chromosome: &str, windows: &Vec<(usize, usize)>) -> Result<(Vec<HashMap<String, (String, Vec<String>, f64)>>)> {
     // Validate inputs
     let mut bam = open_bam_file(cli);
+            // // Extract read sequences from BAM file using utility function
+
+    
     let reads_list:Vec<Vec<fastq::Record>> = process_bam_file(cli, &mut bam, chromosome, windows.clone());  
     let reference:Vec<fastq::Record> = process_fasta_file(cli, chromosome, windows.clone());
     let mut final_hap_list: Vec<HashMap<String, (String, Vec<String>, f64)>> = Vec::new();

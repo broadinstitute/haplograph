@@ -90,7 +90,7 @@ fn main() -> Result<()> {
     info!("Window size: {}", cli.window_size);
     info!("Pad size: {}", cli.pad_size);
 
-    
+
 
     if cli.window_size  > end  - start  {
         // if the window size is larger than the region size, call the function directly
