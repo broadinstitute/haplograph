@@ -46,7 +46,7 @@ task haplograph_asm {
 
     runtime {
         docker: "hangsuunc/haplograph:v1"
-        memory: "1 GB"
+        memory: "4 GB"
         cpu: 1
         disks: "local-disk 300 SSD"
     }

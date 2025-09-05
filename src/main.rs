@@ -5,6 +5,8 @@ use std::path::PathBuf;
 
 mod util;
 mod hap;
+mod intervals;
+mod graph;
 
 #[derive(Parser)]
 #[command(name = "haplograph")]
@@ -25,7 +27,7 @@ pub struct Cli {
 
     /// Output directory
     #[arg(short, long, default_value = ".")]
-    output: String,
+    output_prefix: String,
     
     /// Chromosome name
     #[arg(short, long)]
@@ -47,9 +49,9 @@ pub struct Cli {
     #[arg(short, long, default_value = "1000")]
     window_size: usize,
 
-    ///pad size for adjacent window
-    #[arg(short, long, default_value = "100")]
-    pad_size:i64, 
+    ///if only primary reads are used
+    #[arg(short, long, default_value = "false")]
+    primary_only: bool, 
 
     ///output file format
     #[arg(short, long, default_value = "gfa")]
@@ -70,7 +72,6 @@ fn main() -> Result<()> {
         anyhow::bail!("Format must be either 'fasta' or 'gfa', got: {}", cli.default_file_format);
     }
     
-    let (chromosome, start, end) = util::split_locus(cli.locus.clone());
     
     // Initialize logging
     if cli.verbose {
@@ -80,41 +81,35 @@ fn main() -> Result<()> {
     }
     env_logger::init();
     
+    let (chromosome, start, end) = util::split_locus(cli.locus.clone());
     info!("Starting Haplograph analysis");
     info!("Input BAM: {}", cli.alignment_bam);
     info!("Region: {}:{}-{}", chromosome, start, end);
     info!("Locus size: {}", end - start);
     info!("Minimal vaf : {}", cli.frequency_min);
     info!("Minimal supported reads: {}", cli.min_reads);
+    info!("Maximal Window size: {}", cli.window_size);
+    info!("Primary only: {}", cli.primary_only);
 
-    info!("Window size: {}", cli.window_size);
-    info!("Pad size: {}", cli.pad_size);
-
-
+    let mut bam = util::open_bam_file(&cli.alignment_bam);
+    // // Extract read sequences from BAM file using utility function
 
     if cli.window_size  > end  - start  {
-        // if the window size is larger than the region size, call the function directly
-        let mut windows = Vec::new();
-        windows.push((start as usize, end as usize));
-        hap::start(&cli, &chromosome, &windows)?;
+        let final_hap = intervals::start(&mut bam, &cli.reference_fa, &chromosome, start, end, &cli.sampleid, cli.min_reads as usize, cli.frequency_min, cli.primary_only, true)?;
+        
+
     } else {
         let mut windows = Vec::new();
         for i in (start..end).step_by(cli.window_size as usize) {
             let end_pos = std::cmp::min(i + cli.window_size , end);
             windows.push((i, end_pos));
         }
+
         if cli.default_file_format == "fasta" {
-            hap::start(&cli, &chromosome, &windows)?;
+            hap::start(&cli, &mut bam, &chromosome, &windows)?;
 
         } else if cli.default_file_format == "gfa" {
-            
-            // Process each window
-            let final_hap_list = hap::extract_haplotypes(&cli, &chromosome, &windows)?;
-
-            let (node_info, edge_info) = hap::get_node_edge_info(&cli, &windows, &final_hap_list,);
-            let gfa_output = PathBuf::from(format!("{}/{}_{}_{}_{}_haplograph.gfa", cli.output, cli.sampleid, chromosome, start, end));
-            hap::write_gfa_output(&node_info, &edge_info, &gfa_output);
-
+            graph::start( &cli, &mut bam, &windows)?;
 
         }
     }
