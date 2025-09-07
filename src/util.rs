@@ -3,9 +3,10 @@ use url::Url;
 use rust_htslib::bam::{self, IndexedReader, Read as BamRead, record::Aux};
 use log::{info, warn};
 use anyhow::{Result as AnyhowResult};
-use indicatif::{ProgressBar, ProgressStyle};
 use bio::alignment::pairwise::*;
 use bio::alignment::AlignmentOperation;
+use bio::io::fasta::Reader as FastaReader;
+use bio::io::fastq;
 
 pub fn reverse_complement(kmer: &str) -> String {
     kmer.chars()
@@ -109,6 +110,46 @@ pub fn open_bam_file(alignment_bam: &String) -> IndexedReader {
     bam
 }
 
+pub fn get_chromosome_ref_seq(reference_fa: &String, chromosome: &str, sampleid: &String) -> Vec<fastq::Record> {
+    
+    
+    info!("Opening FASTA file: {}", reference_fa);
+    
+    // Open FASTA file
+    let mut fasta_reader = FastaReader::from_file(&reference_fa)
+        .expect("Failed to open FASTA file");
+
+    let mut reference_seqs = Vec::new();
+
+    for result in fasta_reader.records() {
+        let record = result.expect("Failed to read FASTA record");
+        let seq_id = record.id().to_string();
+        let sequence = String::from_utf8_lossy(record.seq()).to_string();
+
+        // Check if this sequence matches the target chromosome
+        if seq_id == chromosome {
+            info!("Extracting region {} from chromosome {}", 
+                chromosome, seq_id);
+            let chromosome_seq = sequence;
+            let record_id = seq_id;
+            let fastq_record = fastq::Record::with_attrs(
+                &record_id,
+                None,
+                chromosome_seq.as_bytes(),
+                vec![30; chromosome_seq.len()].as_slice() // Default quality score
+            );
+            reference_seqs.push(fastq_record);
+            info!("Extracted reference sequence: {} bp", chromosome_seq.len());
+            
+        }
+    }
+    
+    if reference_seqs.is_empty() {
+        warn!("No matching chromosome '{}' found in FASTA file", chromosome);
+    }
+    
+    reference_seqs
+}
 
 pub fn split_locus(locus: String) -> (String, usize, usize) {
     let parts: Vec<&str> = locus.split(':').collect();

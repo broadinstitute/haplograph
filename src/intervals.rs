@@ -8,9 +8,7 @@ use url::Url;
 use std::collections::{HashMap, BTreeMap, HashSet};
 use std::io::Write;
 use std::fs::File;
-use crate::Cli;
 use crate::util;
-use std::error::Error;
 use indicatif::{ProgressBar, ProgressStyle};
 use bio::io::fasta::Reader as FastaReader;
 
@@ -167,7 +165,7 @@ pub fn extract_haplotypes_coordinates_from_bam(
             }
         })
         .collect();
-    println!("filtered_bmap: {}", filtered_bmap.len());
+    // println!("filtered_bmap: {}", filtered_bmap.len());
 
     let records: Vec<fastq::Record> = filtered_bmap
         .iter()
@@ -232,23 +230,11 @@ pub fn process_bam_file(bam: &mut IndexedReader, chromosome: &str, start: usize,
     filtered_reads
 }
 
-pub fn process_fasta_file(reference_fa: &String, chromosome: &str, start:usize, end:usize, sampleid: &String) -> Vec<fastq::Record> {
-    
-    
-    info!("Opening FASTA file: {}", reference_fa);
-    
-    // Open FASTA file
-    let mut fasta_reader = FastaReader::from_file(&reference_fa)
-        .expect("Failed to open FASTA file");
-
+pub fn process_fasta_file(reference: &Vec<fastq::Record>, chromosome: &str, start:usize, end:usize, sampleid: &String) -> Vec<fastq::Record> {
     let mut reference_seqs = Vec::new();
-
-    for result in fasta_reader.records() {
-        let record = result.expect("Failed to read FASTA record");
+    for record in reference.iter() {
         let seq_id = record.id().to_string();
         let sequence = String::from_utf8_lossy(record.seq()).to_string();
-
-        
         // Check if this sequence matches the target chromosome
         if seq_id == chromosome {
             info!("Extracting region {}:{}-{} from chromosome {}", 
@@ -291,6 +277,7 @@ pub fn write_fasta_output(final_hap: HashMap<String, (String, Vec<String>, f64)>
         .with_context(|| format!("Failed to create output file: {}", output_path.display()))?;
     
     let mut index:i32 = 1;
+    let chars_per_line = 60;
 
     for (sequence, (cigar, read_names, allele_frequency)) in final_hap {
         // Use the first read name as the sequence ID, or create a hash-based ID
@@ -300,9 +287,23 @@ pub fn write_fasta_output(final_hap: HashMap<String, (String, Vec<String>, f64)>
             "unknown".to_string()   
         };
         writeln!(file, ">Haplotype {}\tLength{}\tCigar {}\tSupportReads {}\tAlleleFrequency {:.2}\t{}", index, sequence.len(), cigar, read_names.len(), allele_frequency, sequence_id)?;
-        writeln!(file, "{}", sequence)?;
+        // write the sequence in fasta format
+        let seq_len = sequence.len();
+        let full_lines = seq_len / chars_per_line;
+        for i in 0..full_lines {
+            let start = i * chars_per_line;
+            let end = start + chars_per_line;
+            writeln!(file, "{}", &sequence[start..end])?;
+        }
+        // Write any remaining characters that didn't make up a full line
+        if seq_len % chars_per_line != 0 {
+            writeln!(file, "{}", &sequence[full_lines * chars_per_line..])?;
+        }
+
         index += 1;
     }
+
+
     
     Ok(())
 }
@@ -333,7 +334,7 @@ pub fn collapse_haplotypes(reads: &Vec<fastq::Record>, reference: &fastq::Record
 
 
 
-pub fn start(bam: &mut IndexedReader, reference_fa: &String, chromosome: &str, start: usize, end: usize, sampleid: &String, min_reads: usize, frequency_min: f64, primary_only: bool, write_output:bool) -> AnyhowResult<HashMap<String, (String, Vec<String>, f64)>>  {
+pub fn start(bam: &mut IndexedReader, reference_fa: &Vec<fastq::Record>, chromosome: &str, start: usize, end: usize, sampleid: &String, min_reads: usize, frequency_min: f64, primary_only: bool, write_output:bool) -> AnyhowResult<HashMap<String, (String, Vec<String>, f64)>>  {
     let reads_list = process_bam_file( bam, chromosome, start, end, primary_only);  
     let reference = process_fasta_file( reference_fa, chromosome, start, end, sampleid);
     let reference = reference.first().unwrap().clone();

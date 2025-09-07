@@ -1,19 +1,16 @@
 
 use log::{info, warn};
 use anyhow::{Result as AnyhowResult, Context};
-use bio::io::fastq;
-use rust_htslib::faidx::Reader;
 use rust_htslib::bam::{self, IndexedReader, Read as BamRead, record::Aux};
 use std::path::{PathBuf};
-use url::Url;
 use std::collections::{HashMap, BTreeMap, HashSet};
 use std::io::Write;
 use std::fs::File;
 use crate::intervals;
 use crate::util;
-use crate::Cli;
 use std::error::Error;
 use indicatif::{ProgressBar, ProgressStyle};
+use bio::io::fastq;
 
 
 pub fn get_node_edge_info(locus: &String, windows: &Vec<(usize, usize)>, final_hap_list: &Vec<HashMap<String, (String,Vec<String>, f64)>>, min_reads: usize, frequency_min: f64) -> (HashMap<String, String>, HashMap<(String,String), String>) {
@@ -37,7 +34,7 @@ pub fn get_node_edge_info(locus: &String, windows: &Vec<(usize, usize)>, final_h
                     let overlapping_reads = util::find_overlapping_reads(read_vector, next_read_vector);
                     let overlap_ratio = overlapping_reads.len() as f64 / (read_vector_len as f64).min( next_read_vector_len as f64);
                     // println!("readset1: {}, readset2: {}, overlap_ratio: {}", read_vector.len(), next_read_vector.len(), overlap_ratio);
-                    if overlapping_reads.len() > 1 {
+                    if overlapping_reads.len() >= 1 {
                         edge_info.insert((haplotype_id.clone(), next_haplotype_id.clone()), format!("E\t{}\t{}\tOverlapRatio:{:.3}\tOverlappingReads:{}", 
                             read_vector_len, next_read_vector_len, overlap_ratio, overlapping_reads.join(",")));
                     }
@@ -91,6 +88,8 @@ pub fn write_gfa_output(
 
 
     }
+    node_output.sort();
+    link_output.sort();
 
     for s in node_output {
         writeln!(file, "{}", s)?;
@@ -102,41 +101,23 @@ pub fn write_gfa_output(
     Ok(())
 }
 
-// pub fn write_fasta_output_from_graph(node_info: &HashMap<String, String>, edge_info: &HashMap<(String, String), String>, output_filename: &PathBuf) -> std::result::Result<(), Box<dyn Error>> {
-//     let mut file = File::create(output_filename)?;
-//     // let mut haplotype_seq = Vec::new();
-//     for (haplotype_id, node_info) in node_info.iter() {
-//         let pos = haplotype_id.split("|").next().unwrap();
-//         let parts: Vec<&str> = node_info.split("\t").collect();
-//         if parts.len() >= 5 {
-//             let haplotype_seq = parts[1];
-//             let haplotype_cigar = parts[2];
-//             let read_num = parts[3];
-//             let allele_frequency = parts[4];
-//         }
-//     }
-//     Ok(())
-// }
 
-pub fn start(cli: &Cli, bam: &mut IndexedReader, windows: &Vec<(usize, usize)>) -> AnyhowResult<()> {
+pub fn start(bam: &mut IndexedReader, windows: &Vec<(usize, usize)>, locus: &String, reference_fa: &Vec<fastq::Record>, sampleid: &String, min_reads: usize, frequency_min: f64, primary_only: bool, output_prefix: &String) -> AnyhowResult<()> {
 
-    let (chromosome, start, end) = util::split_locus(cli.locus.clone());
+    let (chromosome, start, end) = util::split_locus(locus.clone());
     let mut final_hap_list = Vec::new(); 
     for (i, window) in windows.iter().enumerate() {
         let (start, end) = window;
-        let haplotype_info = intervals::start(bam, &cli.reference_fa, &chromosome, *start, *end, &cli.sampleid, cli.min_reads as usize, cli.frequency_min, cli.primary_only, false).unwrap();
+        let haplotype_info = intervals::start(bam, &reference_fa, &chromosome, *start, *end, &sampleid, min_reads as usize, frequency_min, primary_only, false).unwrap();
         final_hap_list.push(haplotype_info);
     }
 
-    let (node_info, edge_info) = get_node_edge_info(&cli.locus, &windows, &final_hap_list, cli.min_reads as usize, cli.frequency_min);
+    let (node_info, edge_info) = get_node_edge_info(&locus, &windows, &final_hap_list, min_reads as usize, frequency_min);
     // let gfa_output = PathBuf::from(format!("{}/{}_{}_{}_{}_haplograph.gfa", cli.output, cli.sampleid, chromosome, start, end));
-    if cli.default_file_format == "gfa" {   
-        let gfa_output = PathBuf::from(format!("{}.gfa", cli.output_prefix));
-        write_gfa_output(&node_info, &edge_info, &gfa_output);
-    } else if cli.default_file_format == "fasta" {
-        let fasta_output = PathBuf::from(format!("{}.fasta", cli.output_prefix));
-        write_fasta_output_from_graph(&node_info, &edge_info, &fasta_output);
-    }
+ 
+    let gfa_output = PathBuf::from(format!("{}.gfa", output_prefix));
+    write_gfa_output(&node_info, &edge_info, &gfa_output);
+
     info!("Graph reconstruction completed");
     Ok(())
 }
