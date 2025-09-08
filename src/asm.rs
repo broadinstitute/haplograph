@@ -9,11 +9,11 @@ use std::io::{BufRead, BufReader};
 use flate2::read::GzDecoder;
 use serde_json::Value;
 use std::error::Error;
-struct NodeInfo {
-    seq: String,
-    cigar: String,
-    support_reads: String,
-    allele_frequency: String,
+pub struct NodeInfo {
+    pub seq: String,
+    pub cigar: String,
+    pub support_reads: String,
+    pub allele_frequency: String,
 }
 
 pub fn load_graph(filename: &PathBuf) -> AnyhowResult< (HashMap<String, NodeInfo>,  HashMap<String, String>) > {

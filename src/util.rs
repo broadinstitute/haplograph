@@ -110,7 +110,7 @@ pub fn open_bam_file(alignment_bam: &String) -> IndexedReader {
     bam
 }
 
-pub fn get_chromosome_ref_seq(reference_fa: &String, chromosome: &str, sampleid: &String) -> Vec<fastq::Record> {
+pub fn get_chromosome_ref_seq(reference_fa: &String, chromosome: &str) -> Vec<fastq::Record> {
     
     
     info!("Opening FASTA file: {}", reference_fa);
@@ -146,6 +146,36 @@ pub fn get_chromosome_ref_seq(reference_fa: &String, chromosome: &str, sampleid:
     
     if reference_seqs.is_empty() {
         warn!("No matching chromosome '{}' found in FASTA file", chromosome);
+    }
+    
+    reference_seqs
+}
+
+pub fn get_all_ref_seq(reference_fa: &String) -> Vec<fastq::Record> {
+    
+    info!("Opening FASTA file: {}", reference_fa);
+    
+    // Open FASTA file
+    let mut fasta_reader = FastaReader::from_file(&reference_fa)
+        .expect("Failed to open FASTA file");
+
+    let mut reference_seqs = Vec::new();
+
+    for result in fasta_reader.records() {
+        let record = result.expect("Failed to read FASTA record");
+        let seq_id = record.id().to_string();
+        let sequence = String::from_utf8_lossy(record.seq()).to_string();
+
+        let fastq_record = fastq::Record::with_attrs(
+            &seq_id,
+            None,
+            sequence.as_bytes(),
+            vec![30; sequence.len()].as_slice() // Default quality score
+        );
+        reference_seqs.push(fastq_record);
+        info!("Extracted {} reference sequences", reference_seqs.len());
+            
+        
     }
     
     reference_seqs

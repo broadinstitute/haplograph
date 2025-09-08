@@ -10,7 +10,7 @@ use std::io::Write;
 use std::fs::File;
 use crate::util;
 use indicatif::{ProgressBar, ProgressStyle};
-use bio::io::fasta::Reader as FastaReader;
+
 
 // extract haplotypes from bam file
 

@@ -8,6 +8,7 @@ mod hap;
 mod intervals;
 mod graph;
 mod asm;
+mod call;
 
 #[derive(Parser)]
 #[command(name = "haplograph")]
@@ -54,10 +55,6 @@ enum Commands {
        #[arg(short, long, default_value = "2")]
        min_reads: u8,
    
-       /// Minimal mapping quality
-       #[arg(short, long, default_value = "10")]
-       quality: u8,
-   
        ///window size
        #[arg(short, long, default_value = "1000")]
        window_size: usize,
@@ -85,6 +82,34 @@ enum Commands {
         /// Output prefix
         #[arg(short, long, default_value = "haplograph_asm")]
         output_prefix: PathBuf,
+
+        /// Verbose output
+       #[arg(short, long)]
+       verbose: bool,
+    },
+
+    /// Call variants from VCF file
+    #[clap(arg_required_else_help = true)]
+    Call {
+        /// Input VCF file
+        #[arg(short, long)]
+        gfa_file: PathBuf,
+
+        /// Output prefix
+        #[arg(short, long, default_value = "haplograph_call")]
+        output_prefix: PathBuf,
+
+        /// Sample ID
+        #[arg(short, long)]
+        sampleid: String,
+
+        /// Reference FASTA file
+        #[arg(short, long)]
+        reference_fa: String,
+
+        /// Verbose output
+       #[arg(short, long)]
+       verbose: bool,
     },
  
 }
@@ -96,29 +121,27 @@ fn main() -> Result<()> {
     let args = Cli::parse();
     match args.command {
         Commands::Haplotype {
-            /// Input BAM file
+            // Input BAM file
             alignment_bam,
-            /// Input FASTA file
+            // Input FASTA file
             reference_fa,
-            /// Sample ID
+            // Sample ID
             sampleid,
-            /// Output directory
+            // Output directory
             output_prefix,
-            /// Chromosome name
+            // Chromosome name
             locus,
-            /// Limited size of the region
+            // Limited size of the region
             frequency_min,
-            /// Minimal Supported Reads
+            // Minimal Supported Reads
             min_reads,
-            /// Minimal mapping quality
-            quality,
-            ///window size
+            //window size
             window_size,
-            ///if only primary reads are used
+            //if only primary reads are used
             primary_only, 
-            ///output file format
+            //output file format
             default_file_format, 
-            /// Verbose output
+            // Verbose output
             verbose,
         } => {
                 // Validate format
@@ -126,7 +149,7 @@ fn main() -> Result<()> {
                     anyhow::bail!("Format must be either 'fasta' or 'gfa', got: {}", default_file_format);
                 }
 
-                    // Initialize logging
+                // Initialize logging
                 if verbose {
                     std::env::set_var("RUST_LOG", "debug");
                 } else {
@@ -145,7 +168,7 @@ fn main() -> Result<()> {
                 info!("Primary only: {}", primary_only);
 
                 let mut bam = util::open_bam_file(&alignment_bam);
-                let reference_seqs = util::get_chromosome_ref_seq(&reference_fa, &chromosome, &sampleid);
+                let reference_seqs = util::get_chromosome_ref_seq(&reference_fa, &chromosome);
                 // // Extract read sequences from BAM file using utility function
                 let mut windows = Vec::new();
                 for i in (start..end).step_by(window_size as usize) {
@@ -161,12 +184,38 @@ fn main() -> Result<()> {
         
                 }
             }
-        Commands::Assemble {
-            graph_gfa,
-            output_prefix,
-        } => {
-            asm::start(&graph_gfa, &output_prefix)?;
-        }
+            Commands::Assemble {
+                graph_gfa,
+                output_prefix,
+                verbose,
+            } => {
+                // Initialize logging
+                if verbose {
+                    std::env::set_var("RUST_LOG", "debug");
+                } else {
+                    std::env::set_var("RUST_LOG", "info");
+                }
+                env_logger::init();
+                asm::start(&graph_gfa, &output_prefix)?;
+            }
+            Commands::Call {
+                gfa_file,
+                output_prefix,
+                sampleid,
+                reference_fa,
+                verbose,
+            } => {
+                // Initialize logging
+                if verbose {
+                    std::env::set_var("RUST_LOG", "debug");
+                } else {
+                    std::env::set_var("RUST_LOG", "info");
+                }
+                env_logger::init();
+
+                let reference_seqs = util::get_all_ref_seq(&reference_fa);
+                call::start(&gfa_file, &reference_seqs, &sampleid, &output_prefix)?;
+            }
 
     }
      
