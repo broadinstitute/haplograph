@@ -214,17 +214,24 @@ pub fn process_bam_file(bam: &mut IndexedReader, chromosome: &str, start: usize,
     for r in reads.iter() {
         let r_name = r.id().to_string().split('|').next().unwrap().to_string();
         let r_seq = read_sequence_dictionary.get(&r_name).unwrap();
-        let r_start = read_coordinates.get(&r_name).unwrap().0;
-        let r_end = read_coordinates.get(&r_name).unwrap().1 + 1;
-        let reconstructed_seq = String::from_utf8_lossy(r.seq()).to_string();
-        // println!("r_seq: {}, reconstructed_seq: {}, readname: {}", r_seq.contains(reconstructed_seq.as_str()), reconstructed_seq, r_name );
-        let r_sub_seq = r_seq[r_start as usize..r_end as usize].to_string();
-        // sanity check if the reconstructed sequence is the same as the read sequence
-        if r_sub_seq == reconstructed_seq{
-            filtered_reads.push(r.clone())
+        if read_coordinates.contains_key(&r_name){  
+            let r_start = read_coordinates.get(&r_name).unwrap().0;
+            let r_end = read_coordinates.get(&r_name).unwrap().1 + 1;
+            let reconstructed_seq = String::from_utf8_lossy(r.seq()).to_string();
+            // println!("r_seq: {}, reconstructed_seq: {}, readname: {}", r_seq.contains(reconstructed_seq.as_str()), reconstructed_seq, r_name );
+            let r_sub_seq = r_seq[r_start as usize..r_end as usize].to_string();
+            // sanity check if the reconstructed sequence is the same as the read sequence
+            if r_sub_seq == reconstructed_seq{
+                filtered_reads.push(r.clone())
+            }else{
+                println!("r_seq: {}, reconstructed_seq: {}, readname: {}", r_sub_seq, reconstructed_seq, r_name );
+            }
         }else{
-            println!("r_seq: {}, reconstructed_seq: {}, readname: {}", r_sub_seq, reconstructed_seq, r_name );
+            // large deletion in the whole region
+            assert!(r.seq().len() < 1);
+            filtered_reads.push(r.clone())
         }
+        
     }
     
     filtered_reads

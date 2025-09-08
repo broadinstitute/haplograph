@@ -147,23 +147,18 @@ fn main() -> Result<()> {
                 let mut bam = util::open_bam_file(&alignment_bam);
                 let reference_seqs = util::get_chromosome_ref_seq(&reference_fa, &chromosome, &sampleid);
                 // // Extract read sequences from BAM file using utility function
-                if window_size  > end  - start  {
-                    let final_hap = intervals::start(&mut bam, &reference_seqs, &chromosome, start, end, &sampleid, min_reads as usize, frequency_min, primary_only, true)?;
-            
-                } else {
-                    let mut windows = Vec::new();
-                    for i in (start..end).step_by(window_size as usize) {
-                        let end_pos = std::cmp::min(i + window_size , end);
-                        windows.push((i, end_pos));
-                    }
-            
-                    if default_file_format == "fasta" {
-                        hap::start(&mut bam, &chromosome, &windows, locus, &reference_seqs, &sampleid, min_reads as usize, frequency_min, primary_only, &output_prefix)?;
-            
-                    } else if default_file_format == "gfa" {
-                        graph::start( &mut bam, &windows, &locus, &reference_seqs, &sampleid, min_reads as usize, frequency_min, primary_only, &output_prefix)?;
-            
-                    }
+                let mut windows = Vec::new();
+                for i in (start..end).step_by(window_size as usize) {
+                    let end_pos = std::cmp::min(i + window_size , end);
+                    windows.push((i, end_pos));
+                }
+        
+                if default_file_format == "fasta" {
+                    hap::start(&mut bam, &chromosome, &windows, locus, &reference_seqs, &sampleid, min_reads as usize, frequency_min, primary_only, &output_prefix)?;
+        
+                } else if default_file_format == "gfa" {
+                    graph::start( &mut bam, &windows, &locus, &reference_seqs, &sampleid, min_reads as usize, frequency_min, primary_only, &output_prefix)?;
+        
                 }
             }
         Commands::Assemble {
