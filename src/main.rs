@@ -9,6 +9,7 @@ mod intervals;
 mod graph;
 mod asm;
 mod call;
+mod eval;
 
 #[derive(Parser)]
 #[command(name = "haplograph")]

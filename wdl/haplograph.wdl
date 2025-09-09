@@ -21,7 +21,7 @@ workflow Haplograph {
 
 
     output {
-        Array[File] fasta = haplograph_asm.asm_file
+        File fasta = haplograph_asm.asm_file
     }
 }
 
@@ -32,15 +32,26 @@ task haplograph_asm {
         File reference_fa
         String prefix
         String locus
+        Int windowsize = 1000
+        String extra_arg = ""
     }
 
     command <<<
         set -euxo pipefail
-        /haplograph/target/release/haplograph -a ~{bam} -r ~{reference_fa} -s ~{prefix} -l ~{locus} 
+        /haplograph/target/release/haplograph haplotype -a ~{bam} \
+                                                        -r ~{reference_fa} \
+                                                        -s ~{prefix} \
+                                                        -o ~{prefix} \
+                                                        -l ~{locus} \
+                                                        -w ~{windowsize} \
+                                                        -d gfa \
+                                                        ~{extra_arg}
+        /haplograph/target/release/haplograph assemble -g ~{prefix}.gfa -o ~{prefix}.fasta
+        
     >>>
 
     output {
-        Array[File] asm_file = glob("*.fasta")
+        File asm_file = "~{prefix}.fasta"
         
     }
 
@@ -48,6 +59,6 @@ task haplograph_asm {
         docker: "hangsuunc/haplograph:v1"
         memory: "4 GB"
         cpu: 1
-        disks: "local-disk 300 SSD"
+        disks: "local-disk 100 SSD"
     }
 }
