@@ -56,7 +56,7 @@ task haplograph_asm {
     }
 
     runtime {
-        docker: "hangsuunc/haplograph:v1"
+        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograp:v1"
         memory: "4 GB"
         cpu: 1
         disks: "local-disk 100 SSD"

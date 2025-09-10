@@ -1,4 +1,4 @@
-FROM rust:1.84.0
+FROM rust:trixie
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update
 RUN apt-get install -y --no-install-recommends git ssh build-essential make cmake zlib1g-dev vim wget unzip libclang-dev\

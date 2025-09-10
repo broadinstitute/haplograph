@@ -4,7 +4,6 @@ use bio::io::fastq;
 use rust_htslib::faidx::Reader;
 use rust_htslib::bam::{self, IndexedReader, Read as BamRead, record::Aux};
 use std::path::{PathBuf};
-use url::Url;
 use std::collections::{HashMap, BTreeMap, HashSet};
 use std::io::Write;
 use std::fs::File;
@@ -188,7 +187,6 @@ pub fn extract_fasta_seqs(
 ) -> AnyhowResult<Vec<fastq::Record>> {
     let id = format!("{chr}:{start}-{stop}|{name}|{basename}");
     let seq = fasta.fetch_seq_string(chr, usize::try_from(*start)?, usize::try_from(*stop - 1).unwrap()).unwrap();
-
     if !seq.is_empty() {
         let records = vec![fastq::Record::with_attrs(id.as_str(), None, seq.as_bytes(), vec![30; seq.len()].as_slice())];
 
