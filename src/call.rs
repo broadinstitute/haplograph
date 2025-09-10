@@ -314,31 +314,6 @@ fn write_vcf(
     Ok(())
 }
 
-// fn create_tabix_index(vcf_gz_path: &PathBuf) -> AnyhowResult<()> {
-    
-    
-//     // Use bcftools command line tool to create proper index
-//     let output_compression = Command::new("bcftools view")
-//     .arg(vcf_gz_path.with_extension("indexed.vcf.gz"))
-//     .arg("-O z")
-//     .arg("-o")
-//     .output()?;
-
-//     let output_index = Command::new("bcftools index")
-//         .arg("-t")
-//         .arg(vcf_gz_path.with_extension("indexed.vcf.gz"))
-//         .output()?;
-    
-//     if !output_compression.status.success() || !output_index.status.success() {
-//         let error_msg = String::from_utf8_lossy(&output_compression.stderr);
-//         warn!("Bcftools compression failed: {}", error_msg);
-//         let error_msg_index = String::from_utf8_lossy(&output_index.stderr);
-//         warn!("Bcftools indexing failed: {}", error_msg_index);
-//     } else {
-//         info!("Created index: {}", vcf_gz_path.display());
-//     }
-//     Ok(())
-// }
 
 pub fn start(graph_filename: &PathBuf, reference_seqs: &Vec<fastq::Record>, sampleid: &String, output_prefix: &PathBuf) -> AnyhowResult<()> {
     let (node_info, _) = asm::load_graph(graph_filename).unwrap();

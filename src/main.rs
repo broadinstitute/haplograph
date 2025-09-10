@@ -112,6 +112,29 @@ enum Commands {
        #[arg(short, long)]
        verbose: bool,
     },
+    /// Evaluate the accuracy of the haplotype calling
+    #[clap(arg_required_else_help = true)]
+    Evaluate {
+        /// Input FASTA file
+        #[arg(short, long)]
+        truth_fasta: PathBuf,
+
+        /// Input FASTA file
+        #[arg(short, long)]
+        query_fasta: PathBuf,
+
+        /// Haplotype number
+        #[arg(short, long, default_value = "2")]
+        seq_number: usize,
+
+        /// Output prefix
+        #[arg(short, long, default_value = "haplograph_eval")]
+        output_prefix: PathBuf,
+
+        /// Verbose output
+        #[arg(short, long)]
+        verbose: bool,
+    },
  
 }
 
@@ -185,39 +208,55 @@ fn main() -> Result<()> {
         
                 }
             }
-            Commands::Assemble {
-                graph_gfa,
-                output_prefix,
-                verbose,
-            } => {
-                // Initialize logging
-                if verbose {
-                    std::env::set_var("RUST_LOG", "debug");
-                } else {
-                    std::env::set_var("RUST_LOG", "info");
-                }
-                env_logger::init();
-                asm::start(&graph_gfa, &output_prefix)?;
+        Commands::Assemble {
+            graph_gfa,
+            output_prefix,
+            verbose,
+        } => {
+            // Initialize logging
+            if verbose {
+                std::env::set_var("RUST_LOG", "debug");
+            } else {
+                std::env::set_var("RUST_LOG", "info");
             }
-            Commands::Call {
-                gfa_file,
-                output_prefix,
-                sampleid,
-                reference_fa,
-                verbose,
-            } => {
-                // Initialize logging
-                if verbose {
-                    std::env::set_var("RUST_LOG", "debug");
-                } else {
-                    std::env::set_var("RUST_LOG", "info");
-                }
-                env_logger::init();
-
-                let reference_seqs = util::get_all_ref_seq(&reference_fa);
-                call::start(&gfa_file, &reference_seqs, &sampleid, &output_prefix)?;
+            env_logger::init();
+            asm::start(&graph_gfa, &output_prefix)?;
+        }
+        Commands::Call {
+            gfa_file,
+            output_prefix,
+            sampleid,
+            reference_fa,
+            verbose,
+        } => {
+            // Initialize logging
+            if verbose {
+                std::env::set_var("RUST_LOG", "debug");
+            } else {
+                std::env::set_var("RUST_LOG", "info");
             }
+            env_logger::init();
 
+            let reference_seqs = util::get_all_ref_seq(&reference_fa);
+            call::start(&gfa_file, &reference_seqs, &sampleid, &output_prefix)?;
+        }
+        Commands::Evaluate {
+            truth_fasta,
+            query_fasta,
+            seq_number,
+            output_prefix,
+            verbose,
+        } => {
+
+            // Initialize logging
+            if verbose {
+                std::env::set_var("RUST_LOG", "debug");
+            } else {
+                std::env::set_var("RUST_LOG", "info");
+            }
+            env_logger::init();
+            eval::start(&truth_fasta, &query_fasta, seq_number, &output_prefix)?;
+        }
     }
      
     Ok(())
