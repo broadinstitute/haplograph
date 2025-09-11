@@ -21,6 +21,7 @@ workflow Haplograph {
 
 
     output {
+        File gfa = haplograph_asm.graph_file
         File fasta = haplograph_asm.asm_file
     }
 }
@@ -51,6 +52,7 @@ task haplograph_asm {
     >>>
 
     output {
+        File graph_file = "~{prefix}.gfa"
         File asm_file = "~{prefix}.fasta"
         
     }

@@ -9,6 +9,7 @@ use std::io::{BufRead, BufReader};
 use flate2::read::GzDecoder;
 use serde_json::Value;
 use std::error::Error;
+use crate::eval;
 pub struct NodeInfo {
     pub seq: String,
     pub cigar: String,
@@ -67,7 +68,7 @@ pub fn find_source_node(edge_info: &HashMap<String, String>) -> Vec<String> {
     start_nodes.into_iter().map(|s| s.clone()).collect()
 }
 
-pub fn traverse_graph(node_info: &HashMap<String, NodeInfo>, edge_info: &HashMap<String, String>) -> std::result::Result<(HashMap<Vec<String>, String>), Box<dyn Error>> {
+pub fn traverse_graph(node_info: &HashMap<String, NodeInfo>, edge_info: &HashMap<String, String>) -> std::result::Result<(HashMap<Vec<String>, (String, usize)>), Box<dyn Error>> {
     let source_nodes = find_source_node(edge_info);
     // DFS to traverse the graph
     let mut all_paths = Vec::new();
@@ -86,12 +87,16 @@ pub fn traverse_graph(node_info: &HashMap<String, NodeInfo>, edge_info: &HashMap
     let mut all_sequences = HashMap::new();
     for path in all_paths {
         let mut sequence = String::new();
+        let mut total_supported_reads = 0;
         for node in path.iter() {
             let node_info_dict = node_info.get(node).unwrap();
+            let supported_reads = node_info_dict.support_reads.clone();
+            let supported_reads = supported_reads.trim_matches('"').parse::<usize>().unwrap();
             let haplotype_seq = node_info_dict.seq.clone();
             sequence += &haplotype_seq;
+            total_supported_reads += supported_reads;
         }
-        all_sequences.insert(path.clone(), sequence);
+        all_sequences.insert(path.clone(), (sequence, total_supported_reads));
             
     }
 
@@ -100,11 +105,13 @@ pub fn traverse_graph(node_info: &HashMap<String, NodeInfo>, edge_info: &HashMap
 
 }
 
-pub fn write_graph_path_fasta(all_sequences: &HashMap<Vec<String>, String>, output_filename: &PathBuf) -> std::result::Result<(), Box<dyn Error>> {
+pub fn write_graph_path_fasta(all_sequences: &HashMap<Vec<String>, (String, usize)>, output_filename: &PathBuf) -> std::result::Result<(), Box<dyn Error>> {
     let mut file = File::create(output_filename)?;
     let chars_per_line = 60;
-    for (path, sequence) in all_sequences.iter() {
-        writeln!(file, ">{}", path.join("|"))?;
+    for (index,(path, (sequence, supported_reads))) in all_sequences.iter().enumerate() {
+        let chromosome = path[0].split(".").collect::<Vec<_>>()[1].split(":").collect::<Vec<_>>()[0];
+        let (start, end) = eval::find_alignment_intervals(path.iter().map(|x| x.as_str()).collect::<Vec<_>>())?;
+        writeln!(file, ">{}:{}-{}.{}\tSupportedReads:{}\t{}", chromosome, start, end, index, supported_reads, path.join("|"))?;
         // write the sequence in fasta format
         let seq_len = sequence.len();
         let full_lines = seq_len / chars_per_line;
@@ -121,9 +128,18 @@ pub fn write_graph_path_fasta(all_sequences: &HashMap<Vec<String>, String>, outp
     Ok(())
 }
 
-pub fn start(graph_filename: &PathBuf, output_prefix: &PathBuf) -> AnyhowResult<()> {
+pub fn start(graph_filename: &PathBuf, germline_only:bool, haplotype_number: usize, output_prefix: &PathBuf) -> AnyhowResult<()> {
     let (node_info, edge_info) = load_graph(graph_filename).unwrap();
     let all_sequences = traverse_graph(&node_info, &edge_info).unwrap();
+    let all_sequences = if germline_only {
+        // sort all_sequences by the supported_reads
+        let mut sorted: Vec<_> = all_sequences.iter().collect();
+        sorted.sort_by(|a, b| b.1.1.cmp(&a.1.1));
+        sorted.into_iter().take(haplotype_number).map(|(k, v)| (k.clone(), v.clone())).collect()
+    } else {
+        all_sequences
+    };
+
     write_graph_path_fasta(&all_sequences, output_prefix);
     Ok(())
 }

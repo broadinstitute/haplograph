@@ -12,7 +12,6 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 
 // extract haplotypes from bam file
-
 pub fn extract_haplotypes_coordinates_from_bam(
     bam: &mut IndexedReader,
     chr: &str,

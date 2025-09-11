@@ -84,6 +84,14 @@ enum Commands {
         #[arg(short, long, default_value = "haplograph_asm")]
         output_prefix: PathBuf,
 
+        /// Germline only, default to false
+        #[arg(short, long, default_value = "false")]
+        major_haplotype_only: bool,
+
+        /// Haplotype number
+        #[arg(short, long, default_value = "2")]
+        number_of_haplotypes: usize,
+
         /// Verbose output
        #[arg(short, long)]
        verbose: bool,
@@ -211,6 +219,8 @@ fn main() -> Result<()> {
         Commands::Assemble {
             graph_gfa,
             output_prefix,
+            major_haplotype_only,
+            number_of_haplotypes,
             verbose,
         } => {
             // Initialize logging
@@ -220,7 +230,7 @@ fn main() -> Result<()> {
                 std::env::set_var("RUST_LOG", "info");
             }
             env_logger::init();
-            asm::start(&graph_gfa, &output_prefix)?;
+            asm::start(&graph_gfa, major_haplotype_only, number_of_haplotypes, &output_prefix)?;
         }
         Commands::Call {
             gfa_file,
