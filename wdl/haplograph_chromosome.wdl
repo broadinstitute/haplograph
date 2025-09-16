@@ -10,7 +10,7 @@ workflow Haplograph {
 
 
     }
-    call haplograph_asm {
+    call Haplotypes {
         input:
             bam = whole_genome_bam,
             bai = whole_genome_bai,
@@ -21,12 +21,11 @@ workflow Haplograph {
 
 
     output {
-        File gfa = haplograph_asm.graph_file
-        File fasta = haplograph_asm.asm_file
+        File haplotype_num = Haplotypes.output_file
     }
 }
 
-task haplograph_asm {
+task Haplotypes {
     input {
         File bam
         File bai

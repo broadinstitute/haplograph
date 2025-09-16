@@ -61,7 +61,9 @@ pub fn calculate_qv_score(truth_seqs: Record, query_seqs: Record) -> AnyhowResul
                                             .with_seq(truth_seq)
                                             .expect("Unable to build index");
     let hits = aligner.map(query_seq, true, true, None, None, Some(b"Query Name"));
-    assert_eq!(hits.clone().unwrap().len(), 1);
+    if hits.clone().unwrap().len() != 1 {
+        return Ok(-1.0);
+    }
     let editdistance = hits.clone().unwrap()[0].clone().alignment.clone().unwrap().nm as f64;
     // let block_length = hits.clone().unwrap()[0].clone().block_len;
     let match_length = hits.clone().unwrap()[0].clone().match_len as f64;
