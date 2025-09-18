@@ -4,11 +4,10 @@ workflow Haplograph_eval {
     input {
         File whole_genome_bam
         File whole_genome_bai
-        File truth_asm_1
-        File truth_annotation_1
-        File truth_asm_2
-        File truth_annotation_2
-        String gene_name
+        File truth_asm_1_bam
+        File truth_asm_1_bai
+        File truth_asm_2_bam
+        File truth_asm_2_bai
         File reference_fa
         String prefix
         String locus
@@ -23,20 +22,24 @@ workflow Haplograph_eval {
             locus = locus
     }
 
-    call get_truth_haplotypes_from_annotation {
+    call get_truth_haplotypes {
         input:
-            truth_asm_1 = truth_asm_1,
-            truth_asm_annotation_1 = truth_annotation_1,
-            truth_asm_2 = truth_asm_2,
-            truth_asm_annotation_2 = truth_annotation_2,
+            truth_hap1_bam = truth_asm_1_bam,
+            truth_hap1_bai = truth_asm_1_bai,
+            truth_hap2_bam = truth_asm_2_bam,
+            truth_hap2_bai = truth_asm_2_bai,
             reference_fa = reference_fa,
-            gene_name = gene_name,
-            prefix = prefix
+            sampleid = prefix,
+            locus = locus,
+            prefix = prefix,
+            extra_arg = "",
+            windowsize = 1000,
+
     }
 
     call haplograph_eval {
         input:
-            truth_fasta = get_truth_haplotypes_from_annotation.fasta_file,
+            truth_fasta = get_truth_haplotypes.fasta_file,
             query_fasta = haplograph_asm.asm_file,
             seq_number = 2,
             prefix = prefix + locus
@@ -134,11 +137,10 @@ task get_truth_haplotypes_from_annotation {
 
     command <<<
         set -euxo pipefail
-        gunzip -c ~{truth_asm_1} > truth.hap1.fasta
-        gunzip -c ~{truth_asm_2} > truth.hap2.fasta
-        python - --truth_fasta_1 truth.hap1.fasta \
+
+        python - --truth_fasta_1 ~{truth_asm_1} \
                  --truth_annotation_1 ~{truth_asm_annotation_1} \
-                 --truth_fasta_2 truth.hap2.fasta \
+                 --truth_fasta_2 ~{truth_asm_2} \
                  --truth_annotation_2 ~{truth_asm_annotation_2} \
                  --gene_name ~{gene_name} \
                  --output_filename ~{prefix}.~{gene_name}.truth.fasta \
@@ -267,8 +269,10 @@ task get_truth_haplotypes {
                                                 -w ~{windowsize} \
                                                 -m 0 \
                                                 -f 0 \
-                                                -d fasta \
+                                                -d gfa \
                                                 ~{extra_arg}
+
+        /haplograph/target/release/haplograph assemble -g ~{prefix}.truth1.gfa -o ~{prefix}.truth1.fasta
 
         /haplograph/target/release/haplograph haplotype -a ~{truth_hap2_bam} \
                                                 -r ~{reference_fa} \
@@ -278,9 +282,10 @@ task get_truth_haplotypes {
                                                 -w ~{windowsize} \
                                                 -m 0 \
                                                 -f 0 \
-                                                -d fasta \
+                                                -d gfa \
                                                 ~{extra_arg}
-        cat *.fasta > ~{prefix}.truth.fasta
+        /haplograph/target/release/haplograph assemble -g ~{prefix}.truth2.gfa -o ~{prefix}.truth2.fasta
+        cat ~{prefix}.truth1.fasta ~{prefix}.truth2.fasta > ~{prefix}.truth.fasta
         
     >>>
 
