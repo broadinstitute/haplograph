@@ -1,8 +1,11 @@
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::fs::File;
+use std::io::{BufRead, BufReader, Write};
 use url::Url;
 use rust_htslib::bam::{self, IndexedReader, Read as BamRead, record::Aux};
 use log::{info, warn};
-use anyhow::{Result as AnyhowResult};
+use anyhow::{Result as AnyhowResult, Context};
 use bio::alignment::pairwise::*;
 use bio::alignment::AlignmentOperation;
 use bio::io::fasta::Reader as FastaReader;

@@ -1,18 +1,13 @@
-use log::{info, warn};
+
+use log::info;
 use anyhow::{Result as AnyhowResult, Context};
 use bio::io::fastq;
-use rust_htslib::bam::{self, IndexedReader, Read as BamRead, record::Aux};
-use std::path::{PathBuf};
-use std::collections::{HashMap, BTreeMap, HashSet};
-use std::fs::File;
+use std::path::PathBuf;
+use std::collections::HashMap;
 use crate::util;
 use crate::asm;
-use rust_htslib::bcf::{self, Reader as BcfReader, Writer as BcfWriter, index as BcfIndex};
-use flate2::write::GzEncoder;
-use flate2::Compression;
+use rust_htslib::bcf::{self, index as BcfIndex, record::GenotypeAllele};
 
-use std::io::{Read, Write};
-use std::process::Command;
 
 
 
@@ -71,7 +66,7 @@ pub fn get_variants_from_cigar(
                     let alt_allele = &alt_seq[alt_pos + i..alt_pos + i + 1];
                     variants.push(Variant {
                         chromosome: ref_name.to_string(),
-                        pos: pos,
+                        pos: pos + 1,
                         ref_allele: ref_allele.to_string(),
                         alt_allele: alt_allele.to_string(),
                         variant_type: "SNP".to_string(),
@@ -261,29 +256,27 @@ fn write_vcf(
     output_file: &PathBuf,
     sample_id: &str,
     reference_seqs:&Vec<fastq::Record>,
-) -> std::io::Result<()> {
-    // let mut file = File::create(Path::new(output_file))?;
-   // Create compressed VCF file
-   let compressed_filename = output_file.with_extension("vcf.gz");
-   let compressed_file = File::create(&compressed_filename)?;
-   let mut gz_encoder = GzEncoder::new(compressed_file, Compression::default());
-//    gz_encoder.write_all(vcf_content.as_bytes())?;
-//    gz_encoder.finish()?;
+) -> AnyhowResult<()> {
 
     // Write VCF header
-    gz_encoder.write_all(b"##fileformat=VCFv4.2\n")?;
-    
+    // 1. Create a VCF header
+    let mut header = bcf::Header::new();
     for record in reference_seqs.iter() {
         let referencename = record.id().to_string();
-        let referencelength = record.seq().len();
-        gz_encoder.write_all(format!("##contig=<ID={},length={}>\n", referencename, referencelength).as_bytes())?;
+        let referencelength = record.seq().len() as u64;
+        header.push_record(format!("##contig=<ID={},length={}>\n", referencename, referencelength).as_bytes());
     }
-    
-    gz_encoder.write_all(b"##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Read Depth\">\n")?;
-    gz_encoder.write_all(b"##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n")?;
-    gz_encoder.write_all(b"##FORMAT=<ID=AD,Number=1,Type=Integer,Description=\"Allele Depth\">\n")?;
-    gz_encoder.write_all(b"##FORMAT=<ID=VAF,Number=1,Type=Float,Description=\"Variant Allele Frequency\">\n")?;
-    gz_encoder.write_all(format!("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t{}\n", sample_id).as_bytes())?;
+
+    header.push_record(format!("##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Read Depth\">\n").as_bytes());
+    header.push_record(format!("##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n").as_bytes());
+    header.push_record(format!("##FORMAT=<ID=AD,Number=1,Type=Integer,Description=\"Allele Depth\">\n").as_bytes());
+    header.push_record(format!("##FORMAT=<ID=VAF,Number=1,Type=Float,Description=\"Variant Allele Frequency\">\n").as_bytes());
+    header.push_sample(sample_id.as_bytes());
+
+    // Write VCF
+    // 2. Open a compressed VCF writer
+    // Create a BCF writer for the compressed VCF.
+    let mut writer = bcf::Writer::from_path(output_file, &header, true, bcf::Format::Vcf).expect("Failed to create BCF writer");
 
     // Sort variants by chromosome and position
     let mut sorted_variants = variants.to_vec();
@@ -301,19 +294,84 @@ fn write_vcf(
             .then(a.alt_allele.cmp(&b.alt_allele))
     });
 
-    // Write variant records
-    for variant in sorted_variants {
-        gz_encoder.write_all(format!("{}\n", format_vcf_record(&variant, coverage.clone())).as_bytes())?;
+    // Merge multi-allelic variants
+    let mut records_by_pos = HashMap::new();
+    for var in sorted_variants {
+        let chrom = var.chromosome.clone();
+        let pos = var.pos.clone();
+        let ref_allele = var.ref_allele.clone();
+        let key = (chrom, pos, ref_allele);
+
+        records_by_pos.entry(key)
+            .or_insert_with(Vec::new)
+            .push(var.clone());
     }
-    gz_encoder.finish()?;
+    
+    // vcf_records
+    for (key, var_list) in records_by_pos.iter() {
+        let variant_chromosome = key.0.clone();
+        let variant_pos = key.1.clone();
+        let variant_ref_allele = key.2.clone();
+        let variant_alt_allele = var_list.iter().map(|v| v.alt_allele.clone()).collect::<Vec<String>>();
+        let read_depth = coverage.get(&variant_pos).unwrap_or(&0);
+        let allele_frequency = if *read_depth == 0 {
+            vec![0.0; var_list.len()]
+        } else {
+            var_list.iter().map(|v| v.allele_count as f32 / *read_depth as f32).collect::<Vec<f32>>()
+        };
+    
+        // Create a variant record.
+        let mut record = writer.empty_record();
+        let header_view = writer.header();
+        let rid = header_view.name2rid(variant_chromosome.as_bytes()).unwrap();        
+        record.set_rid(Some(rid));
+        record.set_pos(variant_pos as i64);
+        record.set_id(b".");
+        let mut all_variant_alleles = vec![variant_ref_allele] ;
+        all_variant_alleles.extend(variant_alt_allele);
+        record.set_alleles(&all_variant_alleles.iter().map(|v| v.as_bytes()).collect::<Vec<&[u8]>>()).expect("Failed to set alleles");
+        record.push_format_integer(b"DP", &[*coverage.get(&variant_pos).unwrap_or(&0) as i32]).expect("Failed to set DP format field");
+        record.push_format_integer(b"AD", &var_list.iter().map(|v| v.allele_count as i32).collect::<Vec<i32>>()).expect("Failed to set AD format field");
+        record.push_format_float(b"VAF", &allele_frequency).expect("Failed to set VAF format field");
+        let mut genotype_list = Vec::new();
+        if allele_frequency.len() == 1 {
+            if allele_frequency[0] > 0.99 {
+                genotype_list.push(GenotypeAllele::Unphased(1));
+                genotype_list.push(GenotypeAllele::Unphased(1));
+            } else {
+                genotype_list.push(GenotypeAllele::Unphased(0));
+                genotype_list.push(GenotypeAllele::Unphased(1));
+            }
+        } else {
+            for af in 0..allele_frequency.len()+1 {
+                genotype_list.push(GenotypeAllele::Unphased(af as i32));
+                
+            }
+
+        }
+        record.push_genotypes(&genotype_list.as_slice()).expect("Failed to set genotype field");
+
+
+        writer.write(&record).expect("Failed to write record");
+    }
 
     
-    info!("Created compressed VCF: {}", compressed_filename.display());
+    info!("Created compressed VCF: {}", output_file.display());
+    
+    // Build tabix index for the compressed VCF file
+    let idx = std::ptr::null();
+    println!("Building index file: ");
+    let rs = unsafe {
+        rust_htslib::htslib::bcf_index_build3(
+            rust_htslib::utils::path_to_cstring(&output_file).unwrap().as_ptr(),
+            idx,
+            0,
+            4 as i32,
+    )};
     // info!("Created index file: {}", index_filename.display());
 
     Ok(())
 }
-
 
 pub fn start(graph_filename: &PathBuf, reference_seqs: &Vec<fastq::Record>, sampleid: &String, output_prefix: &PathBuf) -> AnyhowResult<()> {
     let (node_info, _) = asm::load_graph(graph_filename).unwrap();
