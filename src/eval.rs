@@ -9,6 +9,7 @@ use minimap2::{Aligner, Preset};
 use itertools::Itertools;
 use std::io::Write;
 use std::fs::File;
+use crate::util;
 
 pub fn find_alignment_intervals(interval_list: Vec<&str>) -> AnyhowResult<(usize, usize)> {
     // 
@@ -16,10 +17,7 @@ pub fn find_alignment_intervals(interval_list: Vec<&str>) -> AnyhowResult<(usize
     let mut right_bound = usize::MIN;
     for interval in interval_list.iter(){
         let interval_ = interval.split(".").collect::<Vec<_>>()[1];
-        let region_list = interval_.split(":").collect::<Vec<_>>()[1];
-        let region = region_list.split("-").collect::<Vec<_>>();
-        let start = region[0].parse::<usize>().unwrap();
-        let end = region[1].parse::<usize>().unwrap();
+        let (chromosome, start, end) = util::split_locus(interval_.to_string());
         left_bound = left_bound.min(start);
         right_bound = right_bound.max(end);
     }

@@ -92,6 +92,10 @@ enum Commands {
         #[arg(short, long, default_value = "2")]
         number_of_haplotypes: usize,
 
+        /// locus name (chromo:start-end)
+        #[arg(short, long)]
+        locus: String,
+
         /// Verbose output
        #[arg(short, long)]
        verbose: bool,
@@ -221,6 +225,7 @@ fn main() -> Result<()> {
             output_prefix,
             major_haplotype_only,
             number_of_haplotypes,
+            locus,
             verbose,
         } => {
             // Initialize logging
@@ -230,7 +235,7 @@ fn main() -> Result<()> {
                 std::env::set_var("RUST_LOG", "info");
             }
             env_logger::init();
-            asm::start(&graph_gfa, major_haplotype_only, number_of_haplotypes, &output_prefix)?;
+            asm::start(&graph_gfa, &locus, major_haplotype_only, number_of_haplotypes, &output_prefix)?;
         }
         Commands::Call {
             gfa_file,

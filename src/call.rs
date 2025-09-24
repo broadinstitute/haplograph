@@ -19,6 +19,8 @@ pub struct Variant {
     pub alt_allele: String,
     pub variant_type: String,
     pub allele_count: usize,
+    pub node_id:String,
+    pub haplotype_index: Option<usize>,
 }
 
 pub fn get_variants_from_cigar(
@@ -28,6 +30,7 @@ pub fn get_variants_from_cigar(
     alt_seq: &str,
     ref_start: usize,
     allelecount: usize,
+    node_id: &str,
 ) -> (Vec<Variant>, HashMap<usize, usize>) {
     let mut poscount = HashMap::new();
     let mut variants = Vec::new();
@@ -71,6 +74,8 @@ pub fn get_variants_from_cigar(
                         alt_allele: alt_allele.to_string(),
                         variant_type: "SNP".to_string(),
                         allele_count: allelecount,
+                        node_id: node_id.to_string(),
+                        haplotype_index: None,
                     });
                 }
                 ref_pos += length;
@@ -105,6 +110,8 @@ pub fn get_variants_from_cigar(
                     alt_allele: alt_allele.to_string(),
                     variant_type: "INS".to_string(),
                     allele_count: allelecount,
+                    node_id: node_id.to_string(),
+                    haplotype_index: None,
                 });
                 alt_pos += length;
             }
@@ -161,6 +168,8 @@ pub fn get_variants_from_cigar(
                     alt_allele: alt_allele.to_string(),
                     variant_type: "DEL".to_string(),
                     allele_count: allelecount,
+                    node_id: node_id.to_string(),
+                    haplotype_index: None,
                 });
                 ref_pos += length;
             }
@@ -184,71 +193,76 @@ fn collapse_identical_records(variants: Vec<Variant>) -> Vec<Variant> {
         let alt_allele = current_var.alt_allele;
         let variant_type = current_var.variant_type;
         let allele_count = current_var.allele_count;
-
+        let node_id = current_var.node_id;
+        let haplotype_index = current_var.haplotype_index;
         let key = (
             chromosome,
             pos,
             ref_allele.clone(),
             alt_allele.clone(),
             variant_type.clone(),
+            node_id.clone(),
+            haplotype_index,
         );
         *collapsed.entry(key).or_insert(0) += allele_count;
     }
     collapsed
         .into_iter()
         .map(
-            |((chromosome, pos, ref_allele, alt_allele, variant_type), allele_count)| Variant {
+            |((chromosome, pos, ref_allele, alt_allele, variant_type, node_id, haplotype_index), allele_count)| Variant {
                 chromosome,
                 pos,
                 ref_allele,
                 alt_allele,
                 variant_type,
                 allele_count,
+                node_id,
+                haplotype_index,
             },
         )
         .collect()
 }
 
-fn format_vcf_record(variant: &Variant, coverage: HashMap<usize, usize>) -> String {
-    // Add AC (allele count) to INFO field
-    let read_depth = coverage.get(&variant.pos).unwrap_or(&0);
-    let allele_frequency = if *read_depth == 0 {
-        0.0
-    } else {
-        variant.allele_count as f32 / *read_depth as f32
-    };
+// fn format_vcf_record(variant: &Variant, coverage: HashMap<usize, usize>) -> String {
+//     // Add AC (allele count) to INFO field
+//     let read_depth = coverage.get(&variant.pos).unwrap_or(&0);
+//     let allele_frequency = if *read_depth == 0 {
+//         0.0
+//     } else {
+//         variant.allele_count as f32 / *read_depth as f32
+//     };
 
-    let info = format!("DP={}", read_depth);
-    let format: String = format!("GT:AD:VAF");
-    // should be modified based on the phasing information
-    let genotype: String = format!("1/1");
-    let sample: String = format!("{}:{}:{}", genotype, variant.allele_count, allele_frequency);
+//     let info = format!("DP={}", read_depth);
+//     let format: String = format!("GT:AD:VAF");
+//     // should be modified based on the phasing information
+//     let genotype: String = format!("1/1");
+//     let sample: String = format!("{}:{}:{}", genotype, variant.allele_count, allele_frequency);
     
     
-    match variant.variant_type.as_str() {
-        "SNP" => format!(
-            "{}\t{}\t.\t{}\t{}\t.\t.\t{}\t{}\t{}",
-            variant.chromosome,
-            variant.pos + 1,
-            variant.ref_allele,
-            variant.alt_allele,
-            info,
-            format,
-            sample
-        ),
-        "INS" => format!(
-            "{}\t{}\t.\t{}\t{}\t.\t.\t{}\t{}\t{}",
-            variant.chromosome,
-            variant.pos, variant.ref_allele, variant.alt_allele, info, format, sample
-        ),
-        "DEL" => format!(
-            "{}\t{}\t.\t{}\t{}\t.\t.\t{}\t{}\t{}",
-            variant.chromosome,
-            variant.pos, variant.ref_allele, variant.alt_allele, info, format, sample
-        ),
-        _ => panic!("Unknown variant type"),
-    }
-}
+//     match variant.variant_type.as_str() {
+//         "SNP" => format!(
+//             "{}\t{}\t.\t{}\t{}\t.\t.\t{}\t{}\t{}",
+//             variant.chromosome,
+//             variant.pos + 1,
+//             variant.ref_allele,
+//             variant.alt_allele,
+//             info,
+//             format,
+//             sample
+//         ),
+//         "INS" => format!(
+//             "{}\t{}\t.\t{}\t{}\t.\t.\t{}\t{}\t{}",
+//             variant.chromosome,
+//             variant.pos, variant.ref_allele, variant.alt_allele, info, format, sample
+//         ),
+//         "DEL" => format!(
+//             "{}\t{}\t.\t{}\t{}\t.\t.\t{}\t{}\t{}",
+//             variant.chromosome,
+//             variant.pos, variant.ref_allele, variant.alt_allele, info, format, sample
+//         ),
+//         _ => panic!("Unknown variant type"),
+//     }
+// }
 
 fn write_vcf(
     variants: &[Variant],
@@ -269,7 +283,7 @@ fn write_vcf(
 
     header.push_record(format!("##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Read Depth\">\n").as_bytes());
     header.push_record(format!("##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n").as_bytes());
-    header.push_record(format!("##FORMAT=<ID=AD,Number=1,Type=Integer,Description=\"Allele Depth\">\n").as_bytes());
+    header.push_record(format!("##FORMAT=<ID=AD,Number=1,Type=Integer,Description=\"Alternative Allele Depth\">\n").as_bytes());
     header.push_record(format!("##FORMAT=<ID=VAF,Number=1,Type=Float,Description=\"Variant Allele Frequency\">\n").as_bytes());
     header.push_sample(sample_id.as_bytes());
 
@@ -373,6 +387,40 @@ fn write_vcf(
     Ok(())
 }
 
+/// Phase variants and write phased VCF
+pub fn Phase_germline_variants(
+    graph_filename: &PathBuf, 
+    Variants: &Vec<Variant>,
+    haplotype_number: usize,
+) {
+    let (node_info, edge_info) = asm::load_graph(graph_filename).unwrap();
+    // establish the phasing information
+    let all_sequences = asm::traverse_graph(&node_info, &edge_info).unwrap();
+    let mut sorted: Vec<_> = all_sequences.iter().collect();
+    sorted.sort_by(|a, b| b.1.1.len().cmp(&a.1.1.len()));
+    // let all_sequences_primary : HashMap<Vec<String>, (String, usize)> = sorted.into_iter().take(haplotype_number).map(|(k, v)| (k.clone(), v.clone())).collect();
+    // let all_paths = all_sequences_primary.keys().cloned().collect::<Vec<Vec<String>>>();
+    // let mut haplotype_map = HashMap::new();
+    // for (index, path) in all_paths.iter().enumerate() {
+    //     for node in path.iter() {
+    //         haplotype_map.insert(node.clone(), index);
+    //     }
+    // }
+    // println!("haplotype_map: {:?}", haplotype_map);
+
+    // let mut phased_variants = Vec::new();
+    
+    // for variant in Variants.iter() {
+    //     let variant_node_id = variant.node_id.clone();
+    //     let haplotype_index = haplotype_map.get(&variant_node_id).unwrap();
+    //     // *variant.haplotype_index = Some(*haplotype_index);
+    //     phased_variants.push(variant.clone());
+
+    // }
+    // info!("Phased variants: {}", phased_variants.len());
+    // Ok((phased_variants))
+}
+
 pub fn start(graph_filename: &PathBuf, reference_seqs: &Vec<fastq::Record>, sampleid: &String, output_prefix: &PathBuf) -> AnyhowResult<()> {
     let (node_info, _) = asm::load_graph(graph_filename).unwrap();
     let mut all_variants = Vec::new();
@@ -391,7 +439,7 @@ pub fn start(graph_filename: &PathBuf, reference_seqs: &Vec<fastq::Record>, samp
         let full_ref_seq_ = reference_seqs.iter().find(|r| r.id().to_string() == chromosome).unwrap().seq();
         let full_ref_seq = String::from_utf8_lossy(full_ref_seq_).to_string();
         let ref_seq = full_ref_seq[start..end].to_string();
-        let (variants, poscounts) = get_variants_from_cigar(cigar.as_str(), &chromosome, ref_seq.as_str(), alt_seq.as_str(), start, support_reads);
+        let (variants, poscounts) = get_variants_from_cigar(cigar.as_str(), &chromosome, ref_seq.as_str(), alt_seq.as_str(), start, support_reads, &node_id);
         all_variants.extend(variants);
 
         for (pos, count) in poscounts.iter() {

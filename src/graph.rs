@@ -56,15 +56,18 @@ pub fn write_gfa_output(
 
     let mut node_output = Vec::new();
     for (haplotype_id, node_info) in node_file.iter() {
-        let hap_name = haplotype_id.split("|").next().unwrap().to_string();
-        let pos_string = hap_name.split(".").next().unwrap().to_string();
-        let (chromosome, start, end) = util::split_locus(pos_string);
+        // haplotype_id = format!("H.{}:{}-{}.{}", chromosome, window.0, window.1, i);
+        let hap_name = haplotype_id.split(".").nth(1).unwrap().to_string();
+        // println!("hap_name: {}", hap_name);
+        // let pos_string = hap_name.split(".").next().unwrap().to_string();
+        let (chromosome, start, end) = util::split_locus(hap_name);
         let parts: Vec<&str> = node_info.split("\t").collect();
         if parts.len() >= 5 {
             let haplotype_seq = parts[1];
             let haplotype_cigar = parts[2];
             let read_num = parts[3];
             let allele_frequency = parts[4];
+            let read_names = parts[5];
             
             let mut node_info_clone = BTreeMap::new();
             node_info_clone.insert("pos".to_string(), start.to_string());
@@ -72,6 +75,7 @@ pub fn write_gfa_output(
             node_info_clone.insert("cigar".to_string(), haplotype_cigar.to_string());
             node_info_clone.insert("support_reads".to_string(), read_num.to_string());
             node_info_clone.insert("allele_frequency".to_string(), allele_frequency.to_string());
+            node_info_clone.insert("read_names".to_string(), read_names.to_string());
             // node_info_clone.insert("read_names".to_string(), read_names);
             // anchor_info_clone.seq = String::new();
             let json_string =
