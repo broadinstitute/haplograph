@@ -276,7 +276,7 @@ fn write_vcf(
     // Write VCF
     // 2. Open a compressed VCF writer
     // Create a BCF writer for the compressed VCF.
-    let mut writer = bcf::Writer::from_path(output_file, &header, true, bcf::Format::Vcf).expect("Failed to create BCF writer");
+    let mut writer = bcf::Writer::from_path(output_file, &header, false, bcf::Format::Vcf).expect("Failed to create BCF writer");
 
     // Sort variants by chromosome and position
     let mut sorted_variants = variants.to_vec();
