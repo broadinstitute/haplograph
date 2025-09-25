@@ -92,6 +92,10 @@ enum Commands {
         #[arg(short, long, default_value = "2")]
         number_of_haplotypes: usize,
 
+        /// graph traversal constraint by reads, default to true, fast and memory efficient
+        #[arg(short, long, default_value = "true")]
+        traverse_constraint: bool,
+
         /// locus name (chromo:start-end)
         #[arg(short, long)]
         locus: String,
@@ -226,6 +230,7 @@ fn main() -> Result<()> {
             major_haplotype_only,
             number_of_haplotypes,
             locus,
+            traverse_constraint,
             verbose,
         } => {
             // Initialize logging
@@ -235,7 +240,7 @@ fn main() -> Result<()> {
                 std::env::set_var("RUST_LOG", "info");
             }
             env_logger::init();
-            asm::start(&graph_gfa, &locus, major_haplotype_only, number_of_haplotypes, &output_prefix)?;
+            asm::start(&graph_gfa, &locus, major_haplotype_only, number_of_haplotypes, traverse_constraint, &output_prefix)?;
         }
         Commands::Call {
             gfa_file,

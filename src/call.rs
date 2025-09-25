@@ -395,7 +395,7 @@ pub fn Phase_germline_variants(
 ) {
     let (node_info, edge_info) = asm::load_graph(graph_filename).unwrap();
     // establish the phasing information
-    let all_sequences = asm::traverse_graph(&node_info, &edge_info).unwrap();
+    let all_sequences = asm::traverse_graph(&node_info, &edge_info, true, haplotype_number, true).unwrap();
     let mut sorted: Vec<_> = all_sequences.iter().collect();
     sorted.sort_by(|a, b| b.1.1.len().cmp(&a.1.1.len()));
     // let all_sequences_primary : HashMap<Vec<String>, (String, usize)> = sorted.into_iter().take(haplotype_number).map(|(k, v)| (k.clone(), v.clone())).collect();

@@ -34,7 +34,7 @@ pub fn get_node_edge_info(locus: &String, windows: &Vec<(usize, usize)>, final_h
                     let overlapping_reads = util::find_overlapping_reads(read_vector, next_read_vector);
                     let overlap_ratio = overlapping_reads.len() as f64 / (read_vector_len as f64).min( next_read_vector_len as f64);
                     // println!("readset1: {}, readset2: {}, overlap_ratio: {}", read_vector.len(), next_read_vector.len(), overlap_ratio);
-                    if overlapping_reads.len() >= 1 {
+                    if overlapping_reads.len() >= min_reads && overlap_ratio >= frequency_min {
                         edge_info.insert((haplotype_id.clone(), next_haplotype_id.clone()), format!("E\t{}\t{}\tOverlapRatio:{:.3}\tOverlappingReads:{}", 
                             read_vector_len, next_read_vector_len, overlap_ratio, overlapping_reads.join(",")));
                     }
@@ -118,7 +118,7 @@ pub fn start(bam: &mut IndexedReader, windows: &Vec<(usize, usize)>, locus: &Str
         final_hap_list.push(haplotype_info);
     }
 
-    let (node_info, edge_info) = get_node_edge_info(&locus, &windows, &final_hap_list, min_reads as usize, frequency_min);
+    let (node_info, edge_info) = get_node_edge_info(&locus, &windows, &final_hap_list, 1 as usize, frequency_min);
     // let gfa_output = PathBuf::from(format!("{}/{}_{}_{}_{}_haplograph.gfa", cli.output, cli.sampleid, chromosome, start, end));
  
     let gfa_output = PathBuf::from(format!("{}.gfa", output_prefix));
