@@ -137,27 +137,15 @@ pub fn find_all_reads (node_info: &HashMap<String, NodeInfo>) -> HashSet<String>
 pub fn enumerate_all_paths(
     _node_info: &HashMap<String, NodeInfo>, 
     edge_info: &HashMap<String, Vec<String>>,
-    read_constraint: bool
 ) -> std::result::Result<Vec<Vec<String>>, Box<dyn Error>> {
     let source_nodes = find_source_node(edge_info);
     let mut all_paths = Vec::new();
     let all_reads = find_all_reads(_node_info);
-    if read_constraint {
-        for src in source_nodes {
-            let mut path = Vec::new();
-            path.push(src.clone());
-            dfs_traverse_with_read_constrains(&src, edge_info, _node_info, &mut path, &mut all_paths, &mut all_reads.clone());
-        }
-
-    }else{
-        for src in source_nodes {
-            let mut path = Vec::new();
-            path.push(src.clone());
-            dfs_traverse(&src, edge_info, &mut path, &mut all_paths);
-        }
-
+    for src in source_nodes {
+        let mut path = Vec::new();
+        path.push(src.clone());
+        dfs_traverse(&src, edge_info, &mut path, &mut all_paths);
     }
-
     
     Ok(all_paths)
 }
@@ -169,6 +157,7 @@ fn dfs_traverse(
     current_path: &mut Vec<String>,
     all_paths: &mut Vec<Vec<String>>
 ) {
+    // println!("current_node: {}, current_path: {:?}", current_node, current_path.len());
     // If no outgoing edges, this is a complete path
     if !edge_info.contains_key(current_node) {
         // println!("current_node: {}, current_path: {:?}", current_node, current_path.len());
@@ -186,13 +175,50 @@ fn dfs_traverse(
     }
 }
 
+// /// Recursive DFS to find all paths from a starting node
+// fn dfs_traverse_with_read_constrains(
+//     current_node: &String,
+//     edge_info: &HashMap<String, Vec<String>>,
+//     node_info: &HashMap<String, NodeInfo>,
+//     current_path: &mut Vec<String>,
+//     all_paths: &mut Vec<Vec<String>>,
+//     read_intersection: &mut HashSet<String>
+// ) {
+//     // println!("current_node: {}, read_intersection: {:?}", current_node, read_intersection.len());
+//     // If no outgoing edges, this is a complete path
+//     if !edge_info.contains_key(current_node) {
+//         current_path.push(current_node.clone());
+//         if read_intersection.len() > 0 {
+//             all_paths.push(current_path.clone());
+//         }
+//         return;
+//     }
 
-pub fn traverse_graph(node_info: &HashMap<String, NodeInfo>, edge_info: &HashMap<String, Vec<String>>, germline_only: bool, hap_number: usize, read_constraint: bool) -> std::result::Result<HashMap<Vec<String>, (String, HashSet<String>)>, Box<dyn Error>> {
+//     if read_intersection.is_empty() {
+//         return;
+//     }
+
+//     let next_nodes = edge_info.get(current_node).unwrap();
+//     for next_node in next_nodes {
+//         let read_names = node_info.get(&next_node.clone()).unwrap().read_names.clone();
+//         let read_names_list = read_names.split(",").collect::<Vec<_>>().iter().map(|x| x.to_string()).collect::<HashSet<_>>();
+//         println!("read_names_list: {:?}", read_names_list.len());
+//         let mut read_intersection_clone = read_intersection.intersection(&read_names_list).cloned().collect::<HashSet<_>>();
+//         current_path.push(next_node.clone());
+//         dfs_traverse_with_read_constrains(next_node, edge_info, node_info, current_path, all_paths, &mut read_intersection_clone);
+//         current_path.pop(); // Backtrack
+//     }
+    
+// }
+
+
+pub fn traverse_graph(node_info: &HashMap<String, NodeInfo>, edge_info: &HashMap<String, Vec<String>>, germline_only: bool, hap_number: usize) -> std::result::Result<HashMap<Vec<String>, (String, HashSet<String>)>, Box<dyn Error>> {
+    info!("Traversing graph with germline_only: {}, hap_number: {}", germline_only, hap_number);
     let all_paths = if germline_only {
         let (germline_nodes_sorted, germline_edge_info) = find_germline_nodes(node_info, edge_info, hap_number);
-        enumerate_all_paths(&germline_nodes_sorted, &germline_edge_info, read_constraint)?
+        enumerate_all_paths(&germline_nodes_sorted, &germline_edge_info)?
     } else {
-        enumerate_all_paths(node_info, edge_info,read_constraint)?
+        enumerate_all_paths(node_info, edge_info)?
     };
     // let all_paths = enumerate_all_paths(node_info, edge_info)?;
     
@@ -218,38 +244,6 @@ pub fn traverse_graph(node_info: &HashMap<String, NodeInfo>, edge_info: &HashMap
     }
 
     Ok(all_sequences)
-}
-/// Recursive DFS to find all paths from a starting node with read constrains
-fn dfs_traverse_with_read_constrains(
-    current_node: &String,
-    edge_info: &HashMap<String, Vec<String>>,
-    node_info: &HashMap<String, NodeInfo>,
-    current_path: &mut Vec<String>,
-    all_paths: &mut Vec<Vec<String>>,
-    read_intersection: &mut HashSet<String>,
-) {
-    // If no outgoing edges, this is a complete path
-    if !edge_info.contains_key(current_node) {
-        // println!("current_node: {}, current_path: {:?}", current_node, current_path.len());
-        all_paths.push(current_path.clone());
-        return;
-    }
-    if read_intersection.is_empty() {
-        all_paths.push(current_path.clone());
-        return;
-    }
-    // println!("current_node: {}, current_path: {:?}", current_node, current_path.len();
-    // Explore all outgoing edges
-    if let Some(next_nodes) = edge_info.get(current_node) {
-        for next_node in next_nodes {
-            current_path.push(next_node.clone());
-            let read_names = node_info.get(next_node).unwrap().read_names.clone();
-            let read_names_list = read_names.split(",").map(|x| x.to_string()).collect::<HashSet<_>>();
-            let mut read_intersection_clone: HashSet<String> = read_intersection.intersection(&read_names_list).cloned().collect::<HashSet<_>>();
-            dfs_traverse_with_read_constrains(next_node, edge_info, node_info, current_path, all_paths, &mut read_intersection_clone);
-            current_path.pop(); // Backtrack
-        }
-    }
 }
 
 pub fn write_graph_path_fasta(all_sequences: &HashMap<Vec<String>, (String, HashSet<String>)>, output_filename: &PathBuf) -> std::result::Result<(), Box<dyn Error>> {
@@ -284,7 +278,13 @@ pub fn find_primary_haplotypes(all_sequences: &HashMap<Vec<String>, (String, Has
         let (start, end) = eval::find_alignment_intervals(path.iter().map(|x| x.as_str()).collect::<Vec<_>>()).unwrap();
         full_sequences.push((path.clone(), (sequence.clone(), supported_reads.clone(), end-start)));
     }
-    full_sequences.sort_by(|a, b| b.1.1.len().cmp(&a.1.1.len()));
+    // full_sequences.sort_by(|a, b| b.1.1.len().cmp(&a.1.1.len()));
+    full_sequences.sort_by(|a, b| {
+        // First compare reference spanning length
+        b.1.2.cmp(&a.1.2)
+            // Then compare supported_reads
+            .then(b.1.1.len().cmp(&a.1.1.len()))
+    });
 
 
     // to be optimized
@@ -308,11 +308,10 @@ pub fn find_primary_haplotypes(all_sequences: &HashMap<Vec<String>, (String, Has
 
 
 
-pub fn start(graph_filename: &PathBuf, locus: &String, germline_only:bool, haplotype_number: usize, read_constraint: bool, output_prefix: &PathBuf) -> AnyhowResult<()> {
+pub fn start(graph_filename: &PathBuf, locus: &String, germline_only:bool, haplotype_number: usize,  output_prefix: &PathBuf) -> AnyhowResult<()> {
     let (node_info, edge_info) = load_graph(graph_filename).unwrap();
-    // println!("node_info: {:?}", node_info);
-    // println!("edge_info: {:?}", edge_info);
-    let all_sequences = traverse_graph(&node_info, &edge_info, germline_only, haplotype_number, read_constraint).unwrap();
+    let all_sequences = traverse_graph(&node_info, &edge_info, germline_only, haplotype_number).unwrap();
+    // println!("all_sequences: {:?}", all_sequences);
     info!("All sequences constructed: {}", all_sequences.len());
     let (ref_chromosome, ref_start, ref_end) = util::split_locus(locus.to_string());
     let mut hap_number = haplotype_number;
