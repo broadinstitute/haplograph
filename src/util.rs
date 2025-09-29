@@ -256,3 +256,22 @@ pub fn find_overlapping_reads(read_vector1: &[String], read_vector2: &[String]) 
         .collect()
 }
 
+pub fn import_bed(bed_file: &String) -> Vec<(String, usize, usize)> {
+    let mut bed_list = Vec::new();
+    if bed_file.ends_with(".gz") {
+        let file = File::open(bed_file).unwrap();
+        let reader = BufReader::new(file);
+        for line in reader.lines() {
+            let line = line.unwrap();
+            bed_list.push((line.split('\t').next().unwrap().to_string(), line.split('\t').nth(1).unwrap().parse().unwrap(), line.split('\t').nth(2).unwrap().parse().unwrap()));
+        }
+    } else {
+    let file = File::open(bed_file).unwrap();
+    let reader = BufReader::new(file);
+    for line in reader.lines() {
+        let line = line.unwrap();
+        bed_list.push((line.split('\t').next().unwrap().to_string(), line.split('\t').nth(1).unwrap().parse().unwrap(), line.split('\t').nth(2).unwrap().parse().unwrap()));
+        }
+    }
+    bed_list
+}

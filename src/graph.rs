@@ -13,22 +13,22 @@ use indicatif::{ProgressBar, ProgressStyle};
 use bio::io::fastq;
 
 
-pub fn get_node_edge_info(locus: &String, windows: &Vec<(usize, usize)>, final_hap_list: &Vec<HashMap<String, (String,Vec<String>, f64)>>, min_reads: usize, frequency_min: f64) -> (HashMap<String, String>, HashMap<(String,String), String>) {
+pub fn get_node_edge_info(locus: &String, windows: &Vec<(String, usize, usize)>, final_hap_list: &Vec<HashMap<String, (String,Vec<String>, f64)>>, min_reads: usize, frequency_min: f64) -> (HashMap<String, String>, HashMap<(String,String), String>) {
     let (chromosome, start, end) = util::split_locus(locus.clone());
      let mut node_info = HashMap::new();
     let mut edge_info = HashMap::new();
     for (index, window) in windows.iter().enumerate() {
         for (i, (final_haplotype_seq,(cigar, read_vector, allele_frequency))) in final_hap_list[index].iter().enumerate(){
-            let haplotype_id = format!("H.{}:{}-{}.{}", chromosome, window.0, window.1, i);
+            let haplotype_id = format!("H.{}:{}-{}.{}", chromosome, window.1, window.2, i);
             // let cigar = cigar_dict_list[index].get(final_haplotype_seq).unwrap();
             let read_vector_len = read_vector.len();
             node_info.insert(haplotype_id.clone(), format!("L\t{}\t{}\t{}\t{:.2}\t{}", final_haplotype_seq, cigar, read_vector_len, allele_frequency, read_vector.join(",")));
 
             // add edge information
             if index < windows.len() - 1 {
-                let next_window = windows[index + 1];
+                let next_window = windows[index + 1].clone();
                 for (j, (next_final_haplotype_seq, (next_cigar,next_read_vector, next_allele_frequency))) in final_hap_list[index + 1].iter().enumerate(){
-                    let next_haplotype_id = format!("H.{}:{}-{}.{}", chromosome, next_window.0, next_window.1, j);
+                    let next_haplotype_id = format!("H.{}:{}-{}.{}", chromosome, next_window.1, next_window.2, j);
                     // let next_cigar = cigar_dict_list[index + 1].get(next_final_haplotype_seq).unwrap();
                     let next_read_vector_len = next_read_vector.len();
                     let overlapping_reads = util::find_overlapping_reads(read_vector, next_read_vector);
@@ -108,12 +108,11 @@ pub fn write_gfa_output(
 }
 
 
-pub fn start(bam: &mut IndexedReader, windows: &Vec<(usize, usize)>, locus: &String, reference_fa: &Vec<fastq::Record>, sampleid: &String, min_reads: usize, frequency_min: f64, primary_only: bool, output_prefix: &String) -> AnyhowResult<()> {
+pub fn start(bam: &mut IndexedReader, windows: &Vec<(String,usize, usize)>, locus: &String, reference_fa: &Vec<fastq::Record>, sampleid: &String, min_reads: usize, frequency_min: f64, primary_only: bool, output_prefix: &String) -> AnyhowResult<()> {
 
-    let (chromosome, start, end) = util::split_locus(locus.clone());
     let mut final_hap_list = Vec::new(); 
     for (i, window) in windows.iter().enumerate() {
-        let (start, end) = window;
+        let (chromosome, start, end) = window;
         let haplotype_info = intervals::start(bam, &reference_fa, &chromosome, *start, *end, &sampleid, min_reads as usize, frequency_min, primary_only, false).unwrap();
         final_hap_list.push(haplotype_info);
     }

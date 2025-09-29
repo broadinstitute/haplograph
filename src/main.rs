@@ -27,7 +27,7 @@ pub struct Cli {
 enum Commands {
     /// Extract Haplotypes from BAM file
     #[clap(arg_required_else_help = true)]
-    Haplotype {
+    Haplograph {
        /// Input BAM file
        #[arg(short, long)]
        alignment_bam: String,
@@ -44,7 +44,7 @@ enum Commands {
        #[arg(short, long, default_value = ".")]
        output_prefix: String,
        
-       /// Chromosome name
+       /// a continuous genomic region as String (chromo:start-end) or a bed file as String
        #[arg(short, long)]
        locus: String,
    
@@ -64,7 +64,7 @@ enum Commands {
        #[arg(short, long, default_value = "false")]
        primary_only: bool, 
    
-       ///output file format
+       ///output file format, accepted fasta, gfa, vcf
        #[arg(short, long, default_value = "gfa")]
        default_file_format: String, 
    
@@ -168,7 +168,7 @@ fn main() -> Result<()> {
 
     let args = Cli::parse();
     match args.command {
-        Commands::Haplotype {
+        Commands::Haplograph {
             // Input BAM file
             alignment_bam,
             // Input FASTA file
@@ -177,7 +177,7 @@ fn main() -> Result<()> {
             sampleid,
             // Output directory
             output_prefix,
-            // Chromosome name
+            // either locus as String (chromo:start-end) or a bed file
             locus,
             // Limited size of the region
             frequency_min,
@@ -193,8 +193,8 @@ fn main() -> Result<()> {
             verbose,
         } => {
                 // Validate format
-                if default_file_format != "fasta" && default_file_format != "gfa" {
-                    anyhow::bail!("Format must be either 'fasta' or 'gfa', got: {}", default_file_format);
+                if default_file_format != "fasta" && default_file_format != "gfa" && default_file_format != "vcf" {
+                    anyhow::bail!("Format must be either 'fasta' or 'gfa' or 'vcf', got: {}", default_file_format);
                 }
 
                 // Initialize logging
@@ -205,32 +205,65 @@ fn main() -> Result<()> {
                 }
                 env_logger::init();
 
-                let (chromosome, start, end) = util::split_locus(locus.clone());
-                info!("Starting Haplograph analysis");
-                info!("Input BAM: {}", alignment_bam);
-                info!("Region: {}:{}-{}", chromosome, start, end);
-                info!("Locus size: {}", end - start);
-                info!("Minimal vaf : {}", frequency_min);
-                info!("Minimal supported reads: {}", min_reads);
-                info!("Maximal Window size: {}", window_size);
-                info!("Primary only: {}", primary_only);
+                if locus.ends_with("bed.gz") || locus.ends_with(".bed") {
+                    
+                    info!("Starting Haplograph analysis");
+                    info!("Input BAM: {}", alignment_bam);
+                    info!("Region in {}", locus);
+                    info!("Minimal vaf : {}", frequency_min);
+                    info!("Minimal supported reads: {}", min_reads);
+                    info!("Maximal Window size: {}", window_size);
+                    info!("Primary only: {}", primary_only);
+                    info!("Output prefix: {}", output_prefix);
+                    info!("Default file format: {}", default_file_format);
+                    info!("Verbose: {}", verbose);
 
-                let mut bam = util::open_bam_file(&alignment_bam);
-                let reference_seqs = util::get_chromosome_ref_seq(&reference_fa, &chromosome);
-                // // Extract read sequences from BAM file using utility function
-                let mut windows = Vec::new();
-                for i in (start..end).step_by(window_size as usize) {
-                    let end_pos = std::cmp::min(i + window_size , end);
-                    windows.push((i, end_pos));
+                    let mut bam = util::open_bam_file(&alignment_bam);
+                    let reference_seqs = util::get_all_ref_seq(&reference_fa);
+                    // // Extract read sequences from BAM file using utility function
+                    let bed_list = util::import_bed(&locus);
+                    let mut windows = Vec::new();
+                    for (chromosome, start, end) in bed_list {
+                        for i in (start..end).step_by(window_size as usize) {
+                            let end_pos = std::cmp::min(i + window_size , end);
+                            windows.push((chromosome.clone(), i, end_pos));
+                        }
+                    }
+                    if default_file_format == "gfa" {
+                        graph::start( &mut bam, &windows, &locus, &reference_seqs, &sampleid, min_reads as usize, frequency_min, primary_only, &output_prefix)?;
+                    } else {
+                        hap::start(&mut bam, &windows, &reference_seqs, &sampleid, min_reads as usize, frequency_min, primary_only, &output_prefix, &default_file_format)?;
+                    }
+
+                } else {
+                    let (chromosome, start, end) = util::split_locus(locus.clone());
+                    info!("Starting Haplograph analysis");
+                    info!("Input BAM: {}", alignment_bam);
+                    info!("Region: {}:{}-{}", chromosome, start, end);
+                    info!("Locus size: {}", end - start);
+                    info!("Minimal vaf : {}", frequency_min);
+                    info!("Minimal supported reads: {}", min_reads);
+                    info!("Maximal Window size: {}", window_size);
+                    info!("Primary only: {}", primary_only);
+
+                    let mut bam = util::open_bam_file(&alignment_bam);
+                    let reference_seqs = util::get_chromosome_ref_seq(&reference_fa, &chromosome);
+                    // // Extract read sequences from BAM file using utility function
+                    let mut windows = Vec::new();
+                    for i in (start..end).step_by(window_size as usize) {
+                        let end_pos = std::cmp::min(i + window_size , end);
+                        windows.push((chromosome.clone(), i, end_pos));
+                    }
+                    if default_file_format == "gfa" {
+                        graph::start( &mut bam, &windows, &locus, &reference_seqs, &sampleid, min_reads as usize, frequency_min, primary_only, &output_prefix)?;
+            
+                    } else {
+                        hap::start(&mut bam, &windows, &reference_seqs, &sampleid, min_reads as usize, frequency_min, primary_only, &output_prefix, &default_file_format)?;
+                    } 
                 }
+
         
-                if default_file_format == "fasta" {
-                    hap::start(&mut bam, &chromosome, &windows, locus, &reference_seqs, &sampleid, min_reads as usize, frequency_min, primary_only, &output_prefix)?;
-        
-                } else if default_file_format == "gfa" {
-                    graph::start( &mut bam, &windows, &locus, &reference_seqs, &sampleid, min_reads as usize, frequency_min, primary_only, &output_prefix)?;
-        
-                }
+
             }
         Commands::Assemble {
             graph_gfa,

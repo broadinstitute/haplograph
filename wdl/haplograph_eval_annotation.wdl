@@ -109,7 +109,7 @@ task haplograph_asm {
                                                         -w ~{windowsize} \
                                                         -d gfa \
                                                         ~{extra_arg}
-        /haplograph/target/release/haplograph assemble -m -g ~{prefix}.gfa -o ~{prefix}.fasta
+        /haplograph/target/release/haplograph assemble -m -n 2 -g ~{prefix}.gfa -o ~{prefix} -l ~{locus}
         grep ">" ~{prefix}.fasta | wc -l > haplotypenum.txt
         
     >>>
@@ -123,8 +123,8 @@ task haplograph_asm {
 
     runtime {
         docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograp:v1"
-        memory: "4 GB"
-        cpu: 1
+        memory: "64 GB"
+        cpu: 16
         disks: "local-disk 100 SSD"
     }
 }
