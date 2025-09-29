@@ -4,10 +4,10 @@ workflow Haplograph_eval {
     input {
         File whole_genome_bam
         File whole_genome_bai
-        File truth_asm_1_bam
-        File truth_asm_1_bai
-        File truth_asm_2_bam
-        File truth_asm_2_bai
+        File truth_asm_1
+        File truth_asm_1_annotation
+        File truth_asm_2
+        File truth_asm_2_annotation
         File reference_fa
         String prefix
         File gene_bed
@@ -35,20 +35,18 @@ workflow Haplograph_eval {
                 prefix = prefix + "_" + gene_name
         }
 
-        call get_truth_haplotypes {
+        call get_truth_haplotypes_from_annotation {
             input:
-                truth_hap1_bam = truth_asm_1_bam,
-                truth_hap1_bai = truth_asm_1_bai,
-                truth_hap2_bam = truth_asm_2_bam,
-                truth_hap2_bai = truth_asm_2_bai,
+                truth_asm_1 = truth_asm_1,
+                truth_asm_annotation_1 = truth_asm_1_annotation,
+                truth_asm_2 = truth_asm_2,
+                truth_asm_annotation_2 = truth_asm_2_annotation,
                 reference_fa = reference_fa,
-                sampleid = prefix,
-                locus = locus,
-                prefix = prefix + "_" + gene_name,
-                extra_arg = "",
-                windowsize = 1000,
-
+                gene_name = gene_name,
+                prefix = prefix + "_" + gene_name
         }
+
+
 
         scatter (desiredCoverage in desiredCoverages) {
             
@@ -66,17 +64,17 @@ workflow Haplograph_eval {
                     bam = downsampleBam.downsampled_bam,
                     bai = downsampleBam.downsampled_bai,
                     reference_fa = reference_fa,
-                    prefix = prefix + "_" + gene_name,
+                    prefix = prefix + "_" + gene_name + "_" + desiredCoverage,
                     locus = locus,
                     windowsize = windowsize
             }
 
             call haplograph_eval {
                 input:
-                    truth_fasta = get_truth_haplotypes.fasta_file,
+                    truth_fasta = get_truth_haplotypes_from_annotation.fasta_file,
                     query_fasta = haplograph_asm.asm_file,
                     seq_number = haplograph_asm.assembly_num,
-                    prefix = prefix + "_" + gene_name,
+                    prefix = prefix + "_" + gene_name + "_" + desiredCoverage,
             }
         }
     }

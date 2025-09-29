@@ -92,6 +92,14 @@ enum Commands {
         #[arg(short, long, default_value = "2")]
         number_of_haplotypes: usize,
 
+        // /// graph traversal constraint by reads, default to true, fast and memory efficient
+        // #[arg(short, long, default_value = "false")]
+        // traverse_constraint: bool,
+
+        /// locus name (chromo:start-end)
+        #[arg(short, long)]
+        locus: String,
+
         /// Verbose output
        #[arg(short, long)]
        verbose: bool,
@@ -106,7 +114,7 @@ enum Commands {
 
         /// Output prefix
         #[arg(short, long, default_value = "haplograph_call")]
-        output_prefix: PathBuf,
+        output_prefix: String,
 
         /// Sample ID
         #[arg(short, long)]
@@ -115,6 +123,14 @@ enum Commands {
         /// Reference FASTA file
         #[arg(short, long)]
         reference_fa: String,
+
+        /// Maximum Haplotype number
+        #[arg(short, long, default_value = "2")]
+        maximum_haplotypes: usize,
+
+        /// Phase variants
+        #[arg(short, long, default_value = "false")]
+        phase_variants: bool,
 
         /// Verbose output
        #[arg(short, long)]
@@ -221,6 +237,7 @@ fn main() -> Result<()> {
             output_prefix,
             major_haplotype_only,
             number_of_haplotypes,
+            locus,
             verbose,
         } => {
             // Initialize logging
@@ -230,7 +247,7 @@ fn main() -> Result<()> {
                 std::env::set_var("RUST_LOG", "info");
             }
             env_logger::init();
-            asm::start(&graph_gfa, major_haplotype_only, number_of_haplotypes, &output_prefix)?;
+            asm::start(&graph_gfa, &locus, major_haplotype_only, number_of_haplotypes,  &output_prefix)?;
         }
         Commands::Call {
             gfa_file,
@@ -238,6 +255,8 @@ fn main() -> Result<()> {
             sampleid,
             reference_fa,
             verbose,
+            maximum_haplotypes,
+            phase_variants,
         } => {
             // Initialize logging
             if verbose {
@@ -248,7 +267,7 @@ fn main() -> Result<()> {
             env_logger::init();
 
             let reference_seqs = util::get_all_ref_seq(&reference_fa);
-            call::start(&gfa_file, &reference_seqs, &sampleid, &output_prefix)?;
+            call::start(&gfa_file, &reference_seqs, &sampleid, &output_prefix, maximum_haplotypes, phase_variants)?;
         }
         Commands::Evaluate {
             truth_fasta,
