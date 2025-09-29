@@ -222,46 +222,6 @@ fn collapse_identical_records(variants: Vec<Variant>) -> Vec<Variant> {
         .collect()
 }
 
-// fn format_vcf_record(variant: &Variant, coverage: HashMap<usize, usize>) -> String {
-//     // Add AC (allele count) to INFO field
-//     let read_depth = coverage.get(&variant.pos).unwrap_or(&0);
-//     let allele_frequency = if *read_depth == 0 {
-//         0.0
-//     } else {
-//         variant.allele_count as f32 / *read_depth as f32
-//     };
-
-//     let info = format!("DP={}", read_depth);
-//     let format: String = format!("GT:AD:VAF");
-//     // should be modified based on the phasing information
-//     let genotype: String = format!("1/1");
-//     let sample: String = format!("{}:{}:{}", genotype, variant.allele_count, allele_frequency);
-    
-    
-//     match variant.variant_type.as_str() {
-//         "SNP" => format!(
-//             "{}\t{}\t.\t{}\t{}\t.\t.\t{}\t{}\t{}",
-//             variant.chromosome,
-//             variant.pos + 1,
-//             variant.ref_allele,
-//             variant.alt_allele,
-//             info,
-//             format,
-//             sample
-//         ),
-//         "INS" => format!(
-//             "{}\t{}\t.\t{}\t{}\t.\t.\t{}\t{}\t{}",
-//             variant.chromosome,
-//             variant.pos, variant.ref_allele, variant.alt_allele, info, format, sample
-//         ),
-//         "DEL" => format!(
-//             "{}\t{}\t.\t{}\t{}\t.\t.\t{}\t{}\t{}",
-//             variant.chromosome,
-//             variant.pos, variant.ref_allele, variant.alt_allele, info, format, sample
-//         ),
-//         _ => panic!("Unknown variant type"),
-//     }
-// }
 
 fn write_vcf(
     variants: &[Variant],
@@ -322,16 +282,17 @@ fn write_vcf(
             .push(var.clone());
     }
     //sort records_by_pos by the key
-    records_by_pos.iter_mut().collect::<Vec<_>>().sort_by(|a, b| {
-        a.0.0
-            .cmp(&b.0.0)
-            .then(a.0.1.cmp(&b.0.1))
-            .then(a.0.2.cmp(&b.0.2))
+    let mut record_by_pos_keys = records_by_pos.keys().collect::<Vec<_>>();
+    record_by_pos_keys.sort_by(|a, b| {
+        a.1.cmp(&b.1)
+        .then(a.2.cmp(&b.2))
     });
+    // println!("records_by_pos: {:?}", record_by_pos_keys);
 
     
     // vcf_records
-    for (key, var_list) in records_by_pos.iter_mut() {
+    for key in record_by_pos_keys.iter() {
+        let mut var_list = records_by_pos.get(key).unwrap().clone();
         var_list.sort_by(|a, b| a.alt_allele.cmp(&b.alt_allele));
         let variant_chromosome = key.0.clone();
         let variant_pos = key.1.clone();
@@ -349,7 +310,7 @@ fn write_vcf(
         let header_view = writer.header();
         let rid = header_view.name2rid(variant_chromosome.as_bytes()).unwrap();        
         record.set_rid(Some(rid));
-        record.set_pos(variant_pos as i64);
+        record.set_pos(variant_pos as i64 -1);
         record.set_id(b".");
         let mut all_variant_alleles = vec![variant_ref_allele] ;
         all_variant_alleles.extend(variant_alt_allele);

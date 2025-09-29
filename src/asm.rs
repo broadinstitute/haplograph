@@ -321,7 +321,8 @@ pub fn start(graph_filename: &PathBuf, locus: &String, germline_only:bool, haplo
         all_sequences
     };
     info!("All sequences filtered: {}", all_sequences_filtered.len());
-    write_graph_path_fasta(&all_sequences_filtered, output_prefix);
+    let output_filename = PathBuf::from(format!("{}.fasta", output_prefix.to_string_lossy()));
+    write_graph_path_fasta(&all_sequences_filtered, &output_filename);
     info!("All sequences written to fasta: {}", output_prefix.to_str().unwrap());
     Ok(())
 }
