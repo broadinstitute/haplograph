@@ -101,7 +101,7 @@ task haplograph_asm {
 
     command <<<
         set -euxo pipefail
-        /haplograph/target/release/haplograph haplotype -a ~{bam} \
+        /haplograph/target/release/haplograph haplograph -a ~{bam} \
                                                         -r ~{reference_fa} \
                                                         -s ~{prefix} \
                                                         -o ~{prefix} \
@@ -109,7 +109,7 @@ task haplograph_asm {
                                                         -w ~{windowsize} \
                                                         -d gfa \
                                                         ~{extra_arg}
-        /haplograph/target/release/haplograph assemble -m -n 2 -g ~{prefix}.gfa -o ~{prefix} -l ~{locus}
+        /haplograph/target/release/haplograph assemble -m -n 2 -g ~{prefix}.gfa -o ~{prefix}
         grep ">" ~{prefix}.fasta | wc -l > haplotypenum.txt
         
     >>>
