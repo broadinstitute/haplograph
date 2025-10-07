@@ -466,7 +466,7 @@ pub fn collapse_haplotypes(reads: &Vec<fastq::Record>, reference: &fastq::Record
             final_hap.insert(hap.clone(), (cigar, vec.clone(), allele_frequency));
         }
     }
-    info!("Extracted {} haplotypes from region, total reads: {}", final_hap.len(), read_dictionary.len());
+    info!("Extracted {} haplotypes from region, total reads: {:?}", final_hap.len(), read_dictionary.values().map(|x| x.len()).collect::<Vec<_>>());
     Ok(final_hap)
 }
 

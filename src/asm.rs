@@ -16,7 +16,7 @@ use crate::util;
 pub struct NodeInfo {
     pub seq: String,
     pub cigar: String,
-    pub support_reads: String,
+    pub support_reads: usize,
     pub allele_frequency: String,
     pub read_names: String,
 }
@@ -54,7 +54,7 @@ pub fn load_graph(filename: &PathBuf) -> AnyhowResult< (HashMap<String, NodeInfo
             let value_info = NodeInfo {
                 seq: seq.to_string(),
                 cigar: value["cigar"].to_string(),
-                support_reads: value["support_reads"].to_string(),
+                support_reads: value["support_reads"].to_string().trim_matches('"').parse::<usize>().expect(&format!("Support reads not found for node: {}, {}", name, value["support_reads"].to_string())),
                 allele_frequency: value["allele_frequency"].to_string(),
                 read_names: value["read_names"].to_string(),
             };
@@ -83,12 +83,18 @@ pub fn find_source_node(edge_info: &HashMap<String, Vec<String>>) -> Vec<String>
     start_nodes.into_iter().map(|s| s.clone()).collect()
 }
 
-pub fn find_germline_nodes(node_info: &HashMap<String, NodeInfo>, edge_info: &HashMap<String, Vec<String>>, hap_number: usize) -> (HashMap<String,NodeInfo>, HashMap<String, Vec<String>>, HashMap<String, HashSet<usize>>) {
+pub fn find_all_interval_names(node_info: &HashMap<String, NodeInfo>) -> HashMap<String, HashSet<String>> {
     let mut all_nodes: HashMap<String, HashSet<String>> = HashMap::new();
     for (node, node_info) in node_info.iter() {
         let interval_name = node.split(".").collect::<Vec<_>>()[1];
         all_nodes.entry(interval_name.to_string().clone()).or_insert(HashSet::new()).insert(node.clone());
     }
+    all_nodes
+}
+
+pub fn find_germline_nodes(node_info: &HashMap<String, NodeInfo>, edge_info: &HashMap<String, Vec<String>>, hap_number: usize) -> (HashMap<String,NodeInfo>, HashMap<String, Vec<String>>, HashMap<String, HashSet<usize>>) {
+
+    let all_nodes = find_all_interval_names(node_info);
     let mut all_nodes_sorted = all_nodes.into_iter().map(|(k, v)| (k, v.into_iter().collect::<Vec<_>>())).collect::<Vec<(String, Vec<String>)>>();
     all_nodes_sorted.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -130,7 +136,6 @@ pub fn find_germline_nodes(node_info: &HashMap<String, NodeInfo>, edge_info: &Ha
                 unique_read_names = unique_read_names.difference(&read_names_next).cloned().collect::<HashSet<_>>();
                 
             }
-            // println!("unique_read_names: {:?}", unique_read_names.len());
 
             // determine the haplotype index of reads
             if unique_read_names.is_empty(){
@@ -154,8 +159,6 @@ pub fn find_germline_nodes(node_info: &HashMap<String, NodeInfo>, edge_info: &Ha
                 node_haplotype.entry(node_id.clone()).or_insert(HashSet::new()).insert(hap_index.clone());
             }
         }  
-        // println!("node_haplotype: {:?}", node_haplotype);
-        // println!("haplotype_reads: {:?}", haplotype_reads);
     }
 
     let mut germline_edge_info = HashMap::new();
@@ -182,6 +185,83 @@ pub fn find_all_reads (node_info: &HashMap<String, NodeInfo>) -> HashSet<String>
         all_reads.extend(read_names.split(",").map(|x| x.to_string()));
     }
     all_reads
+}
+
+pub fn get_read_name_list(node_info: &HashMap<String, NodeInfo>, node_id: String) -> HashSet<String> {
+    let read_names = node_info.get(&node_id).unwrap().read_names.clone();
+    let read_names_list = read_names.split(",").collect::<Vec<_>>().iter().map(|x| x.to_string()).collect::<HashSet<_>>();
+    let read_names_list_clone = read_names_list.iter().map(|x| x.split("|").collect::<Vec<_>>()[0].to_string().clone()).collect::<HashSet<_>>();
+    read_names_list_clone
+}
+
+pub fn find_best_node(node_info: &HashMap<String, NodeInfo>, current_nodes: &HashSet<String>, haplotype_read_names: &HashSet<String>) -> String {
+    let mut best_node = String::new();
+    let mut max_overlapped_reads = usize::MIN;
+    for node in current_nodes {
+        let read_names = get_read_name_list(node_info, node.clone()); ;
+        let overlapped_reads = read_names.intersection(haplotype_read_names).collect::<HashSet<_>>();
+        if overlapped_reads.len() > max_overlapped_reads {
+            max_overlapped_reads = overlapped_reads.len();
+            best_node = node.clone();
+        }
+    }
+    if best_node.is_empty() {
+        info!("No best node found for haplotype: {:?}", current_nodes);
+        return current_nodes.iter().next().unwrap().clone();
+    }
+    best_node
+}
+
+pub fn construct_sequences_from_haplotype(node_info: &HashMap<String, NodeInfo>, node_haplotype: &HashMap<String, HashSet<usize>>, haplotype_number: usize) -> HashMap<usize, (Vec<String>, String, HashSet<String>)> {
+    let mut haplotype_path = HashMap::new();
+    let mut haplotype_sequences = HashMap::new();
+    let mut haplotype_read_names = HashMap::new();
+    let all_interval_nodes = find_all_interval_names(node_info);
+    // find haplotype path
+    for (node_id, haplotype_set) in node_haplotype.iter() {
+        for haplotype in haplotype_set {
+            haplotype_path.entry(haplotype.clone()).or_insert(Vec::new()).push(node_id.clone());
+            let read_names_list_clone = get_read_name_list(node_info, node_id.clone());
+            haplotype_read_names.insert(haplotype.clone(), read_names_list_clone.clone());
+        }
+    }
+    // find haplotype sequence
+    for (haplotype_num, node_list) in haplotype_path.iter() {
+        
+        let mut interval2nodes = HashMap::new();
+        for node in node_list {
+            let interval_name = node.split(".").collect::<Vec<_>>()[1];
+            interval2nodes.entry(interval_name.to_string().clone()).or_insert(HashSet::new()).insert(node.clone());
+        }
+        let mut interval_list = interval2nodes.keys().collect::<Vec<_>>();
+        interval_list.sort();
+        let mut haplotype_sequence = String::new();
+        let mut path = Vec::new();
+        let mut haplotype_reads_final = HashSet::new();
+        for interval_name in interval_list.iter() {
+            let current_nodes = interval2nodes.get(*interval_name).unwrap();
+            if current_nodes.len() == 1 {
+                let node = current_nodes.iter().next().unwrap();
+                haplotype_sequence += &node_info.get(node).unwrap().seq.clone();
+                path.push(node.clone());
+                haplotype_reads_final.extend(get_read_name_list(node_info, node.clone()));
+            } else if current_nodes.len() > 1 {
+                let node = find_best_node(node_info, current_nodes, haplotype_read_names.get(haplotype_num).unwrap(), );
+                haplotype_sequence += &node_info.get(&node).unwrap().seq.clone();
+                path.push(node.clone());
+                haplotype_reads_final.extend(get_read_name_list(node_info, node.clone()));
+            }else{
+                let current_nodes = all_interval_nodes.get(*interval_name).unwrap();
+                let node = find_best_node(node_info, current_nodes, haplotype_read_names.get(haplotype_num).unwrap());
+                haplotype_sequence += &node_info.get(&node).unwrap().seq.clone();
+                path.push(node.clone());
+                haplotype_reads_final.extend(get_read_name_list(node_info, node.clone()));
+            }
+        }
+        haplotype_sequences.insert(haplotype_num.clone(), (path.clone(), haplotype_sequence.clone(), haplotype_reads_final.clone()));
+    }
+
+    haplotype_sequences
 }
 
 /// Enumerate all paths in a directed acyclic graph using DFS
@@ -278,45 +358,31 @@ fn dfs_traverse_with_haplotype_constrains(
     
 }
 
-
-pub fn traverse_graph(node_info: &HashMap<String, NodeInfo>, edge_info: &HashMap<String, Vec<String>>, germline_only: bool, hap_number: usize) -> std::result::Result<HashMap<Vec<String>, (String, HashSet<String>)>, Box<dyn Error>> {
-    info!("Traversing graph with germline_only: {}, hap_number: {}", germline_only, hap_number);
-    let all_paths = if germline_only {
-        let (germline_nodes_sorted, germline_edge_info, node_haplotype) = find_germline_nodes(node_info, edge_info, hap_number);
-        enumerate_all_paths_with_haplotype(&germline_nodes_sorted, &germline_edge_info, &node_haplotype, hap_number)?
-    } else {
-        enumerate_all_paths(node_info, edge_info)?
-    };
-    // let all_paths = enumerate_all_paths(node_info, edge_info)?;
-    
+pub fn construct_sequences_from_haplotype_path(node_info: &HashMap<String, NodeInfo>, all_paths: &Vec<Vec<String>>) -> HashMap<usize, (Vec<String>, String, HashSet<String>)> {
     // Get the sequence of each path
     let mut all_sequences = HashMap::new();
-    for path in all_paths {
+    for (path_index, path) in all_paths.iter().enumerate() {
         let mut sequence = String::new();
         // let mut total_supported_reads = 0;
         let mut read_names = HashSet::new();
         for node in path.iter() {
             let node_info_dict = node_info.get(node).expect(&format!("Node {} not found in node_info, path Number: {:?}", node, path));
-            // let supported_reads = node_info_dict.support_reads.clone();
-            // let supported_reads = supported_reads.trim_matches('"').parse::<usize>().unwrap();
-            let supported_reads = node_info_dict.read_names.clone();
-            for read in supported_reads.split(",").collect::<Vec<_>>(){
-                read_names.insert(read.to_string());
-            }
+            let read_names_list_clone = get_read_name_list(node_info, node.clone());
+            read_names.extend(read_names_list_clone.clone());
             let haplotype_seq = node_info_dict.seq.clone();
             sequence += &haplotype_seq;
             // total_supported_reads += supported_reads;
         }
-        all_sequences.insert(path.clone(), (sequence, read_names.clone()));
+        all_sequences.insert(path_index, (path.clone(), sequence, read_names.clone()));
     }
-
-    Ok(all_sequences)
+    all_sequences
 }
 
-pub fn write_graph_path_fasta(all_sequences: &HashMap<Vec<String>, (String, HashSet<String>)>, output_filename: &PathBuf) -> std::result::Result<(), Box<dyn Error>> {
+
+pub fn write_graph_path_fasta(all_sequences: &HashMap<usize, (Vec<String>, String, HashSet<String>)>, output_filename: &PathBuf) -> std::result::Result<(), Box<dyn Error>> {
     let mut file = File::create(output_filename)?;
     let chars_per_line = 60;
-    for (index,(path, (sequence, supported_reads))) in all_sequences.iter().enumerate() {
+    for (index,(path, sequence, supported_reads)) in all_sequences.iter(){
         let chromosome = path[0].split(".").collect::<Vec<_>>()[1].split(":").collect::<Vec<_>>()[0];
         let (start, end) = eval::find_alignment_intervals(path.iter().map(|x| x.as_str()).collect::<Vec<_>>())?;
         writeln!(file, ">{}:{}-{}.{}\tSupports:{}\t{}", chromosome, start, end, index, supported_reads.len(), path.join("|"))?;
@@ -375,21 +441,24 @@ pub fn find_primary_haplotypes(all_sequences: &HashMap<Vec<String>, (String, Has
 
 
 
-pub fn start(graph_filename: &PathBuf, locus: &String, germline_only:bool, haplotype_number: usize,  output_prefix: &PathBuf) -> AnyhowResult<()> {
+pub fn start(graph_filename: &PathBuf, germline_only:bool, haplotype_number: usize,  output_prefix: &PathBuf) -> AnyhowResult<()> {
     let (node_info, edge_info) = load_graph(graph_filename).unwrap();
-    let all_sequences = traverse_graph(&node_info, &edge_info, germline_only, haplotype_number).unwrap();
-    // println!("all_sequences: {:?}", all_sequences);
-    info!("All sequences constructed: {}", all_sequences.len());
-    let (ref_chromosome, ref_start, ref_end) = util::split_locus(locus.to_string());
-    let mut hap_number = haplotype_number;
-    let all_sequences_filtered = if germline_only {
-        find_primary_haplotypes(&all_sequences, haplotype_number)
+
+
+    info!("Traversing graph with germline_only: {}, hap_number: {}", germline_only, haplotype_number);
+    let all_sequences = if germline_only {
+        let (germline_nodes_sorted, germline_edge_info, node_haplotype) = find_germline_nodes(&node_info, &edge_info, haplotype_number);
+        // enumerate_all_paths_with_haplotype(&germline_nodes_sorted, &germline_edge_info, &node_haplotype, hap_number)?
+        construct_sequences_from_haplotype(&germline_nodes_sorted, &node_haplotype, haplotype_number)
     } else {
-        all_sequences
+        let all_paths = enumerate_all_paths(&node_info, &edge_info).expect("Failed to enumerate all paths");
+        construct_sequences_from_haplotype_path(&node_info, &all_paths)
     };
-    info!("All sequences filtered: {}", all_sequences_filtered.len());
+
+    info!("All sequences constructed: {}", all_sequences.len());
+
     let output_filename = PathBuf::from(format!("{}.fasta", output_prefix.to_string_lossy()));
-    write_graph_path_fasta(&all_sequences_filtered, &output_filename);
+    write_graph_path_fasta(&all_sequences, &output_filename);
     info!("All sequences written to fasta: {}", output_prefix.to_str().unwrap());
     Ok(())
 }

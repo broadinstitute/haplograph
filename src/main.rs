@@ -68,7 +68,10 @@ enum Commands {
        #[arg(short, long, default_value = "gfa")]
        default_file_format: String, 
    
-   
+       /// Haplotype number
+       #[arg(short, long, default_value = "2")]
+       number_of_haplotypes: usize,
+
        /// Verbose output
        #[arg(short, long)]
        verbose: bool,
@@ -96,9 +99,9 @@ enum Commands {
         // #[arg(short, long, default_value = "false")]
         // traverse_constraint: bool,
 
-        /// locus name (chromo:start-end)
-        #[arg(short, long)]
-        locus: String,
+        // /// locus name (chromo:start-end)
+        // #[arg(short, long)]
+        // locus: String,
 
         /// Verbose output
        #[arg(short, long)]
@@ -189,6 +192,8 @@ fn main() -> Result<()> {
             primary_only, 
             //output file format
             default_file_format, 
+            // haplotype number
+            number_of_haplotypes,
             // Verbose output
             verbose,
         } => {
@@ -229,8 +234,9 @@ fn main() -> Result<()> {
                             windows.push((chromosome.clone(), i, end_pos));
                         }
                     }
+                    windows.sort_by(|a, b| a.1.cmp(&b.1).then(a.2.cmp(&b.2)));
                     if default_file_format == "gfa" {
-                        graph::start( &mut bam, &windows, &locus, &reference_seqs, &sampleid, min_reads as usize, frequency_min, primary_only, &output_prefix)?;
+                        graph::start( &mut bam, &windows, &reference_seqs, &sampleid, min_reads as usize, frequency_min, primary_only, &output_prefix, number_of_haplotypes)?;
                     } else {
                         hap::start(&mut bam, &windows, &reference_seqs, &sampleid, min_reads as usize, frequency_min, primary_only, &output_prefix, &default_file_format)?;
                     }
@@ -255,7 +261,7 @@ fn main() -> Result<()> {
                         windows.push((chromosome.clone(), i, end_pos));
                     }
                     if default_file_format == "gfa" {
-                        graph::start( &mut bam, &windows, &locus, &reference_seqs, &sampleid, min_reads as usize, frequency_min, primary_only, &output_prefix)?;
+                        graph::start( &mut bam, &windows, &reference_seqs, &sampleid, min_reads as usize, frequency_min, primary_only, &output_prefix, number_of_haplotypes)?;
             
                     } else {
                         hap::start(&mut bam, &windows, &reference_seqs, &sampleid, min_reads as usize, frequency_min, primary_only, &output_prefix, &default_file_format)?;
@@ -270,7 +276,6 @@ fn main() -> Result<()> {
             output_prefix,
             major_haplotype_only,
             number_of_haplotypes,
-            locus,
             verbose,
         } => {
             // Initialize logging
@@ -280,7 +285,7 @@ fn main() -> Result<()> {
                 std::env::set_var("RUST_LOG", "info");
             }
             env_logger::init();
-            asm::start(&graph_gfa, &locus, major_haplotype_only, number_of_haplotypes,  &output_prefix)?;
+            asm::start(&graph_gfa,  major_haplotype_only, number_of_haplotypes,  &output_prefix)?;
         }
         Commands::Call {
             gfa_file,

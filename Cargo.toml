@@ -11,14 +11,13 @@ categories = ["science::bio-informatics"]
 
 [dependencies]
 bio = "2.0.1"
-ndarray = "0.15"
+ndarray = "0.16.1"
 flate2 = "1.0.30"
 serde_json = "1.0.120"
 serde = "1.0.204"
 rust-htslib = { version = "0.47.0", features = ["curl", "gcs"] }
 rayon = "1.7"
 csv = "1.2" 
-rand = "0.8"
 regex = "1.9.5"
 clap = { version = "4.0", features = ["derive"] }
 anyhow = "1.0"

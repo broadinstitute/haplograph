@@ -393,15 +393,17 @@ pub fn Phase_germline_variants(
 ) -> AnyhowResult<Vec<Variant>> {
     let (node_info, edge_info) = asm::load_graph(graph_filename).unwrap();
     // establish the phasing information
-    let all_sequences = asm::traverse_graph(&node_info, &edge_info, true, haplotype_number).unwrap();
-    let primary_haplotypes = asm::find_primary_haplotypes(&all_sequences, haplotype_number);
-    let mut haplotype_map: HashMap<String, Vec<usize>> = HashMap::new();
-    for (index, (path, (sequence, supported_reads))) in primary_haplotypes.iter().enumerate() {
-        // println!("path: {:?}, sequence length: {}", path, sequence.len());
-        for node in path.iter() {
-            haplotype_map.entry(node.clone()).or_insert(Vec::new()).push(index);
-        }
-    }
+    // let all_sequences = asm::traverse_graph(&node_info, &edge_info, true, haplotype_number).unwrap();
+    let (germline_nodes_sorted, germline_edge_info, node_haplotype) = asm::find_germline_nodes(&node_info, &edge_info, haplotype_number);
+    // let primary_haplotypes = asm::find_primary_haplotypes(&all_sequences, haplotype_number);
+    // let mut haplotype_map: HashMap<String, Vec<usize>> = HashMap::new();
+    // for (index, (path, (sequence, supported_reads))) in all_sequences.iter().enumerate() {
+    //     // println!("path: {:?}, sequence length: {}", path, sequence.len());
+    //     for node in path.iter() {
+    //         haplotype_map.entry(node.clone()).or_insert(Vec::new()).push(index);
+    //     }
+    // }
+    // println!("haplotype_map: {:?}", haplotype_map);
     // println!("haplotype_map: {:?}", haplotype_map);
     // collapse variants by pos, ref, alt, variant_type, haplotype_index
     let mut collapsed_variants = HashMap::new();
@@ -422,8 +424,9 @@ pub fn Phase_germline_variants(
         let node_id_list = node_list.iter().map(|x| x.1.clone()).collect::<Vec<String>>();
         let mut haplotype_index = Vec::new();
         for node_id in node_id_list.iter() {
-            if haplotype_map.contains_key(node_id) {
-                haplotype_index.extend(haplotype_map.get(node_id).unwrap().iter().map(|x| x + 1));
+            if node_haplotype.contains_key(node_id) {
+                // println!("node_id: {:?}, haplotype_map: {:?}", node_id, node_haplotype.get(node_id).unwrap());
+                haplotype_index.extend(node_haplotype.get(node_id).unwrap().iter().map(|x| x + 1));
             }
         }
         // println!("haplotype_index: {:?}", haplotype_index);
@@ -453,7 +456,7 @@ pub fn start(graph_filename: &PathBuf, reference_seqs: &Vec<fastq::Record>, samp
         let alt_seq = n_info.seq.clone();
         let support_reads = n_info.support_reads.clone();
         // transform support_reads to usize, drop the quote before and after the number
-        let support_reads = support_reads.trim_matches('"').parse::<usize>().unwrap();
+        // let support_reads = support_reads.trim_matches('"').parse::<usize>().unwrap();
         // let support_reads = support_reads.parse::<usize>().unwrap();
         // println!("support_reads: {}", support_reads);
         let parts: Vec<&str> = node_id.split(".").collect();
