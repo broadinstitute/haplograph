@@ -109,7 +109,7 @@ task haplograph_asm {
                                                         -w ~{windowsize} \
                                                         -d gfa \
                                                         ~{extra_arg}
-        /haplograph/target/release/haplograph assemble -m -n 2 -g ~{prefix}.gfa -o ~{prefix}
+        /haplograph/target/release/haplograph assemble -m -n 2 -g ~{prefix}.gfa -o ~{prefix} -r ~{reference_fa}
         grep ">" ~{prefix}.fasta | wc -l > haplotypenum.txt
         
     >>>
@@ -448,9 +448,14 @@ task downsampleBam {
 
     command <<<
         set -eo pipefail
-
-        gatk DownsampleSam -I ~{input_bam} -O ~{basename}_~{desiredCoverage}x.bam -R 7 -P ~{scalingFactor} -S ConstantMemory --VALIDATION_STRINGENCY LENIENT --CREATE_INDEX true
-
+        if [[ scalingFactor < 1.0 ]]; then
+            gatk DownsampleSam -I ~{input_bam} -O ~{basename}_~{desiredCoverage}x.bam -R 7 -P ~{scalingFactor} -S ConstantMemory --VALIDATION_STRINGENCY LENIENT --CREATE_INDEX true
+        else
+            mv ~{input_bam} ~{basename}_~{desiredCoverage}x.bam
+            mv ~{input_bam_bai} ~{basename}_~{desiredCoverage}x.bai
+            echo "Total Coverage is lower than desiredCoverage"
+        fi
+        
 
     >>>
     runtime {
