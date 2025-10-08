@@ -86,18 +86,30 @@ pub fn start(truth_fasta: &PathBuf, query_fasta: &PathBuf, haplotype_number: usi
     let mut optimal_perm = Vec::new();
     let mut optimal_qv_scores = Vec::new();
     
-    for perm in v.iter().permutations(v.len()).unique() {
-        let mut qv_scores_perm = Vec::new();
-        for (i, j) in perm.iter().enumerate() {
-            let qv_score = calculate_qv_score(truth_seqs[i].clone(), query_seqs[**j].clone()).unwrap();
-            println!("{} {} qv_score: {}", i, j, qv_score.clone());
-            qv_scores_perm.push(qv_score.clone());
+    if v.len() > 1 {
+        for perm in v.iter().permutations(v.len()).unique() {
+            let mut qv_scores_perm = Vec::new();
+            for (i, j) in perm.iter().enumerate() {
+                let qv_score = calculate_qv_score(truth_seqs[i].clone(), query_seqs[**j].clone()).unwrap();
+                println!("{} {} qv_score: {}", i, j, qv_score.clone());
+                qv_scores_perm.push(qv_score.clone());
+            }
+            if qv_scores_perm.iter().sum::<f64>() > optimal_score {
+                optimal_score = qv_scores_perm.iter().sum::<f64>();
+                optimal_perm = perm.clone();
+                optimal_qv_scores = qv_scores_perm.clone();
+            }
         }
-        if qv_scores_perm.iter().sum::<f64>() > optimal_score {
-            optimal_score = qv_scores_perm.iter().sum::<f64>();
-            optimal_perm = perm.clone();
-            optimal_qv_scores = qv_scores_perm.clone();
+    }else{
+        for tseq in truth_seqs.iter() {
+            let qv_score = calculate_qv_score(tseq.clone(), query_seqs[0].clone()).unwrap();
+            if qv_score > optimal_score {
+                optimal_score = qv_score;
+                optimal_perm = vec![&(0 as usize)];
+                optimal_qv_scores = vec![qv_score.clone()];
+            }
         }
+
     }
     println!("optimal_score: {}", optimal_score);
     println!("optimal_perm: {:?}, {:?}", v, optimal_perm);

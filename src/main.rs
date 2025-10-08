@@ -57,7 +57,7 @@ enum Commands {
        min_reads: u8,
    
        ///window size
-       #[arg(short, long, default_value = "1000")]
+       #[arg(short, long, default_value = "100")]
        window_size: usize,
    
        ///if only primary reads are used
@@ -82,6 +82,10 @@ enum Commands {
         /// Input GFA file
         #[arg(short, long)]
         graph_gfa: PathBuf,
+
+        /// Reference FASTA file
+        #[arg(short, long)]
+        reference_fa: String,
         
         /// Output prefix
         #[arg(short, long, default_value = "haplograph_asm")]
@@ -95,13 +99,9 @@ enum Commands {
         #[arg(short, long, default_value = "2")]
         number_of_haplotypes: usize,
 
-        // /// graph traversal constraint by reads, default to true, fast and memory efficient
-        // #[arg(short, long, default_value = "false")]
-        // traverse_constraint: bool,
-
-        // /// locus name (chromo:start-end)
-        // #[arg(short, long)]
-        // locus: String,
+        /// Reference guided, default to false
+        #[arg(short, long, default_value = "false")]
+        assembly_guided: bool,
 
         /// Verbose output
        #[arg(short, long)]
@@ -275,7 +275,9 @@ fn main() -> Result<()> {
             graph_gfa,
             output_prefix,
             major_haplotype_only,
+            reference_fa,
             number_of_haplotypes,
+            assembly_guided,
             verbose,
         } => {
             // Initialize logging
@@ -285,7 +287,7 @@ fn main() -> Result<()> {
                 std::env::set_var("RUST_LOG", "info");
             }
             env_logger::init();
-            asm::start(&graph_gfa,  major_haplotype_only, number_of_haplotypes,  &output_prefix)?;
+            asm::start(&graph_gfa,  &reference_fa, major_haplotype_only, number_of_haplotypes,  &output_prefix, assembly_guided)?;
         }
         Commands::Call {
             gfa_file,

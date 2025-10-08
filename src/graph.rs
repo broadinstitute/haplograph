@@ -57,6 +57,7 @@ pub fn get_node_edge_info(windows: &Vec<(String, usize, usize)>, final_hap_list:
         // assert_eq!(unique_read_set.len(), final_hap_list_index.len());
 
         for (i, (final_haplotype_seq,(cigar, read_vector, allele_frequency))) in final_hap_list_index.iter().enumerate(){
+            let read_vector_clone = read_vector.iter().map(|x| x.split("|").collect::<Vec<_>>()[0].to_string()).collect::<HashSet<_>>();
             let node_id = format!("H.{}:{}-{}.{}", window.0, window.1, window.2, i);
             // let cigar = cigar_dict_list[index].get(final_haplotype_seq).unwrap();
             let read_vector_len = read_vector.len();
@@ -80,7 +81,8 @@ pub fn get_node_edge_info(windows: &Vec<(String, usize, usize)>, final_hap_list:
                     let next_node_id = format!("H.{}:{}-{}.{}", next_window.0, next_window.1, next_window.2, j);
                     // let next_cigar = cigar_dict_list[index + 1].get(next_final_haplotype_seq).unwrap();
                     let next_read_vector_len = next_read_vector.len();
-                    let overlapping_reads = util::find_overlapping_reads(read_vector, next_read_vector);
+                    let next_read_vector_clone = next_read_vector.iter().map(|x| x.split("|").collect::<Vec<_>>()[0].to_string()).collect::<HashSet<_>>();
+                    let overlapping_reads = read_vector_clone.intersection(&next_read_vector_clone).cloned().collect::<Vec<_>>();
                     let overlap_ratio = overlapping_reads.len() as f64 / (read_vector_len as f64).max( next_read_vector_len as f64);
                     // println!("readset1: {}, readset2: {}, overlap_ratio: {}", read_vector.len(), next_read_vector.len(), overlap_ratio);
                     if overlapping_reads.len() >= min_reads && overlap_ratio > frequency_min {
