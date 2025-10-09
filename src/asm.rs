@@ -176,7 +176,7 @@ pub fn find_germline_nodes(node_info: &HashMap<String, NodeInfo>, edge_info: &Ha
             germline_nodes_sorted.insert(node_id.clone(), node_info.get(&node_id.clone()).unwrap().clone());
             for (hap, hap_read_names) in haplotype_reads.iter_mut() {
                 let overlap_reads = hap_read_names.intersection(&read_names).cloned().collect::<HashSet<_>>();
-                let overlap_ratio = overlap_reads.len() as f64 / hap_read_names.len() as f64;
+                let overlap_ratio = overlap_reads.len() as f64 / read_names.len() as f64;
                 if overlap_ratio > 0.1 && overlap_reads.len() > 1 {
                     node_haplotype.entry(node_id.clone()).or_insert(HashSet::new()).insert(hap.clone());
                 }

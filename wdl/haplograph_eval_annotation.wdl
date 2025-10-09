@@ -96,6 +96,7 @@ task haplograph_asm {
         String prefix
         String locus
         Int windowsize
+        Int minimal_supported_reads
         String extra_arg = ""
     }
 
@@ -107,6 +108,7 @@ task haplograph_asm {
                                                         -o ~{prefix} \
                                                         -l ~{locus} \
                                                         -w ~{windowsize} \
+                                                        -m ~{minimal_supported_reads} \
                                                         -d gfa \
                                                         ~{extra_arg}
         /haplograph/target/release/haplograph assemble -m -n 2 -g ~{prefix}.gfa -o ~{prefix} -r ~{reference_fa}
