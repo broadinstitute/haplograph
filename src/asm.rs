@@ -92,6 +92,58 @@ pub fn find_all_interval_names(node_info: &HashMap<String, NodeInfo>) -> HashMap
     all_nodes
 }
 
+pub fn find_haplotype_reads(node_info: &HashMap<String, NodeInfo>, hap_number: usize) -> HashMap<usize, HashSet<String>> {
+    let mut haplotype_reads:HashMap<usize, HashSet<String>> = HashMap::new();
+    let all_nodes = find_all_interval_names(node_info);
+    let mut all_nodes_sorted = all_nodes.into_iter().map(|(k, v)| (k, v.into_iter().collect::<Vec<_>>())).collect::<Vec<(String, Vec<String>)>>();
+    all_nodes_sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    for (interval_name, node_vec) in all_nodes_sorted.iter() {
+        let mut node_support = Vec::new();
+        for node in node_vec.iter() {
+            let read_name_list = get_read_name_list(node_info, node.clone());
+            node_support.push((node.clone(), read_name_list.len()));
+        }
+        node_support.sort_by(|a, b| b.1.cmp(&a.1));
+        let n = node_support.len().min(hap_number);
+        if n < 2{
+            continue;
+        }
+        let node_vec_sorted = node_support.into_iter().take(n).collect::<Vec<_>>();
+        let ratio = node_vec_sorted[0].1 as f64 / node_vec_sorted[1].1 as f64;
+        let total_reads = node_vec_sorted.iter().map(|(_, read_name_list_len)| read_name_list_len).sum::<usize>()/node_vec_sorted.len();
+
+        if ratio > 2.0 && total_reads > 10 {
+            continue;
+        }
+        if haplotype_reads.is_empty() {
+            for (index, (node_id, read_name_list_len)) in node_vec_sorted.iter().enumerate() {
+                haplotype_reads.entry(index).or_insert(HashSet::new()).extend(get_read_name_list(node_info, node_id.clone()));
+            }
+        }else{
+            for (node_id, read_name_list_len) in node_vec_sorted.iter() {
+                let mut max_overlap_reads = 0;
+                let mut major_haplotype_index = hap_number + 1 as usize; 
+                let current_read_names = get_read_name_list(node_info, node_id.clone());
+                for (hap, read_names) in haplotype_reads.iter_mut() {
+                    let overlap_reads = read_names.intersection(&current_read_names).cloned().collect::<HashSet<_>>();
+                    if overlap_reads.len() > max_overlap_reads {
+                        max_overlap_reads = overlap_reads.len();
+                        major_haplotype_index = hap.clone();
+                    }
+                }
+                if max_overlap_reads > 0 {
+                    // println!("major_haplotype_index: {:?}, max_overlap_reads: {:?}", major_haplotype_index, max_overlap_reads);
+                    haplotype_reads.entry(major_haplotype_index).or_insert(HashSet::new()).extend(current_read_names.clone());
+                }
+            }
+
+        }
+        
+    }
+    // println!("haplotype_reads: {:?}", haplotype_reads.iter().map(|(k, v)| (k, v.len())).collect::<Vec<_>>());
+    haplotype_reads
+}
+
 pub fn find_germline_nodes(node_info: &HashMap<String, NodeInfo>, edge_info: &HashMap<String, Vec<String>>, hap_number: usize) -> (HashMap<String,NodeInfo>, HashMap<String, Vec<String>>, HashMap<String, HashSet<usize>>) {
 
     let all_nodes = find_all_interval_names(node_info);
@@ -99,10 +151,10 @@ pub fn find_germline_nodes(node_info: &HashMap<String, NodeInfo>, edge_info: &Ha
     all_nodes_sorted.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut germline_nodes_sorted = HashMap::new();
-    let mut haplotype_reads:HashMap<usize, HashSet<String>> = HashMap::new();
-    for i in 0.. hap_number {
-        haplotype_reads.insert(i, HashSet::new());
-    } // (hap_index, read_names) read specific to haplotype
+    let mut haplotype_reads:HashMap<usize, HashSet<String>> = find_haplotype_reads(node_info, hap_number);
+    let all_reads = find_all_reads(node_info);
+    // info!("haplotype_reads number: {:?}, all_reads number: {:?}", haplotype_reads.iter().map(|(k, v)| (k, v.len())).collect::<Vec<_>>(), all_reads.len());
+
 
     let mut node_haplotype: HashMap<String, HashSet<usize>> = HashMap::new(); // {node_names : hap} node specific to haplotype
 
@@ -122,38 +174,19 @@ pub fn find_germline_nodes(node_info: &HashMap<String, NodeInfo>, edge_info: &Ha
         let node_vec_sorted = node_support.into_iter().take(n).collect::<Vec<_>>();
         for (hap_index, (node_id, read_names)) in node_vec_sorted.iter().enumerate() {
             germline_nodes_sorted.insert(node_id.clone(), node_info.get(&node_id.clone()).unwrap().clone());
-            let mut unique_read_names = read_names.clone();
-            // get unique read names from other parallele nodes
-            for (hap_index_next, (node_id_next, read_names_next)) in node_vec_sorted.iter().enumerate() {
-                if node_id_next == node_id {
-                    continue;
-                }
-                unique_read_names = unique_read_names.difference(&read_names_next).cloned().collect::<HashSet<_>>();
-            }
-
-            // determine the haplotype index of reads
-            if unique_read_names.is_empty(){
-                continue;
-            }  
-            let mut max_overlap_reads = usize::MIN;
-            let mut major_haplotype_index = hap_number + 1 as usize; 
-            for (hap, read_names) in haplotype_reads.iter_mut() {
-                let overlap_reads = read_names.intersection(&unique_read_names).cloned().collect::<HashSet<_>>();
-                if overlap_reads.len() > max_overlap_reads {
-                    max_overlap_reads = overlap_reads.len();
-                    major_haplotype_index = hap.clone();
+            for (hap, hap_read_names) in haplotype_reads.iter_mut() {
+                let overlap_reads = hap_read_names.intersection(&read_names).cloned().collect::<HashSet<_>>();
+                let overlap_ratio = overlap_reads.len() as f64 / hap_read_names.len() as f64;
+                if overlap_ratio > 0.1 && overlap_reads.len() > 1 {
+                    node_haplotype.entry(node_id.clone()).or_insert(HashSet::new()).insert(hap.clone());
                 }
             }
 
-            if max_overlap_reads > 0 {
-                node_haplotype.entry(node_id.clone()).or_insert(HashSet::new()).insert(major_haplotype_index.clone());
-                haplotype_reads.entry(major_haplotype_index).or_insert(HashSet::new()).extend(unique_read_names.clone());
-            }else{
-                haplotype_reads.entry(hap_index).or_insert(HashSet::new()).extend(unique_read_names.clone());
-                node_haplotype.entry(node_id.clone()).or_insert(HashSet::new()).insert(hap_index.clone());
-            }
-        }  
+        }
+          
     }
+    info!("haplotype_reads number: {:?}, all_reads number: {:?}", haplotype_reads.iter().map(|(k, v)| (k, v.len())).collect::<Vec<_>>(), all_reads.len());
+
     // println!("haplotype_reads: {:?}", haplotype_reads);
 
     let mut germline_edge_info = HashMap::new();
@@ -175,9 +208,9 @@ pub fn find_germline_nodes(node_info: &HashMap<String, NodeInfo>, edge_info: &Ha
 
 pub fn find_all_reads (node_info: &HashMap<String, NodeInfo>) -> HashSet<String> {
     let mut all_reads = HashSet::new();
-    for (node, node_info) in node_info.iter() {
-        let read_names = node_info.read_names.clone();
-        all_reads.extend(read_names.split(",").map(|x| x.to_string()));
+    for (node, node_infomation) in node_info.iter() {
+        let read_names = get_read_name_list(&node_info, node.clone());
+        all_reads.extend(read_names.iter().cloned());
     }
     all_reads
 }
@@ -209,7 +242,6 @@ pub fn construct_sequences_from_haplotype(node_info: &HashMap<String, NodeInfo>,
     let mut haplotype_path = HashMap::new();
     let mut haplotype_sequences = HashMap::new();
     let mut haplotype_read_names = HashMap::new();
-    let all_interval_nodes = find_all_interval_names(node_info);
     // find haplotype path
     for (node_id, haplotype_set) in node_haplotype.iter() {
         for haplotype in haplotype_set {
@@ -243,7 +275,12 @@ pub fn construct_sequences_from_haplotype(node_info: &HashMap<String, NodeInfo>,
                 } else {
                     current_nodes_by_assign.clone()
                 };
-                current_nodes_by_assign.intersection(&graph_current_nodes).cloned().collect::<HashSet<_>>()
+                let c_node = if graph_current_nodes.len() == 1 {
+                    graph_current_nodes.clone()
+                } else {
+                    current_nodes_by_assign.intersection(&graph_current_nodes).cloned().collect::<HashSet<_>>()  
+                };
+                c_node
             };
             
             if current_nodes.len() == 1 {
@@ -272,6 +309,7 @@ pub fn construct_sequences_from_haplotype(node_info: &HashMap<String, NodeInfo>,
                 
             }
         }
+
         // filter path based on edge_info
         if !reference_guided{
             for (i, node) in path.iter().enumerate() {
@@ -287,6 +325,13 @@ pub fn construct_sequences_from_haplotype(node_info: &HashMap<String, NodeInfo>,
                     }
                 }
             }
+        }
+
+        // check if the path is complete
+        let (start, end)= eval::find_alignment_intervals(path.iter().map(|x| x.as_str()).collect::<Vec<_>>()).expect("Failed to find alignment intervals");
+        let (all_start, all_end) = eval::find_alignment_intervals(node_info.keys().map(|x| x.as_str()).collect::<Vec<_>>()).expect("Failed to find reference intervals");
+        if ((end - start) as f64 / (all_end - all_start) as f64) < 0.8 {
+            complete = false;
         }
 
         if complete{
@@ -487,6 +532,7 @@ pub fn start(graph_filename: &PathBuf, reference_fa: &String, germline_only:bool
     let all_sequences = if germline_only {
         let (germline_nodes_sorted, germline_edge_info, node_haplotype) = find_germline_nodes(&node_info, &edge_info, haplotype_number);
         // enumerate_all_paths_with_haplotype(&germline_nodes_sorted, &germline_edge_info, &node_haplotype, hap_number)?
+        // println!("node_haplotype: {:?}", node_haplotype.iter().map(|(k, v)| (k, v)).collect::<Vec<_>>());
         construct_sequences_from_haplotype(&germline_nodes_sorted, &germline_edge_info, &node_haplotype, haplotype_number, reference_sequence, reference_guided)
     } else {
         let all_paths = enumerate_all_paths(&node_info, &edge_info).expect("Failed to enumerate all paths");
