@@ -448,7 +448,7 @@ task downsampleBam {
 
     command <<<
         set -eo pipefail
-        if [[ scalingFactor < 1.0 ]]; then
+        if [[ $scalingFactor < 1.0 ]]; then
             gatk DownsampleSam -I ~{input_bam} -O ~{basename}_~{desiredCoverage}x.bam -R 7 -P ~{scalingFactor} -S ConstantMemory --VALIDATION_STRINGENCY LENIENT --CREATE_INDEX true
         else
             mv ~{input_bam} ~{basename}_~{desiredCoverage}x.bam

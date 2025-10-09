@@ -48,12 +48,12 @@ enum Commands {
        #[arg(short, long)]
        locus: String,
    
-       /// Limited size of the region
-       #[arg(short, long, default_value = "0.01")]
+       /// minimal variant allele frequency
+       #[arg(short, long, default_value = "0.1")]
        frequency_min: f64,
        
        /// Minimal Supported Reads
-       #[arg(short, long, default_value = "2")]
+       #[arg(short, long, default_value = "1")]
        min_reads: u8,
    
        ///window size

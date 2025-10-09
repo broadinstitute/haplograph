@@ -394,18 +394,8 @@ pub fn Phase_germline_variants(
     let (node_info, edge_info) = asm::load_graph(graph_filename).unwrap();
     // establish the phasing information
     // let all_sequences = asm::traverse_graph(&node_info, &edge_info, true, haplotype_number).unwrap();
-    let (germline_nodes_sorted, germline_edge_info, node_haplotype) = asm::find_germline_nodes(&node_info, &edge_info, haplotype_number);
-    // let primary_haplotypes = asm::find_primary_haplotypes(&all_sequences, haplotype_number);
-    // let mut haplotype_map: HashMap<String, Vec<usize>> = HashMap::new();
-    // for (index, (path, (sequence, supported_reads))) in all_sequences.iter().enumerate() {
-    //     // println!("path: {:?}, sequence length: {}", path, sequence.len());
-    //     for node in path.iter() {
-    //         haplotype_map.entry(node.clone()).or_insert(Vec::new()).push(index);
-    //     }
-    // }
-    // println!("haplotype_map: {:?}", haplotype_map);
-    // println!("haplotype_map: {:?}", haplotype_map);
-    // collapse variants by pos, ref, alt, variant_type, haplotype_index
+    let (germline_nodes_sorted, germline_edge_info, node_haplotype, haplotype_reads) = asm::find_germline_nodes(&node_info, &edge_info, haplotype_number);
+
     let mut collapsed_variants = HashMap::new();
     for variant in Variants.iter() {
         let key = (variant.chromosome.clone(), variant.pos, variant.ref_allele.clone(), variant.alt_allele.clone(), variant.variant_type.clone());
