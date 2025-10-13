@@ -112,7 +112,7 @@ pub fn find_haplotype_reads(node_info: &HashMap<String, NodeInfo>, hap_number: u
         let ratio = node_vec_sorted[0].1 as f64 / node_vec_sorted[1].1 as f64;
         let total_reads = node_vec_sorted.iter().map(|(_, read_name_list_len)| read_name_list_len).sum::<usize>()/node_vec_sorted.len();
 
-        if ratio > 5.0 && total_reads > 10 {
+        if ratio > 2.0 && total_reads > 10 {
             continue;
         }
         if haplotype_reads.is_empty() {
@@ -136,11 +136,8 @@ pub fn find_haplotype_reads(node_info: &HashMap<String, NodeInfo>, hap_number: u
                     haplotype_reads.entry(major_haplotype_index).or_insert(HashSet::new()).extend(current_read_names.clone());
                 }
             }
-
         }
-        
     }
-    // println!("haplotype_reads: {:?}", haplotype_reads.iter().map(|(k, v)| (k, v.len())).collect::<Vec<_>>());
     haplotype_reads
 }
 
