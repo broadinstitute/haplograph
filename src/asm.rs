@@ -534,12 +534,12 @@ pub fn start(graph_filename: &PathBuf, reference_fa: &String, germline_only:bool
         let (germline_nodes_sorted, germline_edge_info, node_haplotype, haplotype_reads) = find_germline_nodes(&node_info, &edge_info, haplotype_number);
         let total_reads = haplotype_reads.values().map(|x| x.len()).sum::<usize>();
         info!("Total reads: {}", total_reads);
-        let allseq = if total_reads > 10{
+        let allseq = if total_reads > 20{
             construct_sequences_from_haplotype(&germline_nodes_sorted, &germline_edge_info, &node_haplotype, haplotype_number, reference_fa, reference_guided)
         } else {
             let all_paths = enumerate_all_paths(&node_info, &edge_info).expect("Failed to enumerate all paths");
-            let all_spans = all_paths.iter().map(|x| eval::find_alignment_intervals(x.iter().map(|y| y.as_str()).collect::<Vec<_>>()).unwrap().1 - eval::find_alignment_intervals(x.iter().map(|y| y.as_str()).collect::<Vec<_>>()).unwrap().0).collect::<Vec<_>>();
-            println!("all_spans: {:?}", all_spans);
+            // let all_spans = all_paths.iter().map(|x| eval::find_alignment_intervals(x.iter().map(|y| y.as_str()).collect::<Vec<_>>()).unwrap().1 - eval::find_alignment_intervals(x.iter().map(|y| y.as_str()).collect::<Vec<_>>()).unwrap().0).collect::<Vec<_>>();
+            // println!("all_spans: {:?}", all_spans);
             let allseq = construct_sequences_from_haplotype_path(&node_info, &all_paths);
             let primary_haplotypes = find_primary_haplotypes(&allseq, haplotype_number);
             primary_haplotypes
