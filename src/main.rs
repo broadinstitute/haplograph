@@ -53,7 +53,7 @@ enum Commands {
        frequency_min: f64,
        
        /// Minimal Supported Reads
-       #[arg(short, long, default_value = "1")]
+       #[arg(short, long, default_value = "2")]
        min_reads: u8,
    
        ///window size

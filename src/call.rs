@@ -95,14 +95,16 @@ pub fn get_variants_from_cigar(
                 } else {
                     "-"
                 };
-
-                let alt_allele = match alt_seq.get(alt_pos - 1..alt_pos + length) {
+                // println!("alt_pos: {}, length: {}, alt_seq: {}", alt_pos, length, alt_seq.len());
+                let spos = if alt_pos > 0 { alt_pos - 1 } else { 0 };
+                let alt_allele = match alt_seq.get(spos..alt_pos + length) {
                     Some(allele) => allele,
                     None => {
                         println!("{} {} {}", alt_seq, alt_seq.len(), alt_pos);
                         "-"
                     }
-                };
+                };      
+                
                 variants.push(Variant {
                     chromosome: ref_name.to_string(),
                     pos: pos,
@@ -122,8 +124,9 @@ pub fn get_variants_from_cigar(
                     *poscount.entry(pos).or_insert(0) += allelecount;
                 }
                 let pos = ref_start + ref_pos;
+                let spos = if ref_pos > 0 { ref_pos - 1 } else { 0 };
                 
-                let ref_allele = if ref_pos > 0 { match ref_seq.get(ref_pos - 1..ref_pos + length) {
+                let ref_allele = if ref_pos > 0 { match ref_seq.get(spos..ref_pos + length) {
                     Some(allele) => allele,
                     None => {
                         println!("{} {} {}", ref_seq, ref_seq.len(), ref_pos);
@@ -395,7 +398,8 @@ pub fn Phase_germline_variants(
     // establish the phasing information
     // let all_sequences = asm::traverse_graph(&node_info, &edge_info, true, haplotype_number).unwrap();
     let (germline_nodes_sorted, germline_edge_info, node_haplotype, haplotype_reads) = asm::find_germline_nodes(&node_info, &edge_info, haplotype_number);
-
+    println!("haplotype_reads   : {:?}", haplotype_reads.iter().map(|(k, v)| (k, v.len())).collect::<Vec<_>>());
+    println!("node_haplotype   : {:?}", node_haplotype);
     let mut collapsed_variants = HashMap::new();
     for variant in Variants.iter() {
         let key = (variant.chromosome.clone(), variant.pos, variant.ref_allele.clone(), variant.alt_allele.clone(), variant.variant_type.clone());

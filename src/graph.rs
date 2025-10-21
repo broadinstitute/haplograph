@@ -12,13 +12,6 @@ use std::error::Error;
 use indicatif::{ProgressBar, ProgressStyle};
 use bio::io::fastq;
 
-// pub fn phase_haplotype(node_info: &HashMap<String, String>, edge_info: &HashMap<(String,String), String>) -> HashMap<String, HashSet<usize>> {
-//     let mut node_haplotype = HashMap::new();
-//     for (node, node_info) in node_info.iter() {
-//         let haplotype_id = node.split(".").nth(1).unwrap().to_string();
-//         node_haplotype.insert(node.clone(), haplotype_id.clone());
-//     }
-// }
 
 pub struct NodeInfo {
     pub nodename: String,
@@ -85,7 +78,7 @@ pub fn get_node_edge_info(windows: &Vec<(String, usize, usize)>, final_hap_list:
                     let overlapping_reads = read_vector_clone.intersection(&next_read_vector_clone).cloned().collect::<Vec<_>>();
                     let overlap_ratio = overlapping_reads.len() as f64 / (read_vector_len as f64).max( next_read_vector_len as f64);
                     // println!("readset1: {}, readset2: {}, overlap_ratio: {}", read_vector.len(), next_read_vector.len(), overlap_ratio);
-                    if overlapping_reads.len() >= min_reads && overlap_ratio > frequency_min {
+                    if overlapping_reads.len() >= min_reads - 1 {
                         edge_info.insert((node_id.clone(), next_node_id.clone()), 
                         EdgeInfo {
                             src: node_id.clone(),
