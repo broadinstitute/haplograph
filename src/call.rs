@@ -397,7 +397,9 @@ pub fn Phase_germline_variants(
     let (node_info, edge_info) = asm::load_graph(graph_filename).unwrap();
     // establish the phasing information
     // let all_sequences = asm::traverse_graph(&node_info, &edge_info, true, haplotype_number).unwrap();
-    let (germline_nodes_sorted, germline_edge_info, node_haplotype, haplotype_reads) = asm::find_germline_nodes(&node_info, &edge_info, haplotype_number);
+    let (haplotype_reads, node_haplotype) = asm::find_node_haplotype(&node_info, haplotype_number);
+   
+    // let (germline_nodes_sorted, germline_edge_info, node_haplotype, haplotype_reads) = asm::find_germline_nodes(&node_info, &edge_info, haplotype_number);
     println!("haplotype_reads   : {:?}", haplotype_reads.iter().map(|(k, v)| (k, v.len())).collect::<Vec<_>>());
     println!("node_haplotype   : {:?}", node_haplotype);
     let mut collapsed_variants = HashMap::new();

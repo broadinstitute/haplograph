@@ -82,10 +82,6 @@ enum Commands {
         /// Input GFA file
         #[arg(short, long)]
         graph_gfa: PathBuf,
-
-        /// Reference FASTA file
-        #[arg(short, long)]
-        reference_fa: String,
         
         /// Output prefix
         #[arg(short, long, default_value = "haplograph_asm")]
@@ -99,9 +95,6 @@ enum Commands {
         #[arg(short, long, default_value = "2")]
         number_of_haplotypes: usize,
 
-        /// Reference guided, default to false
-        #[arg(short, long, default_value = "false")]
-        assembly_guided: bool,
 
         /// Verbose output
        #[arg(short, long)]
@@ -275,9 +268,7 @@ fn main() -> Result<()> {
             graph_gfa,
             output_prefix,
             major_haplotype_only,
-            reference_fa,
             number_of_haplotypes,
-            assembly_guided,
             verbose,
         } => {
             // Initialize logging
@@ -287,7 +278,7 @@ fn main() -> Result<()> {
                 std::env::set_var("RUST_LOG", "info");
             }
             env_logger::init();
-            asm::start(&graph_gfa,  &reference_fa, major_haplotype_only, number_of_haplotypes,  &output_prefix, assembly_guided)?;
+            asm::start(&graph_gfa,  major_haplotype_only, number_of_haplotypes,  &output_prefix)?;
         }
         Commands::Call {
             gfa_file,
