@@ -49,15 +49,15 @@ enum Commands {
        locus: String,
    
        /// minimal variant allele frequency
-       #[arg(short, long, default_value = "0.1")]
+       #[arg(short, long, default_value_t = 0.1)]
        frequency_min: f64,
        
        /// Minimal Supported Reads
-       #[arg(short, long, default_value = "2")]
+       #[arg(short, long, default_value_t = 2)]
        min_reads: u8,
    
        ///window size
-       #[arg(short, long, default_value = "100")]
+       #[arg(short, long, default_value_t = 100)]
        window_size: usize,
    
        ///if only primary reads are used
@@ -69,7 +69,7 @@ enum Commands {
        default_file_format: String, 
    
        /// Haplotype number
-       #[arg(short, long, default_value = "2")]
+       #[arg(short, long, default_value_t = 2)]
        number_of_haplotypes: usize,
 
        /// Verbose output
@@ -92,9 +92,12 @@ enum Commands {
         major_haplotype_only: bool,
 
         /// Haplotype number
-        #[arg(short, long, default_value = "2")]
+        #[arg(short, long, default_value_t = 2)]
         number_of_haplotypes: usize,
 
+        /// heterozygous coverage fold threshold, > 2.0 by default is not heterozygous
+        #[arg(short, long, default_value_t = 3.0)]
+        het_fold_threshold: f64,
 
         /// Verbose output
        #[arg(short, long)]
@@ -121,12 +124,16 @@ enum Commands {
         reference_fa: String,
 
         /// Maximum Haplotype number
-        #[arg(short, long, default_value = "2")]
+        #[arg(short, long, default_value_t = 2)]
         maximum_haplotypes: usize,
 
         /// Phase variants
         #[arg(short, long, default_value = "false")]
         phase_variants: bool,
+
+        /// heterozygous coverage fold threshold, > 2.0 by default is not heterozygous
+        #[arg(short, long, default_value_t = 3.0)]
+        het_fold_threshold: f64,
 
         /// Verbose output
        #[arg(short, long)]
@@ -269,6 +276,7 @@ fn main() -> Result<()> {
             output_prefix,
             major_haplotype_only,
             number_of_haplotypes,
+            het_fold_threshold,
             verbose,
         } => {
             // Initialize logging
@@ -278,7 +286,7 @@ fn main() -> Result<()> {
                 std::env::set_var("RUST_LOG", "info");
             }
             env_logger::init();
-            asm::start(&graph_gfa,  major_haplotype_only, number_of_haplotypes,  &output_prefix)?;
+            asm::start(&graph_gfa,  major_haplotype_only, number_of_haplotypes,  &output_prefix, het_fold_threshold)?;
         }
         Commands::Call {
             gfa_file,
@@ -288,6 +296,7 @@ fn main() -> Result<()> {
             verbose,
             maximum_haplotypes,
             phase_variants,
+            het_fold_threshold,
         } => {
             // Initialize logging
             if verbose {
@@ -298,7 +307,7 @@ fn main() -> Result<()> {
             env_logger::init();
 
             let reference_seqs = util::get_all_ref_seq(&reference_fa);
-            call::start(&gfa_file, &reference_seqs, &sampleid, &output_prefix, maximum_haplotypes, phase_variants)?;
+            call::start(&gfa_file, &reference_seqs, &sampleid, &output_prefix, maximum_haplotypes, phase_variants, het_fold_threshold)?;
         }
         Commands::Evaluate {
             truth_fasta,

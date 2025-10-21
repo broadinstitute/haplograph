@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::collections::HashMap;
 use crate::util;
 use crate::asm;
+use crate::eval;
 use rust_htslib::bcf::{self, index as BcfIndex, record::GenotypeAllele};
 
 
@@ -225,6 +226,30 @@ fn collapse_identical_records(variants: Vec<Variant>) -> Vec<Variant> {
         .collect()
 }
 
+fn find_coverage_from_gfa(gfa_filename: &PathBuf) -> HashMap<usize, usize> {
+    let mut coverage = HashMap::new();
+    let (node_info, edge_info) = asm::load_graph(gfa_filename).unwrap();
+    let interval_node = asm::find_parallele_nodes(&node_info);
+    for (interval, nodes) in interval_node.iter() {
+        let mut allele_count = 0;
+        for node in nodes.iter() {
+            let node_i = node_info.get(node).unwrap();
+            allele_count += node_i.support_reads;
+        }
+        if interval == "chr6:29942560-29942660" {
+            println!("interval: {:?}, nodes: {:?}", interval, nodes);
+            for node in nodes.iter() {
+                let node_i = node_info.get(node).unwrap();
+                println!("node: {:?}, support_reads: {:?}, {}", node, node_i.support_reads, allele_count);
+            }
+        }
+        let (startpos, endpos) = eval::find_alignment_intervals(nodes.iter().map(|node| node.as_str()).collect::<Vec<_>>()).unwrap();
+        for pos in startpos..endpos {   
+            *coverage.entry(pos + 1).or_insert(0) += allele_count;
+        }
+    }
+    coverage
+}
 
 fn write_vcf(
     variants: &[Variant],
@@ -393,15 +418,11 @@ pub fn Phase_germline_variants(
     graph_filename: &PathBuf, 
     Variants: &Vec<Variant>,
     haplotype_number: usize,
+    het_fold_threshold: f64,
 ) -> AnyhowResult<Vec<Variant>> {
     let (node_info, edge_info) = asm::load_graph(graph_filename).unwrap();
-    // establish the phasing information
-    // let all_sequences = asm::traverse_graph(&node_info, &edge_info, true, haplotype_number).unwrap();
-    let (haplotype_reads, node_haplotype) = asm::find_node_haplotype(&node_info, haplotype_number);
-   
-    // let (germline_nodes_sorted, germline_edge_info, node_haplotype, haplotype_reads) = asm::find_germline_nodes(&node_info, &edge_info, haplotype_number);
-    println!("haplotype_reads   : {:?}", haplotype_reads.iter().map(|(k, v)| (k, v.len())).collect::<Vec<_>>());
-    println!("node_haplotype   : {:?}", node_haplotype);
+     let (haplotype_reads, node_haplotype) = asm::find_node_haplotype(&node_info, haplotype_number, het_fold_threshold);
+
     let mut collapsed_variants = HashMap::new();
     for variant in Variants.iter() {
         let key = (variant.chromosome.clone(), variant.pos, variant.ref_allele.clone(), variant.alt_allele.clone(), variant.variant_type.clone());
@@ -410,7 +431,6 @@ pub fn Phase_germline_variants(
 
     let mut phased_variants = Vec::new();
     for (key_t,node_list) in collapsed_variants.iter() {
-        // println!("variant: {:?}", variant.node_id);
         let chromosome = key_t.0.clone();
         let pos = key_t.1.clone();
         let ref_allele = key_t.2.clone();
@@ -425,7 +445,6 @@ pub fn Phase_germline_variants(
                 haplotype_index.extend(node_haplotype.get(node_id).unwrap().iter().map(|x| x + 1));
             }
         }
-        // println!("haplotype_index: {:?}", haplotype_index);
 
         phased_variants.push(Variant {
             chromosome: chromosome,
@@ -443,18 +462,16 @@ pub fn Phase_germline_variants(
 
 
 
-pub fn start(graph_filename: &PathBuf, reference_seqs: &Vec<fastq::Record>, sampleid: &String, output_prefix: &String, haplotype_number: usize, phase_variants: bool) -> AnyhowResult<()> {
+pub fn start(graph_filename: &PathBuf, reference_seqs: &Vec<fastq::Record>, sampleid: &String, output_prefix: &String, haplotype_number: usize, phase_variants: bool, het_fold_threshold: f64) -> AnyhowResult<()> {
     let (node_info, _) = asm::load_graph(graph_filename).unwrap();
     let mut all_variants = Vec::new();
-    let mut coverage = HashMap::new();
+    // let mut coverage = HashMap::new();
+    // 29942660 has a wired coverage issue, should be fixed.
+    let coverage = find_coverage_from_gfa(graph_filename);
     for (node_id, n_info) in node_info.iter() {
         let cigar = n_info.cigar.clone();
         let alt_seq = n_info.seq.clone();
         let support_reads = n_info.support_reads.clone();
-        // transform support_reads to usize, drop the quote before and after the number
-        // let support_reads = support_reads.trim_matches('"').parse::<usize>().unwrap();
-        // let support_reads = support_reads.parse::<usize>().unwrap();
-        // println!("support_reads: {}", support_reads);
         let parts: Vec<&str> = node_id.split(".").collect();
         let locus = parts[1];
         let (chromosome, start, end) = util::split_locus(locus.to_string());
@@ -464,14 +481,14 @@ pub fn start(graph_filename: &PathBuf, reference_seqs: &Vec<fastq::Record>, samp
         let (variants, poscounts) = get_variants_from_cigar(cigar.as_str(), &chromosome, ref_seq.as_str(), alt_seq.as_str(), start, support_reads, &node_id);
         all_variants.extend(variants);
 
-        for (pos, count) in poscounts.iter() {
-            *coverage.entry(*pos).or_insert(0) += count;
-        }
+        // for (pos, count) in poscounts.iter() {
+        //     *coverage.entry(*pos).or_insert(0) += count;
+        // }
 
     }
 
     let variants = if phase_variants {
-        Phase_germline_variants(&graph_filename, &all_variants, haplotype_number)?
+        Phase_germline_variants(&graph_filename, &all_variants, haplotype_number, het_fold_threshold)?
     } else {
         collapse_identical_records(all_variants)
     };
