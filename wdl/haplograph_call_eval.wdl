@@ -1,0 +1,521 @@
+version 1.0
+
+workflow Haplograph_eval {
+    input {
+        File whole_genome_bam
+        File whole_genome_bai
+        File truth_vcf
+        File truth_tbi
+        File reference_fa
+        String prefix
+        File gene_bed
+        Int windowsize
+        Array[Int] desiredCoverages
+    }
+
+    call subset_truth_vcf{
+        input :
+            truth_vcf = truth_vcf,
+            truth_vcf_tbi = truth_tbi,
+            bed = gene_bed,
+            prefix = prefix + "_truth",
+            sample_id = prefix
+    }
+
+    call parseBed {
+        input:
+            bed = gene_bed,
+            output_prefix = prefix
+    }
+
+
+    scatter (desiredCoverage in desiredCoverages) {
+
+        scatter (pair in zip(parseBed.locuslist, parseBed.genelist)) {
+            String locus = pair.left
+            String gene_name = pair.right
+
+            call CalculateCoverage {
+                input:
+                    bam = whole_genome_bam,
+                    bai = whole_genome_bai,
+                    locus = locus,
+                    prefix = prefix + "_" + gene_name
+            }
+            
+            call downsampleBam {input:
+                input_bam = CalculateCoverage.subsetbam,
+                input_bam_bai = CalculateCoverage.subsetbai,
+                basename = prefix + "_" + gene_name,
+                desiredCoverage = desiredCoverage,
+                currentCoverage = CalculateCoverage.coverage,
+                preemptible_tries = 0
+            }
+
+            call haplograph_call {
+                input:
+                    bam = downsampleBam.downsampled_bam,
+                    bai = downsampleBam.downsampled_bai,
+                    reference_fa = reference_fa,
+                    prefix = prefix + "_" + gene_name,
+                    locus = locus,
+                    windowsize = windowsize
+            }
+        }
+
+        call BcftoolsConcatVcfs {
+            input:
+                vcfs = haplograph_call.vcf,
+                prefix = prefix + "_" + desiredCoverage + "_ligated"
+        }
+
+        call Vcfdist {
+            input:
+                sample = prefix + "_" + desiredCoverage,
+                eval_vcf = BcftoolsConcatVcfs.concated_vcf,
+                truth_vcf = subset_truth_vcf.subset_vcf,
+                bed_file = gene_bed,
+                reference_fasta = reference_fa,
+        }
+    }
+
+
+    output {
+        Array[File] vcfs = BcftoolsConcatVcfs.concated_vcf
+        Array[File] tbis = BcftoolsConcatVcfs.concated_vcf_index
+        Array[Array[VcfdistOutputs]] statistics = select_all([Vcfdist.outputs])
+    }
+}
+
+task haplograph_call {
+    input {
+        File bam
+        File bai
+        File reference_fa
+        String prefix
+        String locus
+        Int windowsize
+        String extra_arg = ""
+    }
+
+    command <<<
+        set -euxo pipefail
+        /haplograph/target/release/haplograph haplotype -a ~{bam} \
+                                                        -r ~{reference_fa} \
+                                                        -s ~{prefix} \
+                                                        -o ~{prefix} \
+                                                        -l ~{locus} \
+                                                        -w ~{windowsize} \
+                                                        -d gfa \
+                                                        ~{extra_arg}
+
+        /haplograph/target/release/haplograph call -g ~{prefix}.gfa \
+                                                    -o ~{prefix}.call \
+                                                    -s ~{prefix} \
+                                                    -r ~{reference_fa} \
+                                                    -p
+       
+    >>>
+
+    output {
+        File graph_file = "~{prefix}.gfa"
+        File vcf = "~{prefix}.call.vcf.gz"
+        
+        
+    }
+
+    runtime {
+        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograp:v1"
+        memory: "4 GB"
+        cpu: 1
+        disks: "local-disk 100 SSD"
+    }
+}
+
+task subset_truth_vcf{
+    input {
+        File truth_vcf
+        File truth_vcf_tbi
+        File bed
+        String prefix
+        String sample_id
+    }
+
+    command <<<
+        set -euxo pipefail
+
+        bcftools view ~{truth_vcf} \
+            -s ~{sample_id} \
+            -T ~{bed} \
+            -Oz -o ~{prefix}.subset.truth.vcf.gz
+        bcftools index -t ~{prefix}.subset.truth.vcf.gz
+
+
+
+        
+    >>>
+
+    output {
+        File subset_vcf = "~{prefix}.subset.truth.vcf.gz"
+        File subset_vcf_tbi = "~{prefix}.subset.truth.vcf.gz.tbi"
+        
+    }
+
+    runtime {
+        docker: "us.gcr.io/broad-dsp-lrma/lr-utils:0.1.9"
+        memory: "4 GB"
+        cpu: 1
+        disks: "local-disk 100 SSD"
+    }
+
+}
+
+
+task BcftoolsConcatVcfs {
+
+    input {
+        Array[File] vcfs
+        Array[File]? vcf_idxs
+        String prefix
+
+        RuntimeAttr? runtime_attr_override
+    }
+
+    Int disk_size = 2*ceil(size(vcfs, "GB")) + 1
+
+    command <<<
+        set -euxo pipefail
+        if ! ~{defined(vcf_idxs)}; then
+            for ff in ~{sep=' ' vcfs}; do bcftools index $ff; done
+        fi
+
+        bcftools concat --allow-overlap --remove-duplicates --ligate-force -Oz -o ~{prefix}.vcf.gz -f ~{write_lines(vcfs)} 
+        bcftools sort ~{prefix}.vcf.gz -Oz -o ~{prefix}.sorted.vcf.gz
+        bcftools index -t ~{prefix}.sorted.vcf.gz
+    >>>
+
+    output {
+        File concated_vcf = "~{prefix}.sorted.vcf.gz"
+        File concated_vcf_index = "~{prefix}.sorted.vcf.gz.tbi"
+    }
+
+    runtime {
+        docker: "us.gcr.io/broad-dsp-lrma/lr-utils:0.1.9"
+        memory: "4 GB"
+        cpu: 1
+        disks: "local-disk 100 SSD"
+    }
+
+   
+}
+
+
+task haplograph_eval {
+    input {
+        File truth_fasta
+        File query_fasta
+        Int seq_number
+        String prefix
+    }
+
+    command <<<
+        set -euxo pipefail
+
+        /haplograph/target/release/haplograph evaluate -t ~{truth_fasta} \
+                                                        -q ~{query_fasta} \
+                                                        -s ~{seq_number} \
+                                                        -o ~{prefix}.tsv
+        
+    >>>
+
+    output {
+        File qv_scores = "~{prefix}.tsv"
+        
+    }
+
+    runtime {
+        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograp:v1"
+        memory: "4 GB"
+        cpu: 1
+        disks: "local-disk 100 SSD"
+    }
+}
+
+
+struct RuntimeAttr {
+    Float? mem_gb
+    Int? cpu_cores
+    Int? disk_gb
+    Int? boot_disk_gb
+    Int? preemptible_tries
+    Int? max_retries
+    String? docker
+}
+
+struct DataTypeParameters {
+    Int num_shards
+    String map_preset
+}
+
+task CalculateCoverage {
+
+    meta {
+        description : "Subset a BAM file to a specified locus."
+    }
+
+    parameter_meta {
+        bam: {
+            description: "bam to subset",
+            localization_optional: true
+        }
+        bai:    "index for bam file"
+        locus:  "genomic locus to select"
+        prefix: "prefix for output bam and bai file names"
+        runtime_attr_override: "Override the default runtime attributes."
+    }
+
+    input {
+        File bam
+        File bai
+        String locus
+        String prefix = "subset"
+
+        RuntimeAttr? runtime_attr_override
+    }
+
+
+
+    Int disk_size = 4*ceil(size([bam, bai], "GB"))
+
+    command <<<
+        set -euxo pipefail
+
+        export GCS_OAUTH_TOKEN=$(gcloud auth application-default print-access-token)
+
+        samtools view -bhX ~{bam} ~{bai} ~{locus} > ~{prefix}.bam
+        samtools index ~{prefix}.bam
+        samtools depth -r ~{locus} ~{prefix}.bam | awk '{sum+=$3} END {print sum/NR}' > coverage.txt
+
+    >>>
+
+    output {
+        Float coverage = read_float("coverage.txt")
+        File subsetbam =  "~{prefix}.bam"
+        File subsetbai = " ~{prefix}.bam.bai"
+    }
+
+    #########################
+    RuntimeAttr default_attr = object {
+        cpu_cores:          1,
+        mem_gb:             10,
+        disk_gb:            disk_size,
+        boot_disk_gb:       10,
+        preemptible_tries:  2,
+        max_retries:        1,
+        docker:             "us.gcr.io/broad-dsp-lrma/lr-utils:0.1.9"
+    }
+    RuntimeAttr runtime_attr = select_first([runtime_attr_override, default_attr])
+    runtime {
+        cpu:                    select_first([runtime_attr.cpu_cores,         default_attr.cpu_cores])
+        memory:                 select_first([runtime_attr.mem_gb,            default_attr.mem_gb]) + " GiB"
+        disks: "local-disk " +  select_first([runtime_attr.disk_gb,           default_attr.disk_gb]) + " HDD"
+        bootDiskSizeGb:         select_first([runtime_attr.boot_disk_gb,      default_attr.boot_disk_gb])
+        preemptible:            select_first([runtime_attr.preemptible_tries, default_attr.preemptible_tries])
+        maxRetries:             select_first([runtime_attr.max_retries,       default_attr.max_retries])
+        docker:                 select_first([runtime_attr.docker,            default_attr.docker])
+    }
+}
+
+
+task downsampleBam {
+
+    input {
+        File input_bam
+        File input_bam_bai
+        String basename
+        Int desiredCoverage
+        Float currentCoverage
+        Int? preemptible_tries
+    }
+
+    meta {
+        description: "Uses Picard to downsample to desired coverage based on provided estimate of coverage."
+    }
+
+    parameter_meta {
+    }
+
+    Float scalingFactor = desiredCoverage / currentCoverage
+
+
+    command <<<
+        set -eo pipefail
+
+        if [[ $scalingFactor < 1.0 ]]; then
+            gatk DownsampleSam -I ~{input_bam} -O ~{basename}_~{desiredCoverage}x.bam -R 7 -P ~{scalingFactor} -S ConstantMemory --VALIDATION_STRINGENCY LENIENT --CREATE_INDEX true
+        else
+            mv ~{input_bam} ~{basename}_~{desiredCoverage}x.bam
+            mv ~{input_bam_bai} ~{basename}_~{desiredCoverage}x.bai
+            echo "Total Coverage is lower than desiredCoverage"
+        fi
+
+
+    >>>
+    runtime {
+        preemptible: select_first([preemptible_tries, 5])
+        memory: "8 GB"
+        cpu: "2"
+        disks: "local-disk 500 HDD"
+        docker: "us.gcr.io/broad-gatk/gatk"
+    }
+    output {
+        File downsampled_bam = "~{basename}_~{desiredCoverage}x.bam"
+        File downsampled_bai = "~{basename}_~{desiredCoverage}x.bai"
+    }
+}
+
+task parseBed {
+
+    input {
+        File bed
+        String output_prefix
+
+        Int? preemptible_tries
+    }
+
+
+    command <<<
+        set -eo pipefail
+
+        python - --bed_file ~{bed} \
+                 --output_file ~{output_prefix} \
+                 <<-'EOF'
+        import gzip
+        import argparse
+
+
+        def import_bed(bed_file):
+            locus_list = []
+            gene_list = []
+            if bed_file.endswith("gz"):
+                with gzip.open(bed_file, "r") as f:
+                    for line in f:
+                        itemlist = line.strip().split("\t")
+                        locus = "%s:%d-%d" % (itemlist[0], int(itemlist[1]), int(itemlist[2]))
+                        locus_list.append(locus)
+                        gene_list.append(itemlist[3])
+            else:
+                with open(bed_file, "r") as f:
+                    for line in f:
+                        itemlist = line.strip().split("\t")
+                        locus = "%s:%d-%d" % (itemlist[0], int(itemlist[1]), int(itemlist[2]))
+                        locus_list.append(locus)
+                        gene_list.append(itemlist[3])
+            return (locus_list, gene_list)
+
+
+        def write_file(content, output_file):
+            with open(output_file, "w") as f:
+                for item in content:
+                    f.write(f"{item}\n")
+
+        def main():
+            parser = argparse.ArgumentParser()
+
+            parser.add_argument('--bed_file',
+                                type=str)
+
+            parser.add_argument('--output_file',
+                                type=str)
+
+            args = parser.parse_args()
+
+            locus_list, gene_list = import_bed(args.bed_file)
+            write_file(locus_list, args.output_file + "_locus.txt")
+            write_file(gene_list, args.output_file + "_gene.txt")
+
+
+        if __name__ == "__main__":
+            main()
+        EOF
+
+    >>>
+
+    runtime {
+        docker: "us.gcr.io/broad-dsde-methods/slee/kage-lite:pr_29"
+        memory: "4 GB"
+        cpu: 1
+        disks: "local-disk 100 SSD"
+    }
+
+    output {
+        Array[String] locuslist = read_lines("~{output_prefix}_locus.txt")
+        Array[String] genelist= read_lines("~{output_prefix}_gene.txt")
+    }
+}
+
+task Vcfdist {
+    input {
+        String sample
+        File eval_vcf
+        File truth_vcf
+        File bed_file
+        File reference_fasta
+        String? extra_args
+        Int verbosity = 1
+
+        Int disk_size_gb = ceil(size(truth_vcf, "GiB") + 10)
+        Int mem_gb = 32
+        Int cpu = 4
+        Int preemptible = 1
+    }
+
+    command <<<
+        set -euxo pipefail
+
+        vcfdist \
+            ~{eval_vcf} \
+            ~{truth_vcf} \
+            ~{reference_fasta} \
+            -b ~{bed_file} \
+            -v ~{verbosity} \
+            ~{extra_args}
+
+        for tsv in $(ls *.tsv); do mv $tsv ~{sample}.$tsv; done
+        mv summary.vcf ~{sample}.summary.vcf
+    >>>
+
+    output {
+        VcfdistOutputs outputs = {
+            "summary_vcf": "~{sample}.summary.vcf",
+            "precision_recall_summary_tsv": "~{sample}.precision-recall-summary.tsv",
+            "precision_recall_tsv": "~{sample}.precision-recall.tsv",
+            "query_tsv": "~{sample}.query.tsv",
+            "truth_tsv": "~{sample}.truth.tsv",
+            "phasing_summary_tsv": "~{sample}.phasing-summary.tsv",
+            "switchflips_tsv": "~{sample}.switchflips.tsv",
+            "superclusters_tsv": "~{sample}.superclusters.tsv",
+            "phase_blocks_tsv": "~{sample}.phase-blocks.tsv"
+        }
+    }
+
+    runtime {
+        docker: "timd1/vcfdist:v2.5.3"
+        disks: "local-disk " + disk_size_gb + " HDD"
+        memory: mem_gb + " GiB"
+        cpu: cpu
+        preemptible: preemptible
+    }
+}
+
+struct VcfdistOutputs {
+    File summary_vcf
+    File precision_recall_summary_tsv
+    File precision_recall_tsv
+    File query_tsv
+    File truth_tsv
+    File phasing_summary_tsv
+    File switchflips_tsv
+    File superclusters_tsv
+    File phase_blocks_tsv
+}
