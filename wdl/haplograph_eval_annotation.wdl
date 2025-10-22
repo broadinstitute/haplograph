@@ -111,7 +111,7 @@ task haplograph_asm {
                                                         -m ~{minimal_supported_reads} \
                                                         -d gfa \
                                                         ~{extra_arg}
-        /haplograph/target/release/haplograph assemble -m -n 2 -g ~{prefix}.gfa -o ~{prefix} -r ~{reference_fa}
+        /haplograph/target/release/haplograph assemble -m -n 2 -g ~{prefix}.gfa -o ~{prefix}
         grep ">" ~{prefix}.fasta | wc -l > haplotypenum.txt
         
     >>>
