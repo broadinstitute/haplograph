@@ -437,9 +437,14 @@ pub fn find_node_haplotype(node_info: &HashMap<String, NodeInfo>, hap_number: us
     let read_to_nodes = assign_node_to_reads(node_info);
     let (haplotype_reads_new, haplotype_nodes_new) = assign_unassigned_reads(node_info, &haplotype_reads);
     // let node_haplotype = assign_haplotype_nodes_to_graph(node_info, &haplotype_reads_new);
-    let filtered_haplotype_nodes = filter_haplotype_nodes(node_info, &haplotype_nodes_new, &haplotype_reads_new);
-    let node_haplotype = assign_haplotype_to_nodes(&filtered_haplotype_nodes);
-    (haplotype_reads_new, node_haplotype)
+    if haplotype_reads_new.is_empty() {
+        let node_haplotype = assign_haplotype_nodes_to_graph(node_info, &haplotype_reads_new);
+        return (haplotype_reads_new, node_haplotype);
+    }else{
+        let filtered_haplotype_nodes = filter_haplotype_nodes(node_info, &haplotype_nodes_new, &haplotype_reads_new);
+        let node_haplotype = assign_haplotype_to_nodes(&filtered_haplotype_nodes);
+        return (haplotype_reads_new, node_haplotype);
+    }
 }
 
 pub fn start(graph_filename: &PathBuf, germline_only:bool, haplotype_number: usize,  output_prefix: &PathBuf, het_fold_threshold: f64) -> AnyhowResult<()> {

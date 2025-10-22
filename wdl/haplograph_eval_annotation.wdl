@@ -124,7 +124,7 @@ task haplograph_asm {
     }
 
     runtime {
-        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograp:v1"
+        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograph:v2"
         memory: "64 GB"
         cpu: 16
         disks: "local-disk 100 SSD"
@@ -156,7 +156,7 @@ task haplograph_eval {
     }
 
     runtime {
-        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograp:v1"
+        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograph:v2"
         memory: "4 GB"
         cpu: 1
         disks: "local-disk 100 SSD"
@@ -334,7 +334,7 @@ task get_truth_haplotypes {
     }
 
     runtime {
-        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograp:v1"
+        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograph:v2"
         memory: "4 GB"
         cpu: 1
         disks: "local-disk 100 SSD"
