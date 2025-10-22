@@ -49,7 +49,7 @@ enum Commands {
        locus: String,
    
        /// minimal variant allele frequency
-       #[arg(short, long, default_value_t = 0.1)]
+       #[arg(short, long, default_value_t = 0.01)]
        frequency_min: f64,
        
        /// Minimal Supported Reads

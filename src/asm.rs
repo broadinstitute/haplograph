@@ -452,6 +452,7 @@ pub fn start(graph_filename: &PathBuf, germline_only:bool, haplotype_number: usi
     info!("Traversing graph with germline_only: {}, hap_number: {}", germline_only, haplotype_number);
 
     let (haplotype_reads, node_haplotype) = find_node_haplotype(&node_info, haplotype_number, het_fold_threshold);
+    println!("node_haplotype: {:?}", node_haplotype);
     let all_paths = enumerate_all_paths_with_haplotype(&node_info, &edge_info, &node_haplotype, haplotype_number).expect("Failed to enumerate all paths");
     let allseq = construct_sequences_from_haplotype_path(&node_info, &all_paths);
     let primary_haplotypes = find_full_range_haplotypes(&node_info, &allseq);

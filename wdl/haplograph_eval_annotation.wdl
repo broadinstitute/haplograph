@@ -73,7 +73,6 @@ workflow Haplograph_eval {
                 input:
                     truth_fasta = get_truth_haplotypes_from_annotation.fasta_file,
                     query_fasta = haplograph_asm.asm_file,
-                    seq_number = haplograph_asm.assembly_num,
                     prefix = prefix + "_" + gene_name + "_" + desiredCoverage,
             }
         }
@@ -112,15 +111,13 @@ task haplograph_asm {
                                                         -d gfa \
                                                         ~{extra_arg}
         /haplograph/target/release/haplograph assemble -m -n 2 -g ~{prefix}.gfa -o ~{prefix}
-        grep ">" ~{prefix}.fasta | wc -l > haplotypenum.txt
+        
         
     >>>
 
     output {
         File graph_file = "~{prefix}.gfa"
         File asm_file = "~{prefix}.fasta"
-        Int assembly_num = read_int("haplotypenum.txt")
-        
     }
 
     runtime {
@@ -136,16 +133,20 @@ task haplograph_eval {
     input {
         File truth_fasta
         File query_fasta
-        Int seq_number
         String prefix
     }
 
     command <<<
         set -euxo pipefail
 
+        # Count haplotypes and assign to variable
+        assembly_num=$(grep ">" ~{query_fasta} | wc -l)
+        echo "Number of haplotypes: $assembly_num"
+
+
         /haplograph/target/release/haplograph evaluate -t ~{truth_fasta} \
                                                         -q ~{query_fasta} \
-                                                        -s ~{seq_number} \
+                                                        -s $assembly_num \
                                                         -o ~{prefix}.tsv
         
     >>>

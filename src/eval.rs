@@ -85,6 +85,13 @@ pub fn start(truth_fasta: &PathBuf, query_fasta: &PathBuf, haplotype_number: usi
     let mut optimal_score = f64::MIN;
     let mut optimal_perm = Vec::new();
     let mut optimal_qv_scores = Vec::new();
+
+    if query_seqs.is_empty() {
+            // write the evaluation results to a file
+        let mut file = File::create(output_prefix)?;
+        writeln!(file, "")?;
+        return Ok(optimal_qv_scores);
+    }
     
     if v.len() > 1 {
         for perm in v.iter().permutations(v.len()).unique() {
@@ -114,6 +121,7 @@ pub fn start(truth_fasta: &PathBuf, query_fasta: &PathBuf, haplotype_number: usi
     println!("optimal_score: {}", optimal_score);
     println!("optimal_perm: {:?}, {:?}", v, optimal_perm);
     println!("optimal_qv_scores: {:?}", optimal_qv_scores);
+
     let mut optimal_sequence_pairs = Vec::new();
     for (i, j) in optimal_perm.iter().enumerate() {
         optimal_sequence_pairs.push((truth_seqs[i].clone(), query_seqs[**j].clone()));
