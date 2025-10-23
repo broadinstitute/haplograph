@@ -75,13 +75,14 @@ pub fn calculate_qv_score(truth_seqs: Record, query_seqs: Record) -> AnyhowResul
 }
 
 pub fn start(truth_fasta: &PathBuf, query_fasta: &PathBuf, haplotype_number: usize, output_prefix: &PathBuf) -> AnyhowResult<(Vec<f64>)> {
+   
     let fasta_records = FastaReader::from_file(truth_fasta)?;
     let truth_seqs = fasta_records.records().map(|x| x.unwrap()).collect::<Vec<_>>();
-    let query_seqs = select_seqs(query_fasta, haplotype_number)?;
-    println!("truth_seqs: {}", truth_seqs.len());
-    println!("query_seqs: {}", query_seqs.len());
+    let query_fasta_records = FastaReader::from_file(query_fasta)?;
+    let query_seqs = query_fasta_records.records().map(|x| x.unwrap()).collect::<Vec<_>>();
+    let hap_num = query_seqs.len().min(haplotype_number);
+    // let query_seqs_selected = select_seqs(query_fasta, hap_num)?;
 
-    let v = (0..haplotype_number).collect::<Vec<_>>();
     let mut optimal_score = f64::MIN;
     let mut optimal_perm = Vec::new();
     let mut optimal_qv_scores = Vec::new();
@@ -93,44 +94,48 @@ pub fn start(truth_fasta: &PathBuf, query_fasta: &PathBuf, haplotype_number: usi
         return Ok(optimal_qv_scores);
     }
     
-    if v.len() > 1 {
-        for perm in v.iter().permutations(v.len()).unique() {
-            let mut qv_scores_perm = Vec::new();
-            for (i, j) in perm.iter().enumerate() {
-                let qv_score = calculate_qv_score(truth_seqs[i].clone(), query_seqs[**j].clone()).unwrap();
-                println!("{} {} qv_score: {}", i, j, qv_score.clone());
-                qv_scores_perm.push(qv_score.clone());
-            }
-            if qv_scores_perm.iter().sum::<f64>() > optimal_score {
-                optimal_score = qv_scores_perm.iter().sum::<f64>();
-                optimal_perm = perm.clone();
-                optimal_qv_scores = qv_scores_perm.clone();
-            }
+    
+    let mut qv_scores_perm = Vec::new();
+    for (i, t_seq)  in truth_seqs.iter().enumerate() {
+        for (j, q_seq) in query_seqs.iter().enumerate() {
+            let qv_score = calculate_qv_score(t_seq.clone(), q_seq.clone()).unwrap();
+            println!("{} {} qv_score: {}", i, j, qv_score.clone());
+            qv_scores_perm.push((i, j, qv_score.clone()));
         }
-    }else{
-        for tseq in truth_seqs.iter() {
-            let qv_score = calculate_qv_score(tseq.clone(), query_seqs[0].clone()).unwrap();
-            if qv_score > optimal_score {
-                optimal_score = qv_score;
-                optimal_perm = vec![&(0 as usize)];
-                optimal_qv_scores = vec![qv_score.clone()];
-            }
-        }
-
     }
+
+    for perm in qv_scores_perm.iter().permutations(hap_num.clone()) {
+        let truth_seq_index = perm.iter().map(|x| x.0.clone()).collect::<Vec<_>>();
+        let query_seq_index = perm.iter().map(|x| x.1.clone()).collect::<Vec<_>>();
+        // remove duplicates
+        if truth_seq_index.iter().unique().count() < truth_seq_index.len(){
+            continue;
+        }
+        if query_seq_index.iter().unique().count() < query_seq_index.len(){
+            continue;
+        }
+        let qv_scores_perm = perm.iter().map(|x| x.2.clone()).collect::<Vec<_>>();
+        if qv_scores_perm.iter().sum::<f64>() > optimal_score {
+            optimal_score = qv_scores_perm.iter().sum::<f64>();
+            optimal_perm = perm.clone();
+            optimal_qv_scores = qv_scores_perm.clone();
+        }
+    }
+    
+
     println!("optimal_score: {}", optimal_score);
-    println!("optimal_perm: {:?}, {:?}", v, optimal_perm);
+    println!("optimal_perm: {} pairs {:?}", hap_num, optimal_perm);
     println!("optimal_qv_scores: {:?}", optimal_qv_scores);
 
     let mut optimal_sequence_pairs = Vec::new();
-    for (i, j) in optimal_perm.iter().enumerate() {
-        optimal_sequence_pairs.push((truth_seqs[i].clone(), query_seqs[**j].clone()));
+    for (i, j, score) in optimal_perm.iter() {
+        optimal_sequence_pairs.push((truth_seqs[*i].clone(), query_seqs[*j].clone(), *score));
     }
 
     // write the evaluation results to a file
     let mut file = File::create(output_prefix)?;
-    for (i, j) in optimal_sequence_pairs.iter().enumerate() {
-        writeln!(file, "{} {} {} {}", i, j.0.id(), j.1.id(), optimal_qv_scores[i])?;
+    for (i, j, score) in optimal_sequence_pairs.iter() {
+        writeln!(file, "{} {} {}", j.id(), j.id(), score)?;
     }
 
 

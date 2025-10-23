@@ -421,7 +421,7 @@ pub fn Phase_germline_variants(
     het_fold_threshold: f64,
 ) -> AnyhowResult<Vec<Variant>> {
     let (node_info, edge_info) = asm::load_graph(graph_filename).unwrap();
-     let (haplotype_reads, node_haplotype) = asm::find_node_haplotype(&node_info, haplotype_number, het_fold_threshold);
+     let (haplotype_reads, node_haplotype) = asm::find_node_haplotype(&node_info, &edge_info, haplotype_number, het_fold_threshold);
 
     let mut collapsed_variants = HashMap::new();
     for variant in Variants.iter() {

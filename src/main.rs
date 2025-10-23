@@ -96,7 +96,7 @@ enum Commands {
         number_of_haplotypes: usize,
 
         /// heterozygous coverage fold threshold, > 2.0 by default is not heterozygous
-        #[arg(short, long, default_value_t = 3.0)]
+        #[arg(short, long, default_value_t = 2.0)]
         fold_threshold: f64,
 
         /// Verbose output
@@ -132,7 +132,7 @@ enum Commands {
         phase_variants: bool,
 
         /// heterozygous coverage fold threshold, > 2.0 by default is not heterozygous
-        #[arg(short, long, default_value_t = 3.0)]
+        #[arg(short, long, default_value_t = 2.0)]
         fold_threshold: f64,
 
         /// Verbose output

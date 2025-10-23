@@ -59,7 +59,7 @@ workflow Haplograph_eval {
                 preemptible_tries = 0
             }
 
-            call haplograph_asm {
+            call haplograph {
                 input:
                     bam = downsampleBam.downsampled_bam,
                     bai = downsampleBam.downsampled_bai,
@@ -72,7 +72,7 @@ workflow Haplograph_eval {
             call haplograph_eval {
                 input:
                     truth_fasta = get_truth_haplotypes_from_annotation.fasta_file,
-                    query_fasta = haplograph_asm.asm_file,
+                    query_fasta = haplograph.asm_file,
                     prefix = prefix + "_" + gene_name + "_" + desiredCoverage,
             }
         }
@@ -81,13 +81,14 @@ workflow Haplograph_eval {
 
     output {
         Array[Float] bam_coverage = CalculateCoverage.coverage
-        Array[Array[File]] gfa = haplograph_asm.graph_file
-        Array[Array[File]] fasta = haplograph_asm.asm_file
+        Array[Array[File]] gfa = haplograph.graph_file
+        Array[Array[File]] fasta = haplograph.asm_file
+        Array[Array[File]] vcf = haplograph.vcf_file
         Array[Array[File]] eval = haplograph_eval.qv_scores
     }
 }
 
-task haplograph_asm {
+task haplograph {
     input {
         File bam
         File bai
@@ -111,6 +112,8 @@ task haplograph_asm {
                                                         -d gfa \
                                                         ~{extra_arg}
         /haplograph/target/release/haplograph assemble -m -n 2 -g ~{prefix}.gfa -o ~{prefix}
+
+        /haplograph/target/release/haplograph call -g ~{prefix}.gfa -o ~{prefix} -s ~{prefix} -r ~{reference_fa} -p
         
         
     >>>
@@ -118,6 +121,7 @@ task haplograph_asm {
     output {
         File graph_file = "~{prefix}.gfa"
         File asm_file = "~{prefix}.fasta"
+        File vcf_file = "~{prefix}.vcf.gz"
     }
 
     runtime {
@@ -146,7 +150,7 @@ task haplograph_eval {
 
         /haplograph/target/release/haplograph evaluate -t ~{truth_fasta} \
                                                         -q ~{query_fasta} \
-                                                        -s $assembly_num \
+                                                        -s 2 \
                                                         -o ~{prefix}.tsv
         
     >>>
