@@ -1,14 +1,14 @@
 # Haplograph
 
-A  bioinformatics tool for haplotype analysis and variant calling from BAM files using graph-based assembly approaches.
+A  bioinformatics tool for haplotype/meplotype analysis and variant calling from BAM files using graph-based assembly approaches.
 
 ## Overview
 
-Haplograph is designed for accurate haplotype reconstruction and variant calling in complex genomic regions, particularly useful for HLA typing, MHC analysis, and other highly polymorphic regions. The tool uses graph-based assembly to reconstruct haplotypes and call variants with high accuracy.
+Haplograph is designed for accurate haplotype or meplotype (methylation aware) reconstruction and variant calling in genomic regions, particularly useful for complex region such as HLA/MHC analysis, and other highly polymorphic regions. The tool uses graph-based assembly to reconstruct haplotypes (methylation aware) and call variants with high accuracy.
 
 ## Features
 
-- **Graph-based Haplotype Assembly**: Constructs variation graphs from aligned reads
+- **Graph-based Haplotype Assembly**: Constructs sequence graphs from aligned reads
 - **Variant Calling**: Generates VCF files with phased variants
 - **Multiple Output Formats**: Supports both GFA (Graph Fragment Assembly), VCF and FASTA formats
 - **Germline Haplotype Filtering**: Focus on major haplotypes for cleaner results
@@ -44,11 +44,11 @@ Haplograph provides four main commands for different stages of haplotype analysi
 
 ### 1. Haplotype Extraction
 
-Extract haplotypes from BAM files and build variation graphs:
+Extract haplotypes from BAM files and build sequence graphs:
 
 ```bash
 # Basic haplotype extraction
-haplograph haplotype \
+haplograph haplograph \
     --alignment-bam input.bam \
     --reference-fa reference.fa \
     --sampleid SAMPLE001 \
@@ -56,7 +56,7 @@ haplograph haplotype \
     --output-prefix output/HLA_A
 
 # With custom parameters
-haplograph haplotype \
+haplograph haplograph \
     --alignment-bam input.bam \
     --reference-fa reference.fa \
     --sampleid SAMPLE001 \
@@ -89,13 +89,11 @@ Assemble haplotypes from GFA files:
 # Basic assembly
 haplograph assemble \
     --graph-gfa output/HLA_A.gfa \
-    --locus chr6:29943661-29943700 \
     --output-prefix output/HLA_A_asm
 
 # Germline-only assembly with specific haplotype count
 haplograph assemble \
     --graph-gfa output/HLA_A.gfa \
-    --locus chr6:29943661-29943700 \
     --major-haplotype-only \
     --number-of-haplotypes 2 \
     --output-prefix output/HLA_A_asm \
@@ -118,7 +116,8 @@ haplograph call \
     --gfa-file output/HLA_A_asm.gfa \
     --sampleid SAMPLE001 \
     --reference-fa reference.fa \
-    --output-prefix output/HLA_A_variants
+    --output-prefix output/HLA_A_variants \
+    --phase-variants
 
 # With phasing
 haplograph call \
@@ -160,7 +159,7 @@ haplograph evaluate \
 
 ```bash
 # 1. Extract haplotypes and build graph
-haplograph haplotype \
+haplograph haplograph \
     --alignment-bam sample.bam \
     --reference-fa hg38.fa \
     --sampleid HG002 \
@@ -170,7 +169,6 @@ haplograph haplotype \
 # 2. Assemble haplotypes
 haplograph assemble \
     --graph-gfa output/HLA_A.gfa \
-    --locus chr6:29943661-29943700 \
     --major-haplotype-only \
     --number-of-haplotypes 2 \
     --output-prefix output/HLA_A_asm
@@ -193,7 +191,7 @@ haplograph evaluate \
 ## Output Files
 
 ### Haplotype Extraction
-- `{prefix}.gfa`: Variation graph in GFA format
+- `{prefix}.gfa`: Sequence graph in GFA format
 - `{prefix}.fasta`: Haplotype sequences (if fasta format selected)
 
 ### Assembly
@@ -326,14 +324,6 @@ https://github.com/broadinstitute/haplograph
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
 
 ## Support
 
