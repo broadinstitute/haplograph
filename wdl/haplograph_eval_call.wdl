@@ -4,18 +4,14 @@ workflow Haplograph_eval {
     input {
         File whole_genome_bam
         File whole_genome_bai
-        File truth_asm_1_bam
-        File truth_asm_1_bai
-        File truth_asm_2_bam
-        File truth_asm_2_bai
+        File truth_vcf
+        File truth_vcf_index
         File reference_fa
         String prefix
         File gene_bed
         Int windowsize
         Array[Int] desiredCoverages
     }
-
-
 
     call parseBed {
         input:
@@ -35,21 +31,6 @@ workflow Haplograph_eval {
                 prefix = prefix + "_" + gene_name
         }
 
-        call get_truth_haplotypes {
-            input:
-                truth_hap1_bam = truth_asm_1_bam,
-                truth_hap1_bai = truth_asm_1_bai,
-                truth_hap2_bam = truth_asm_2_bam,
-                truth_hap2_bai = truth_asm_2_bai,
-                reference_fa = reference_fa,
-                sampleid = prefix,
-                locus = locus,
-                prefix = prefix + "_" + gene_name,
-                extra_arg = "",
-                windowsize = 1000,
-
-        }
-
         scatter (desiredCoverage in desiredCoverages) {
             
             call downsampleBam {input:
@@ -61,36 +42,42 @@ workflow Haplograph_eval {
                 preemptible_tries = 0
             }
 
-            call haplograph_asm {
+            call haplograph {
                 input:
                     bam = downsampleBam.downsampled_bam,
                     bai = downsampleBam.downsampled_bai,
                     reference_fa = reference_fa,
-                    prefix = prefix + "_" + gene_name,
+                    prefix = prefix + "_" + gene_name + "_" + desiredCoverage,
                     locus = locus,
                     windowsize = windowsize
             }
 
-            call haplograph_eval {
+            call Vcfdist as VCFdist_germline {
                 input:
-                    truth_fasta = get_truth_haplotypes.fasta_file,
-                    query_fasta = haplograph_asm.asm_file,
-                    seq_number = haplograph_asm.assembly_num,
-                    prefix = prefix + "_" + gene_name,
+                    sample = prefix,
+                    eval_vcf = haplograph.vcf_file,
+                    truth_vcf = truth_vcf,
+                    truth_vcf_index = truth_vcf_index,
+                    locus = locus,
+                    reference_fasta = reference_fa,
+                    extra_args = ""
             }
+
+
         }
     }
 
 
     output {
         Array[Float] bam_coverage = CalculateCoverage.coverage
-        Array[Array[File]] gfa = haplograph_asm.graph_file
-        Array[Array[File]] fasta = haplograph_asm.asm_file
-        Array[Array[File]] eval = haplograph_eval.qv_scores
+        Array[Array[File]] gfa = haplograph.graph_file
+        Array[Array[File]] fasta = haplograph.asm_file
+        Array[Array[File]] vcf = haplograph.vcf_file
+        Array[Array[VcfdistOutputs]] eval = VCFdist_germline.outputs
     }
 }
 
-task haplograph_asm {
+task haplograph {
     input {
         File bam
         File bai
@@ -98,35 +85,38 @@ task haplograph_asm {
         String prefix
         String locus
         Int windowsize
+        Int minimal_supported_reads
         String extra_arg = ""
     }
 
     command <<<
         set -euxo pipefail
-        /haplograph/target/release/haplograph haplotype -a ~{bam} \
+        /haplograph/target/release/haplograph haplograph -a ~{bam} \
                                                         -r ~{reference_fa} \
                                                         -s ~{prefix} \
                                                         -o ~{prefix} \
                                                         -l ~{locus} \
                                                         -w ~{windowsize} \
+                                                        -m ~{minimal_supported_reads} \
                                                         -d gfa \
                                                         ~{extra_arg}
-        /haplograph/target/release/haplograph assemble -m -g ~{prefix}.gfa -o ~{prefix}.fasta
-        grep ">" ~{prefix}.fasta | wc -l > haplotypenum.txt
+        /haplograph/target/release/haplograph assemble -m -n 2 -g ~{prefix}.gfa -o ~{prefix}
+
+        /haplograph/target/release/haplograph call -g ~{prefix}.gfa -o ~{prefix} -s ~{prefix} -r ~{reference_fa} -p
+        
         
     >>>
 
     output {
         File graph_file = "~{prefix}.gfa"
         File asm_file = "~{prefix}.fasta"
-        Int assembly_num = read_int("haplotypenum.txt")
-        
+        File vcf_file = "~{prefix}.vcf.gz"
     }
 
     runtime {
-        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograp:v1"
-        memory: "4 GB"
-        cpu: 1
+        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograph:v2"
+        memory: "16 GB"
+        cpu: 4
         disks: "local-disk 100 SSD"
     }
 }
@@ -136,16 +126,20 @@ task haplograph_eval {
     input {
         File truth_fasta
         File query_fasta
-        Int seq_number
         String prefix
     }
 
     command <<<
         set -euxo pipefail
 
+        # Count haplotypes and assign to variable
+        assembly_num=$(grep ">" ~{query_fasta} | wc -l)
+        echo "Number of haplotypes: $assembly_num"
+
+
         /haplograph/target/release/haplograph evaluate -t ~{truth_fasta} \
                                                         -q ~{query_fasta} \
-                                                        -s ~{seq_number} \
+                                                        -s 2 \
                                                         -o ~{prefix}.tsv
         
     >>>
@@ -156,187 +150,9 @@ task haplograph_eval {
     }
 
     runtime {
-        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograp:v1"
-        memory: "4 GB"
-        cpu: 1
-        disks: "local-disk 100 SSD"
-    }
-}
-
-task get_truth_haplotypes_from_annotation {
-    input {
-        File truth_asm_1
-        File truth_asm_annotation_1
-        File truth_asm_2
-        File truth_asm_annotation_2
-        File reference_fa
-        String gene_name
-        String prefix
-    }
-
-    command <<<
-        set -euxo pipefail
-
-        python - --truth_fasta_1 ~{truth_asm_1} \
-                 --truth_annotation_1 ~{truth_asm_annotation_1} \
-                 --truth_fasta_2 ~{truth_asm_2} \
-                 --truth_annotation_2 ~{truth_asm_annotation_2} \
-                 --gene_name ~{gene_name} \
-                 --output_filename ~{prefix}.~{gene_name}.truth.fasta \
-                 --output_header ~{gene_name} \
-                 <<-'EOF'
-        import pysam
-        import gzip
-        import argparse
-
-        def get_hla_region(annotation_file, name):
-            intervals = []
-            with gzip.open(annotation_file, "rt") as f:
-                for line in f:
-                    if line.startswith("#"):
-                        continue
-                    itemlist = line.strip().split("\t")
-                    if itemlist[2] == "gene":
-                        contig = itemlist[0]
-                        start = int(itemlist[3])
-                        end = int(itemlist[4])
-                        for item in itemlist[8].split(";"):
-                            if "gene_name" in item:
-                                gene_name = item.split(" ")[2]
-                                if name in gene_name:
-                                    intervals.append((contig, start, end))
-            return intervals  
-
-        def get_truth_seq(fastafile, annotation_file, gene_name):
-            fasta_records = pysam.Fastafile(fastafile)
-            chromosomes = fasta_records.references
-            truth_seq = []
-            intervals = get_hla_region(annotation_file, gene_name)
-            for chromosome in chromosomes:
-                seq = fasta_records.fetch(chromosome)
-                for (contig_name, start, end) in intervals:
-                    if contig_name == chromosome:
-                        truth_seq.append(seq[start:end])
-            return truth_seq  
-
-
-        def write_fasta(fasta_file, header, truth_seq):
-            with open(fasta_file, "w") as f:
-                for i, t_seq in enumerate(truth_seq):
-                    f.write(">%s_Hap_%d\n" % (header, i+1))
-                    char_length = 60
-                    line_number = len(t_seq) // char_length
-
-                    for i in range(line_number):
-                        f.write(t_seq[i*char_length:(i+1)*char_length] + "\n")
-                    f.write(t_seq[line_number*char_length:] + "\n")
-
-
-
-        def main():
-            parser = argparse.ArgumentParser()
-
-            parser.add_argument('--truth_fasta_1',
-                                type=str)
-
-            parser.add_argument('--truth_annotation_1',
-                                type=str)
-
-            parser.add_argument('--truth_fasta_2',
-                                type=str)
-
-            parser.add_argument('--truth_annotation_2',
-                                type=str)
-
-            parser.add_argument('--gene_name',
-                                type=str)
-
-            parser.add_argument('--output_filename',
-                                type=str)
-            parser.add_argument('--output_header',
-                            type=str)
-
-            args = parser.parse_args()
-
-            truth_seq_1 = get_truth_seq(args.truth_fasta_1, args.truth_annotation_1, args.gene_name)
-            truth_seq_2 = get_truth_seq(args.truth_fasta_2, args.truth_annotation_2, args.gene_name)
-            truth_seq = truth_seq_1 + truth_seq_2
-            write_fasta(args.output_filename, args.output_header, truth_seq)
-
-        if __name__ == "__main__":
-            main()
-        EOF
-        
-    >>>
-
-    output {
-        File fasta_file = "~{prefix}.~{gene_name}.truth.fasta"
-        
-    }
-
-    runtime {
-        docker: "us.gcr.io/broad-dsde-methods/slee/kage-lite:pr_29"
-        memory: "8 GB"
-        cpu: 2
-        disks: "local-disk 100 SSD"
-    }
-}
-
-
-task get_truth_haplotypes {
-    input {
-        File truth_hap1_bam
-        File truth_hap1_bai
-        File truth_hap2_bam
-        File truth_hap2_bai
-        File reference_fa
-        String sampleid
-        String locus
-        String prefix
-        String extra_arg
-        Int windowsize
-    }
-
-    command <<<
-        set -euxo pipefail
-
-        /haplograph/target/release/haplograph haplotype -a ~{truth_hap1_bam} \
-                                                -r ~{reference_fa} \
-                                                -s ~{sampleid} \
-                                                -o ~{prefix}.truth1 \
-                                                -l ~{locus} \
-                                                -w ~{windowsize} \
-                                                -m 0 \
-                                                -f 0 \
-                                                -d gfa \
-                                                ~{extra_arg}
-
-        /haplograph/target/release/haplograph assemble -g ~{prefix}.truth1.gfa -o ~{prefix}.truth1.fasta
-
-        /haplograph/target/release/haplograph haplotype -a ~{truth_hap2_bam} \
-                                                -r ~{reference_fa} \
-                                                -s ~{sampleid} \
-                                                -o ~{prefix}.truth2 \
-                                                -l ~{locus} \
-                                                -w ~{windowsize} \
-                                                -m 0 \
-                                                -f 0 \
-                                                -d gfa \
-                                                ~{extra_arg}
-        /haplograph/target/release/haplograph assemble -g ~{prefix}.truth2.gfa -o ~{prefix}.truth2.fasta
-        cat ~{prefix}.truth1.fasta ~{prefix}.truth2.fasta > ~{prefix}.truth.fasta
-        
-    >>>
-
-    output {
-        File fasta_file = "~{prefix}.truth.fasta"
-        
-    }
-
-    runtime {
-        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograp:v1"
-        memory: "4 GB"
-        cpu: 1
+        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograph:v2"
+        memory: "16 GB"
+        cpu: 4
         disks: "local-disk 100 SSD"
     }
 }
@@ -450,9 +266,14 @@ task downsampleBam {
 
     command <<<
         set -eo pipefail
-
-        gatk DownsampleSam -I ~{input_bam} -O ~{basename}_~{desiredCoverage}x.bam -R 7 -P ~{scalingFactor} -S ConstantMemory --VALIDATION_STRINGENCY LENIENT --CREATE_INDEX true
-
+        if [[ $scalingFactor < 1.0 ]]; then
+            gatk DownsampleSam -I ~{input_bam} -O ~{basename}_~{desiredCoverage}x.bam -R 7 -P ~{scalingFactor} -S ConstantMemory --VALIDATION_STRINGENCY LENIENT --CREATE_INDEX true
+        else
+            mv ~{input_bam} ~{basename}_~{desiredCoverage}x.bam
+            mv ~{input_bam_bai} ~{basename}_~{desiredCoverage}x.bai
+            echo "Total Coverage is lower than desiredCoverage"
+        fi
+        
 
     >>>
     runtime {
@@ -545,5 +366,78 @@ task parseBed {
     output {
         Array[String] locuslist = read_lines("~{output_prefix}_locus.txt")
         Array[String] genelist= read_lines("~{output_prefix}_gene.txt")
+    }
+}
+
+struct VcfdistOutputs {
+    File summary_vcf
+    File precision_recall_summary_tsv
+    File precision_recall_tsv
+    File query_tsv
+    File truth_tsv
+    File phasing_summary_tsv
+    File switchflips_tsv
+    File superclusters_tsv
+    File phase_blocks_tsv
+}
+
+task Vcfdist {
+    input {
+        String sample
+        File eval_vcf
+        File? eval_vcf_index
+        File truth_vcf
+        File truth_vcf_index
+        String locus
+        File reference_fasta
+        String? extra_args
+        Int verbosity = 1
+
+        Int disk_size_gb = ceil(size(truth_vcf, "GiB") + 10)
+        Int mem_gb = 16
+        Int cpu = 2
+        Int preemptible = 1
+    }
+
+    command <<<
+        set -euxo pipefail
+        bcftools view -s ~{sample} -r ~{locus} ~{truth_vcf} -Oz -o ~{sample}.~{locus}.base.vcf.gz
+        bcftools index -t ~{sample}.~{locus}.base.vcf.gz
+
+        bcftools index -t ~{eval_vcf}
+        bcftools filter -e 'INFO/SOMATIC=1' ~{eval_vcf} -Oz -o ~{sample}.filtered.query.vcf.gz
+        bcftools index -t ~{sample}.filtered.query.vcf.gz
+
+        vcfdist \
+            ~{sample}.filtered.query.vcf.gz \
+            ~{sample}.~{locus}.base.vcf.gz \
+            ~{reference_fasta} \
+            -v ~{verbosity} \
+            ~{extra_args}
+
+        for tsv in $(ls *.tsv); do mv $tsv ~{sample}.$tsv; done
+        mv summary.vcf ~{sample}.summary.vcf
+    >>>
+
+    output {
+        VcfdistOutputs outputs = {
+            "summary_vcf": "~{sample}.summary.vcf",
+            "precision_recall_summary_tsv": "~{sample}.precision-recall-summary.tsv",
+            "precision_recall_tsv": "~{sample}.precision-recall.tsv",
+            "query_tsv": "~{sample}.query.tsv",
+            "truth_tsv": "~{sample}.truth.tsv",
+            "phasing_summary_tsv": "~{sample}.phasing-summary.tsv",
+            "switchflips_tsv": "~{sample}.switchflips.tsv",
+            "superclusters_tsv": "~{sample}.superclusters.tsv",
+            "phase_blocks_tsv": "~{sample}.phase-blocks.tsv"
+        }
+    }
+
+    runtime {
+        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/vcfdist:v1"
+        disks: "local-disk " + disk_size_gb + " HDD"
+        memory: mem_gb + " GiB"
+        cpu: cpu
+        preemptible: preemptible
     }
 }

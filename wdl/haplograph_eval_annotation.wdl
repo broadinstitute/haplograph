@@ -126,8 +126,8 @@ task haplograph {
 
     runtime {
         docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograph:v2"
-        memory: "64 GB"
-        cpu: 16
+        memory: "16 GB"
+        cpu: 4
         disks: "local-disk 100 SSD"
     }
 }
@@ -142,12 +142,6 @@ task haplograph_eval {
 
     command <<<
         set -euxo pipefail
-
-        # Count haplotypes and assign to variable
-        assembly_num=$(grep ">" ~{query_fasta} | wc -l)
-        echo "Number of haplotypes: $assembly_num"
-
-
         /haplograph/target/release/haplograph evaluate -t ~{truth_fasta} \
                                                         -q ~{query_fasta} \
                                                         -s 2 \
@@ -162,8 +156,8 @@ task haplograph_eval {
 
     runtime {
         docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograph:v2"
-        memory: "4 GB"
-        cpu: 1
+        memory: "16 GB"
+        cpu: 4
         disks: "local-disk 100 SSD"
     }
 }
