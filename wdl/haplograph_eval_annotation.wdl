@@ -97,6 +97,7 @@ task haplograph {
         String locus
         Int windowsize
         Int minimal_supported_reads
+        Int fold_threshold
         String extra_arg = ""
     }
 
@@ -111,7 +112,7 @@ task haplograph {
                                                         -m ~{minimal_supported_reads} \
                                                         -d gfa \
                                                         ~{extra_arg}
-        /haplograph/target/release/haplograph assemble -m -n 2 -g ~{prefix}.gfa -o ~{prefix}
+        /haplograph/target/release/haplograph assemble -m -n 2 -f ~{fold_threshold} -g ~{prefix}.gfa -o ~{prefix}
 
         /haplograph/target/release/haplograph call -g ~{prefix}.gfa -o ~{prefix} -s ~{prefix} -r ~{reference_fa} -p
         

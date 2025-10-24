@@ -176,7 +176,7 @@ pub fn get_all_ref_seq(reference_fa: &String) -> Vec<fastq::Record> {
             vec![30; sequence.len()].as_slice() // Default quality score
         );
         reference_seqs.push(fastq_record);
-        info!("Extracted {} reference sequences", reference_seqs.len());
+        // info!("Extracted {} reference sequences", reference_seqs.len());
             
         
     }
