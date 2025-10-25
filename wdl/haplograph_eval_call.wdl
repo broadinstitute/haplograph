@@ -60,6 +60,8 @@ workflow Haplograph_eval {
                     truth_vcf_index = truth_vcf_index,
                     locus = locus,
                     reference_fasta = reference_fa,
+                    coverage = desiredCoverage,
+                    genename = gene_name,
                     extra_args = ""
             }
 
@@ -86,6 +88,7 @@ task haplograph {
         String locus
         Int windowsize
         Int minimal_supported_reads
+        Int fold_threshold
         String extra_arg = ""
     }
 
@@ -100,9 +103,9 @@ task haplograph {
                                                         -m ~{minimal_supported_reads} \
                                                         -d gfa \
                                                         ~{extra_arg}
-        /haplograph/target/release/haplograph assemble -m -n 2 -g ~{prefix}.gfa -o ~{prefix}
+        /haplograph/target/release/haplograph assemble -m -n 2 -g ~{prefix}.gfa -f ~{fold_threshold} -o ~{prefix}
 
-        /haplograph/target/release/haplograph call -g ~{prefix}.gfa -o ~{prefix} -s ~{prefix} -r ~{reference_fa} -p
+        /haplograph/target/release/haplograph call -g ~{prefix}.gfa -o ~{prefix} -s ~{prefix} -r ~{reference_fa} -p -f ~{fold_threshold}
         
         
     >>>
@@ -384,6 +387,8 @@ struct VcfdistOutputs {
 task Vcfdist {
     input {
         String sample
+        String genename
+        String coverage
         File eval_vcf
         File? eval_vcf_index
         File truth_vcf
@@ -415,21 +420,21 @@ task Vcfdist {
             -v ~{verbosity} \
             ~{extra_args}
 
-        for tsv in $(ls *.tsv); do mv $tsv ~{sample}.$tsv; done
-        mv summary.vcf ~{sample}.summary.vcf
+        for tsv in $(ls *.tsv); do mv $tsv ~{sample}.~{genename}.~{coverage}.$tsv; done
+        mv summary.vcf ~{sample}.~{genename}.~{coverage}.summary.vcf
     >>>
 
     output {
         VcfdistOutputs outputs = {
-            "summary_vcf": "~{sample}.summary.vcf",
-            "precision_recall_summary_tsv": "~{sample}.precision-recall-summary.tsv",
-            "precision_recall_tsv": "~{sample}.precision-recall.tsv",
-            "query_tsv": "~{sample}.query.tsv",
-            "truth_tsv": "~{sample}.truth.tsv",
-            "phasing_summary_tsv": "~{sample}.phasing-summary.tsv",
-            "switchflips_tsv": "~{sample}.switchflips.tsv",
-            "superclusters_tsv": "~{sample}.superclusters.tsv",
-            "phase_blocks_tsv": "~{sample}.phase-blocks.tsv"
+            "summary_vcf": "~{sample}.~{genename}.~{coverage}.summary.vcf",
+            "precision_recall_summary_tsv": "~{sample}.~{genename}.~{coverage}.precision-recall-summary.tsv",
+            "precision_recall_tsv": "~{sample}.~{genename}.~{coverage}.precision-recall.tsv",
+            "query_tsv": "~{sample}.~{genename}.~{coverage}.query.tsv",
+            "truth_tsv": "~{sample}.~{genename}.~{coverage}.truth.tsv",
+            "phasing_summary_tsv": "~{sample}.~{genename}.~{coverage}.phasing-summary.tsv",
+            "switchflips_tsv": "~{sample}.~{genename}.~{coverage}.switchflips.tsv",
+            "superclusters_tsv": "~{sample}.~{genename}.~{coverage}.superclusters.tsv",
+            "phase_blocks_tsv": "~{sample}.~{genename}.~{coverage}.phase-blocks.tsv"
         }
     }
 
