@@ -385,6 +385,7 @@ struct VcfdistOutputs {
 
 task Vcfdist {
     input {
+        String truth_sample
         String sample
         String genename
         String coverage
@@ -406,7 +407,7 @@ task Vcfdist {
     command <<<
         set -euxo pipefail
         bcftools index -t ~{truth_vcf}
-        bcftools view -s ~{sample} -r ~{locus} ~{truth_vcf} -Oz -o ~{sample}.~{locus}.base.vcf.gz
+        bcftools view -s ~{truth_sample} -r ~{locus} ~{truth_vcf} -Oz -o ~{sample}.~{locus}.base.vcf.gz
         bcftools index -t ~{sample}.~{locus}.base.vcf.gz
 
         bcftools index -t ~{eval_vcf}
