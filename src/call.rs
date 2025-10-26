@@ -480,11 +480,6 @@ pub fn start(graph_filename: &PathBuf, reference_seqs: &Vec<fastq::Record>, samp
         let ref_seq = full_ref_seq[start..end].to_string();
         let (variants, poscounts) = get_variants_from_cigar(cigar.as_str(), &chromosome, ref_seq.as_str(), alt_seq.as_str(), start, support_reads, &node_id);
         all_variants.extend(variants);
-
-        // for (pos, count) in poscounts.iter() {
-        //     *coverage.entry(*pos).or_insert(0) += count;
-        // }
-
     }
 
     let variants = if phase_variants {

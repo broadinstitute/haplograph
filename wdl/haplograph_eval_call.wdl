@@ -5,7 +5,7 @@ workflow Haplograph_eval {
         File whole_genome_bam
         File whole_genome_bai
         File truth_vcf
-        File truth_vcf_index
+        File? truth_vcf_index
         File reference_fa
         String prefix
         File gene_bed
@@ -57,7 +57,6 @@ workflow Haplograph_eval {
                     sample = prefix,
                     eval_vcf = haplograph.vcf_file,
                     truth_vcf = truth_vcf,
-                    truth_vcf_index = truth_vcf_index,
                     locus = locus,
                     reference_fasta = reference_fa,
                     coverage = desiredCoverage,
@@ -392,7 +391,7 @@ task Vcfdist {
         File eval_vcf
         File? eval_vcf_index
         File truth_vcf
-        File truth_vcf_index
+        File? truth_vcf_index
         String locus
         File reference_fasta
         String? extra_args
@@ -406,6 +405,7 @@ task Vcfdist {
 
     command <<<
         set -euxo pipefail
+        bcftools index -t ~{truth_vcf}
         bcftools view -s ~{sample} -r ~{locus} ~{truth_vcf} -Oz -o ~{sample}.~{locus}.base.vcf.gz
         bcftools index -t ~{sample}.~{locus}.base.vcf.gz
 
