@@ -19,6 +19,7 @@ pub struct NodeInfo {
     pub support_reads: usize,
     pub allele_frequency: String,
     pub read_names: String,
+    pub methyl_info: HashMap<usize, f32>,
 }
 
 #[derive(Debug, Clone)]
@@ -50,13 +51,17 @@ pub fn load_graph(filename: &PathBuf) -> AnyhowResult< (HashMap<String, NodeInfo
             let json_value: Value = serde_json::from_str(annotation).unwrap();
 
             let mut value = json_value;
-
+            let methyl_info = value["mod_score_dict"].as_str().unwrap_or_default();
+            let methyl_info_list = if methyl_info.is_empty() { Vec::new() } else { methyl_info.split(",").collect::<Vec<_>>() };
+            let methyl_info_dict = if methyl_info_list.len() > 0 { methyl_info_list.iter().map(|x| x.split(":").collect::<Vec<_>>()).collect::<Vec<_>>().iter().map(|x| (x[0].parse::<usize>().unwrap(), x[1].parse::<f32>().unwrap())).collect::<HashMap<usize, f32>>() } else { HashMap::new() };
+            // let methyl_info_dict = methyl_info.iter().map(|x| x.split(":").collect::<Vec<_>>()).collect::<Vec<_>>().iter().map(|x| (x[0].parse::<usize>().unwrap(), x[1].parse::<f32>().unwrap())).collect::<HashMap<usize, f32>>();
             let value_info = NodeInfo {
                 seq: seq.to_string(),
                 cigar: value["cigar"].to_string(),
                 support_reads: value["support_reads"].to_string().trim_matches('"').parse::<usize>().expect(&format!("Support reads not found for node: {}, {}", name, value["support_reads"].to_string())),
                 allele_frequency: value["allele_frequency"].to_string(),
                 read_names: value["read_names"].to_string(),
+                methyl_info: methyl_info_dict,
             };
             node_info.insert(name.to_string(), value_info);
 
@@ -493,6 +498,10 @@ pub fn start(graph_filename: &PathBuf, germline_only:bool, haplotype_number: usi
     println!("allseq: {:?}", allseq.iter().map(|(index, pathlist)| format!("index: {}, path num: {}", index, pathlist.len())).collect::<Vec<_>>().join("\n"));
     let primary_haplotypes = find_full_range_haplotypes(&node_info, &node_haplotype, &allseq, haplotype_number);
     info!("All sequences constructed: {}", primary_haplotypes.len());
+    // call methylation
+    
+
+    // write assemblies
     let output_filename = PathBuf::from(format!("{}.fasta", output_prefix.to_string_lossy()));
     let _ =write_graph_path_fasta(&primary_haplotypes, &output_filename);
     info!("All sequences written to fasta: {}", output_prefix.to_str().unwrap());

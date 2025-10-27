@@ -450,14 +450,13 @@ task downsampleBam {
 
     command <<<
         set -eo pipefail
-        if [[ $scalingFactor < 1.0 ]]; then
+        if awk "BEGIN{ if((~{scalingFactor}) < 1.0) exit 0; else exit 1 }"; then
             gatk DownsampleSam -I ~{input_bam} -O ~{basename}_~{desiredCoverage}x.bam -R 7 -P ~{scalingFactor} -S ConstantMemory --VALIDATION_STRINGENCY LENIENT --CREATE_INDEX true
         else
             mv ~{input_bam} ~{basename}_~{desiredCoverage}x.bam
             mv ~{input_bam_bai} ~{basename}_~{desiredCoverage}x.bai
             echo "Total Coverage is lower than desiredCoverage"
         fi
-        
 
     >>>
     runtime {
