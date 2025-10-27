@@ -30,7 +30,7 @@ pub fn get_methylation_read(r: &Record, start: usize, end: usize, mod_char: char
                     
                 if motif == "CG" {
                     if r.is_reverse(){
-                        if pos_usize - start - 1 as usize > 0 {
+                        if pos_usize as i32 - start as i32 - 1 > 0 {
                             methyl_pos_dict.insert(pos_usize - 1 - start as usize, qual);
                         }
                         
@@ -72,7 +72,8 @@ pub fn aggregate_methylation_reads(methyl_all_reads: HashMap<String,HashMap<usiz
                 continue
             }
         }
-        let mod_score = hyper_methyl as f32 / (hyper_methyl + hypo_methyl) as f32;
+ 
+        let mod_score = if hyper_methyl + hypo_methyl == 0 { 0.0 } else { hyper_methyl as f32 / (hyper_methyl + hypo_methyl) as f32 };
         mod_score_dict.insert(*pos, mod_score);
     }
     mod_score_dict
