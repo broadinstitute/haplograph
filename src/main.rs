@@ -29,57 +29,61 @@ enum Commands {
     /// Extract Haplotypes from BAM file
     #[clap(arg_required_else_help = true)]
     Haplograph {
-       /// Input BAM file
-       #[arg(short, long)]
-       alignment_bam: String,
+        /// Input BAM file
+        #[arg(short, long)]
+        alignment_bam: String,
    
-       /// Input FASTA file
-       #[arg(short, long)]
-       reference_fa: String,
+        /// Input FASTA file
+        #[arg(short, long)]
+        reference_fa: String,
+        
+        /// Sample ID
+        #[arg(short, long)]
+        sampleid: String,
+
+        /// Output prefix
+        #[arg(short, long, default_value = "./haplograph_")]
+        output_prefix: String,
        
-       /// Sample ID
-       #[arg(short, long)]
-       sampleid: String,
+        /// a continuous genomic region as String (chromo:start-end) or a bed file as String
+        #[arg(short, long)]
+        locus: String,
+
+        /// minimal variant allele frequency
+        #[arg(short, long, default_value_t = 0.01)]
+        frequency_min: f64,
+        
+        /// Minimal Supported Reads
+        #[arg(short, long, default_value_t = 2)]
+        min_reads: u8,
+
+        ///window size
+        #[arg(short, long, default_value_t = 100)]
+        window_size: usize,
    
-       /// Output directory
-       #[arg(short, long, default_value = ".")]
-       output_prefix: String,
-       
-       /// a continuous genomic region as String (chromo:start-end) or a bed file as String
-       #[arg(short, long)]
-       locus: String,
-   
-       /// minimal variant allele frequency
-       #[arg(short, long, default_value_t = 0.01)]
-       frequency_min: f64,
-       
-       /// Minimal Supported Reads
-       #[arg(short, long, default_value_t = 2)]
-       min_reads: u8,
-   
-       ///window size
-       #[arg(short, long, default_value_t = 100)]
-       window_size: usize,
-   
-       ///if only primary reads are used
-       #[arg(short, long, default_value = "false")]
-       primary_only: bool, 
-   
-       ///output file format, accepted fasta, gfa, vcf
-       #[arg(short, long, default_value = "gfa")]
-       default_file_format: String, 
-   
-       /// Haplotype number
-       #[arg(short, long, default_value_t = 2)]
-       number_of_haplotypes: usize,
+        ///if only primary reads are used
+        #[arg(short, long, default_value = "false")]
+        primary_only: bool, 
+
+        ///output file format, accepted fasta, gfa, vcf
+        #[arg(short, long, default_value = "gfa")]
+        default_file_format: String, 
+
+        /// Haplotype number
+        #[arg(short, long, default_value_t = 2)]
+        number_of_haplotypes: usize,
+
+        /// heterozygous coverage fold threshold, > 3.0 is not heterozygous,  the smaller the more strict
+        #[arg(short, long, default_value_t = 3.0)]
+        coverage_fold_threshold: f64,
 
         /// methylation likelihood threshold, default to 0.5
         #[arg(short, long, default_value_t = 0.5)]
         threshold_methyl_likelihood: f32,
 
-       /// Verbose output
-       #[arg(short, long)]
-       verbose: bool,
+        /// Verbose output
+        #[arg(short, long)]
+        verbose: bool,
     },
     /// Assemble haplotypes from GFA file
     #[clap(arg_required_else_help = true)]
@@ -199,6 +203,9 @@ fn main() -> Result<()> {
             default_file_format, 
             // haplotype number
             number_of_haplotypes,
+            // heterozygous coverage fold threshold, > 3.0 is not heterozygous,  the smaller the more strict
+            coverage_fold_threshold,
+            // methylation likelihood threshold, default to 0.5
             threshold_methyl_likelihood,
             // Verbose output
             verbose,
@@ -259,7 +266,8 @@ fn main() -> Result<()> {
                     info!("Primary only: {}", primary_only);
 
                     let mut bam = util::open_bam_file(&alignment_bam);
-                    let reference_seqs = util::get_chromosome_ref_seq(&reference_fa, &chromosome);
+                    let reference_seqs = util::get_all_ref_seq(&reference_fa);
+                    let reference_chromosome_seqs = util::get_chromosome_ref_seq(&reference_fa, &chromosome);
                     // // Extract read sequences from BAM file using utility function
                     let mut windows = Vec::new();
                     for i in (start..end).step_by(window_size as usize) {
@@ -267,14 +275,18 @@ fn main() -> Result<()> {
                         windows.push((chromosome.clone(), i, end_pos));
                     }
                     if default_file_format == "gfa" {
-                        graph::start( &mut bam, &windows, &reference_seqs, &sampleid, min_reads as usize, threshold_methyl_likelihood, frequency_min, primary_only, &output_prefix, number_of_haplotypes)?;
+                        graph::start( &mut bam, &windows, &reference_chromosome_seqs, &sampleid, min_reads as usize, threshold_methyl_likelihood, frequency_min, primary_only, &output_prefix, number_of_haplotypes)?;
             
                     } else {
-                        hap::start(&mut bam, &windows, &reference_seqs, &sampleid, min_reads as usize, frequency_min, primary_only, &output_prefix, &default_file_format)?;
+                        hap::start(&mut bam, &windows, &reference_chromosome_seqs, &sampleid, min_reads as usize, frequency_min, primary_only, &output_prefix, &default_file_format)?;
                     } 
-                }
 
-        
+                    let output_p = PathBuf::from(&output_prefix);
+                    let graph_gfa = output_p.with_extension("gfa");
+                    asm::start(&graph_gfa,  true, number_of_haplotypes,  &output_p, coverage_fold_threshold)?;                    
+                    call::start(&graph_gfa, &reference_seqs, &sampleid, &output_prefix, number_of_haplotypes, true, coverage_fold_threshold)?;
+
+                }        
 
             }
         Commands::Assemble {
