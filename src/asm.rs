@@ -11,6 +11,7 @@ use serde_json::Value;
 use std::error::Error;
 use crate::eval;
 use crate::util;
+use std::path::Path;
 
 #[derive(Debug, Clone)]
 pub struct NodeInfo {
@@ -386,23 +387,6 @@ pub fn get_supports (node_info: &HashMap<String, NodeInfo>, path: &Vec<String>) 
     supports
 }
 
-pub fn calculate_distance_between_haplotypes(all_sequences: &Vec<(Vec<String>, String, HashSet<String>, usize, usize)>, hap_number: usize) -> Vec<(usize, usize, f64)> {
-    let mut distance_matrix = Vec::new();
-    for  (hap_index, (path, sequence, supported_reads, _, _)) in all_sequences.iter().enumerate() {
-        for (hap_index2, (path2, sequence2, supported_reads2, _, _)) in all_sequences.iter().enumerate() {
-            if hap_index == hap_index2 {
-                continue;
-            }
-            let path_set =  path.iter().map(|x| x.as_str()).collect::<HashSet<_>>();
-            let path_set2 = path2.iter().map(|x| x.as_str()).collect::<HashSet<_>>();
-            let intersect = path_set.intersection(&path_set2).cloned().collect::<HashSet<_>>().len();
-            let union = path_set.union(&path_set2).cloned().collect::<HashSet<_>>().len();
-            let distance = 1.0 - intersect as f64 / union as f64;
-            distance_matrix.push((hap_index, hap_index2, distance));
-        }
-    }
-    distance_matrix
-}
 pub fn find_full_range_haplotypes(node_info: &HashMap<String, NodeInfo>,node_haplotype: &HashMap<String, HashSet<usize>>, all_sequences: &HashMap<usize, Vec<(Vec<String>, String, HashSet<String> )>>, hap_number: usize) -> Vec<(Vec<String>, String, HashSet<String>,usize, usize)> {
     // sort all_sequences by the spanning length and the supported_reads
     let node_list = node_info.keys().collect::<Vec<_>>();
@@ -488,6 +472,137 @@ pub fn find_node_haplotype(node_info: &HashMap<String, NodeInfo>, edge_info: &Ha
     }
 }
 
+/// Maps positions from alternate sequence to reference sequence based on CIGAR string
+pub fn mapping_to_reference_coordinates(cigar: &str, ref_start: usize) -> HashMap<usize, usize> {
+    let mut ref_pos = 0;
+    let mut alt_pos = 0;
+    
+    // Parse CIGAR string into operations
+    let mut operations = Vec::new();
+    let mut num = String::new();
+    
+    for c in cigar.chars() {
+        if c.is_digit(10) {
+            num.push(c);
+        } else {
+            if !num.is_empty() {
+                let length = num.parse::<usize>().unwrap();
+                operations.push((length, c));
+                num.clear();
+            }
+        }
+    }
+    
+    // Process each operation
+    let mut position_mapping = HashMap::new();
+    
+    for (length, op) in operations {
+        match op {
+            '=' | 'M' => {  // Match
+                for i in 0..length {
+                    let pos = ref_start + ref_pos + i;
+                    position_mapping.insert(alt_pos + i, pos);
+                }
+                ref_pos += length;
+                alt_pos += length;
+            },
+            'X' => {  // Mismatch
+                for i in 0..length {
+                    let pos = ref_start + ref_pos + i;
+                    position_mapping.insert(alt_pos + i, pos);
+                }
+                ref_pos += length;
+                alt_pos += length;
+            },
+            'I' => {  // Insertion
+                let pos = ref_start + ref_pos - 1;  // Mapping to one base pair before
+                for i in 0..length {
+                    position_mapping.insert(alt_pos + i, pos);
+                }
+                alt_pos += length;
+            },
+            'D' => {  // Deletion, nothing will map back to reference coordinates
+                ref_pos += length;
+            },
+            _ => {
+                warn!("Unexpected CIGAR operation: {}", op);
+            }
+        }
+    }
+    
+    position_mapping
+}
+
+fn write_methyl_bed(
+    methyl_info: &HashMap<(usize, usize), (f32, usize)>,
+    output_prefix: &PathBuf,
+    haplotype_index: usize,
+    chromosome: &str,
+) -> std::io::Result<()> {
+    let output_file = output_prefix.with_extension(format!("Hap.{}.bed", haplotype_index));
+    let mut file = File::create(Path::new(&output_file))?;
+
+    // Write BED header
+    writeln!(file, "##fileformat=BED")?;
+    writeln!(file, "##haplotype={}", haplotype_index)?;
+    writeln!(
+        file,
+        "#CHROM\tRef_start\tRef_end\tMod_rate\tAsm_start\tAsm_end\tMotif\tCoverage"
+    )?;
+    // let min_prob = 0.5;
+    // let mut methylation_signal: HashMap<(usize, Option<usize>), (f64, f64)> = HashMap::new();
+    let mut methyl_info_vec = Vec::new();
+    for ((ref_pos, asm_pos), (score, coverage)) in methyl_info.iter() {
+        // 1-based coordinates
+        let ref_pos_start = ref_pos + 1;
+        let ref_pos_end = ref_pos + 2;
+        let asm_pos_start = asm_pos + 1;
+        let asm_pos_end = asm_pos + 2;
+        let motif = "CG".to_string();
+        methyl_info_vec.push((chromosome, ref_pos_start, ref_pos_end, asm_pos_start, asm_pos_end, motif, score, coverage));
+
+    }
+    methyl_info_vec.sort_by_key(|item| item.1);
+    for methyl_list in methyl_info_vec.iter(){
+        let (chromosome, ref_pos_start, ref_pos_end, asm_pos_start, asm_pos_end, motif, methyl_rate, coverage) = methyl_list;
+        writeln!(file, 
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            chromosome, ref_pos_start, ref_pos_end,  methyl_rate, asm_pos_start, asm_pos_end, motif, coverage
+            )?;
+
+    }
+
+    Ok(())
+}
+
+
+pub fn call_methylation(node_info: &HashMap<String, NodeInfo>, all_paths: Vec<(Vec<String>, String, HashSet<String>,usize, usize)>, output_prefix: &PathBuf) -> () {
+    // call methylation
+    for (hap_index, (path, sequence, supported_reads, supports, span)) in all_paths.iter().enumerate() {
+        let mut methyl_info_dict = HashMap::new();
+        let mut spos = 0;
+        let chromosome = path[0].split(".").collect::<Vec<_>>()[1].split(":").collect::<Vec<_>>()[0];
+        for node in path.iter() {
+            let methyl_info = node_info.get(node).unwrap().methyl_info.clone();
+            let cigar = node_info.get(node).unwrap().cigar.clone();
+            let ref_start = eval::find_alignment_intervals(vec![node.clone()].iter().map(|x| x.as_str()).collect::<Vec<_>>()).unwrap().0;
+            let position_mapping = mapping_to_reference_coordinates(&cigar, ref_start);
+            // println!("position_mapping: {:?}", position_mapping);
+            let node_seq = node_info.get(node).unwrap().seq.clone();
+            let node_coverage = node_info.get(node).unwrap().support_reads;
+            for (pos, score) in methyl_info.into_iter() {
+                let asm_pos = pos + spos;
+                let ref_pos  = position_mapping.get(&pos).unwrap_or(&0).clone();
+                // println!("ref_pos: {}, asm_pos: {}, score: {}", ref_pos, asm_pos, score);
+                methyl_info_dict.insert((ref_pos, asm_pos), (score, node_coverage));
+            }
+            spos += node_seq.len();
+        }
+        let _ = write_methyl_bed(&methyl_info_dict, &output_prefix, hap_index,  chromosome);
+        // println!("methyl_info_dict: {:?}", methyl_info_dict);
+    }
+}
+
 pub fn start(graph_filename: &PathBuf, germline_only:bool, haplotype_number: usize,  output_prefix: &PathBuf, het_fold_threshold: f64) -> AnyhowResult<()> {
     let (node_info, edge_info) = load_graph(graph_filename).unwrap();
     info!("Traversing graph with germline_only: {}, hap_number: {}", germline_only, haplotype_number);
@@ -499,8 +614,8 @@ pub fn start(graph_filename: &PathBuf, germline_only:bool, haplotype_number: usi
     let primary_haplotypes = find_full_range_haplotypes(&node_info, &node_haplotype, &allseq, haplotype_number);
     info!("All sequences constructed: {}", primary_haplotypes.len());
     // call methylation
-    
-
+    let _ = call_methylation(&node_info, primary_haplotypes.clone(), output_prefix);    
+    info!("Haplotype specific methylation signals exported: {}", primary_haplotypes.len());
     // write assemblies
     let output_filename = PathBuf::from(format!("{}.fasta", output_prefix.to_string_lossy()));
     let _ =write_graph_path_fasta(&primary_haplotypes, &output_filename);
