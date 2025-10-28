@@ -8,6 +8,7 @@ use std::io::Write;
 use std::fs::File;
 use crate::intervals;
 use crate::util;
+use crate::methyl;
 use std::error::Error;
 use indicatif::{ProgressBar, ProgressStyle};
 use bio::io::fastq;
@@ -20,7 +21,7 @@ pub struct NodeInfo {
     pub cigar: String,
     pub support_reads: usize,
     pub allele_frequency: f64,
-    pub read_vector: Vec<String>,
+    pub methyl_info: HashMap<String, HashMap<usize, f32>>,
     pub haplotype_index: Option<Vec<usize>>,
 }
 pub struct EdgeInfo {
@@ -40,7 +41,7 @@ pub struct EdgeInfo {
 
 
 
-pub fn get_node_edge_info(windows: &Vec<(String, usize, usize)>, final_hap_list: &Vec<HashMap<String, (String,Vec<String>, f64)>>, min_reads: usize, frequency_min: f64, haplotype_number: usize) -> (HashMap<String, NodeInfo>, HashMap<(String,String), EdgeInfo>) {
+pub fn get_node_edge_info(windows: &Vec<(String, usize, usize)>, final_hap_list: &Vec<HashMap<String, (String, HashMap<String, HashMap<usize, f32>>, f64)>>, min_reads: usize, frequency_min: f64, haplotype_number: usize) -> (HashMap<String, NodeInfo>, HashMap<(String,String), EdgeInfo>) {
      let mut node_info = HashMap::new();
     let mut edge_info = HashMap::new();
 
@@ -49,7 +50,8 @@ pub fn get_node_edge_info(windows: &Vec<(String, usize, usize)>, final_hap_list:
         // let unique_read_set = find_unique_read_set(&final_hap_list_index);
         // assert_eq!(unique_read_set.len(), final_hap_list_index.len());
 
-        for (i, (final_haplotype_seq,(cigar, read_vector, allele_frequency))) in final_hap_list_index.iter().enumerate(){
+        for (i, (final_haplotype_seq,(cigar, read_dict, allele_frequency))) in final_hap_list_index.iter().enumerate(){
+            let read_vector = read_dict.keys().cloned().collect::<Vec<_>>();
             let read_vector_clone = read_vector.iter().map(|x| x.split("|").collect::<Vec<_>>()[0].to_string()).collect::<HashSet<_>>();
             let node_id = format!("H.{}:{}-{}.{}", window.0, window.1, window.2, i);
             // let cigar = cigar_dict_list[index].get(final_haplotype_seq).unwrap();
@@ -62,7 +64,7 @@ pub fn get_node_edge_info(windows: &Vec<(String, usize, usize)>, final_hap_list:
                 cigar: cigar.clone(),
                 support_reads: read_vector_len,
                 allele_frequency: allele_frequency.clone(),
-                read_vector: read_vector.clone(),
+                methyl_info: read_dict.clone(),
                 haplotype_index: None,
             });
             
@@ -70,9 +72,10 @@ pub fn get_node_edge_info(windows: &Vec<(String, usize, usize)>, final_hap_list:
             if index < windows.len() - 1 {
                 let next_window = windows[index + 1].clone();
                 // every node only have one choice for the next window
-                for (j, (next_final_haplotype_seq, (next_cigar,next_read_vector, next_allele_frequency))) in final_hap_list[index + 1].iter().enumerate(){
+                for (j, (next_final_haplotype_seq, (next_cigar,next_methyl_dict, next_allele_frequency))) in final_hap_list[index + 1].iter().enumerate(){
                     let next_node_id = format!("H.{}:{}-{}.{}", next_window.0, next_window.1, next_window.2, j);
                     // let next_cigar = cigar_dict_list[index + 1].get(next_final_haplotype_seq).unwrap();
+                    let next_read_vector = next_methyl_dict.keys().cloned().collect::<Vec<_>>();
                     let next_read_vector_len = next_read_vector.len();
                     let next_read_vector_clone = next_read_vector.iter().map(|x| x.split("|").collect::<Vec<_>>()[0].to_string()).collect::<HashSet<_>>();
                     let overlapping_reads = read_vector_clone.intersection(&next_read_vector_clone).cloned().collect::<Vec<_>>();
@@ -86,9 +89,7 @@ pub fn get_node_edge_info(windows: &Vec<(String, usize, usize)>, final_hap_list:
                             overlap_ratio: overlap_ratio,
                             overlapping_reads: overlapping_reads.join(","),
                         });
-                  
                     }
-                    
                 }
             }
         }
@@ -100,6 +101,7 @@ pub fn write_gfa_output(
     node_file: &HashMap<String, NodeInfo>,
     edge_info: &HashMap<(String, String), EdgeInfo>,
     output_filename: &PathBuf,
+    methyl_threshold: f32,
 ) -> std::result::Result<(), Box<dyn Error>> {
     let mut file = File::create(output_filename)?;
     writeln!(file, "H\tVN:Z:1.0")?;
@@ -115,8 +117,14 @@ pub fn write_gfa_output(
         let haplotype_cigar = node_info.cigar.clone();
         let read_num = node_info.support_reads;
         let allele_frequency = node_info.allele_frequency;
-        let read_names = node_info.read_vector.clone().join(",");
-        
+        let methyl_info = node_info.methyl_info.clone();
+        // println!("methylation_info, {:?}", methyl_info);
+        let read_names = node_info.methyl_info.keys().cloned().collect::<Vec<_>>().join(",");
+        let mod_score_dict = methyl::aggregate_methylation_reads(methyl_info, methyl_threshold);
+        let mod_score_dict_string = mod_score_dict.iter().map(|(pos, score)| format!("{}:{}", pos, score)).collect::<Vec<_>>().join(",");
+        let average_mod_score = mod_score_dict.values().sum::<f32>() / mod_score_dict.len() as f32;
+        // println!("mod_score_dict: {:?}", mod_score_dict);
+
         let mut node_info_clone = BTreeMap::new();
         node_info_clone.insert("pos".to_string(), start.to_string());
         // node_info_clone.insert("seq".to_string(), haplotype_seq);
@@ -124,14 +132,13 @@ pub fn write_gfa_output(
         node_info_clone.insert("support_reads".to_string(), read_num.to_string());
         node_info_clone.insert("allele_frequency".to_string(), allele_frequency.to_string());
         node_info_clone.insert("read_names".to_string(), read_names.to_string());
+        node_info_clone.insert("mod_score_dict".to_string(), mod_score_dict_string);
         // node_info_clone.insert("read_names".to_string(), read_names);
         // anchor_info_clone.seq = String::new();
         let json_string =
             serde_json::to_string(&node_info_clone).unwrap_or_else(|_| "{}".to_string());
-        let formatted_string = format!("S\t{}\t{}\tPG:J:{}", haplotype_id, haplotype_seq, json_string);
+        let formatted_string = format!("S\t{}\t{}\tPG:J:{}\tRC:i:{}\tML:f:{:.2}", haplotype_id, haplotype_seq, json_string, read_num, average_mod_score);
         node_output.push(formatted_string);
-        
-
     }
 
     let mut link_output = Vec::new();
@@ -156,7 +163,7 @@ pub fn write_gfa_output(
 }
 
 
-pub fn start(bam: &mut IndexedReader, windows: &Vec<(String,usize, usize)>, reference_fa: &Vec<fastq::Record>, sampleid: &String, min_reads: usize, frequency_min: f64, primary_only: bool, output_prefix: &String, haplotype_number: usize) -> AnyhowResult<()> {
+pub fn start(bam: &mut IndexedReader, windows: &Vec<(String,usize, usize)>, reference_fa: &Vec<fastq::Record>, sampleid: &String, min_reads: usize, methyl_threshold: f32, frequency_min: f64, primary_only: bool, output_prefix: &String, haplotype_number: usize) -> AnyhowResult<()> {
 
     let mut final_hap_list = Vec::new(); 
     for (i, window) in windows.iter().enumerate() {
@@ -169,7 +176,7 @@ pub fn start(bam: &mut IndexedReader, windows: &Vec<(String,usize, usize)>, refe
     // let gfa_output = PathBuf::from(format!("{}/{}_{}_{}_{}_haplograph.gfa", cli.output, cli.sampleid, chromosome, start, end));
  
     let gfa_output = PathBuf::from(format!("{}.gfa", output_prefix));
-    write_gfa_output(&node_info, &edge_info, &gfa_output);
+    write_gfa_output(&node_info, &edge_info, &gfa_output, methyl_threshold);
 
     info!("Graph reconstruction completed");
     Ok(())

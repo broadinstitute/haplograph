@@ -2,13 +2,14 @@ use log::{info, warn};
 use anyhow::{Result as AnyhowResult, Context};
 use bio::io::fastq;
 use rust_htslib::faidx::Reader;
-use rust_htslib::bam::{self, IndexedReader, Read as BamRead, record::Aux, pileup::Pileup};
+use rust_htslib::bam::{self, IndexedReader, Read as BamRead, Record, record::Aux, pileup::Pileup};
 use std::path::{PathBuf};
 use std::collections::{HashMap, BTreeMap, HashSet};
 use std::io::Write;
 use std::fs::File;
 use crate::util;
 use indicatif::{ProgressBar, ProgressStyle};
+use crate::methyl;
 
 pub fn get_read_start_end(pileup: &mut Pileup, primary_only: bool) -> AnyhowResult<(HashMap<String, u64>, HashMap<String, Vec<u8>>, HashMap<String, Vec<u8>>)> {
     let mut read_coordinates: HashMap<String, u64> = HashMap::new();
@@ -140,13 +141,14 @@ pub fn extract_haplotypes_coordinates_from_bam(
     start: u64,
     end: u64,
     primary_only: bool,
-) -> AnyhowResult<(Vec<fastq::Record>, HashMap<String, (u64, u64)>, HashMap<String, String>)> {
+) -> AnyhowResult<(Vec<fastq::Record>, HashMap<String, (u64, u64)>, HashMap<String, String>, HashMap<String, Record>)> {
     let rg_sm_map = util::get_rg_to_sm_mapping(bam);
     let mut bmap: HashMap<String, (String, Vec<u8>)> = HashMap::new();
     let mut read_spans: HashMap<String, (u64, u64)> = HashMap::new(); // Track read alignment spans
     let mut read_coordinates: HashMap<String, (u64, u64)> = HashMap::new(); // Track read coordinates
     let _ = bam.fetch((chr.as_bytes(), start, end));
     let mut read_sequence_dict: HashMap<String, String> = HashMap::new();
+    let mut bam_records: HashMap<String, Record> = HashMap::new();
     // Create progress bar
     let pb = ProgressBar::new_spinner();
     pb.set_style(
@@ -162,8 +164,7 @@ pub fn extract_haplotypes_coordinates_from_bam(
         let mut readnames = HashSet::new();
         if start <= (pileup.pos() as u64) && (pileup.pos() as u64) < end {
             for (i, alignment) in pileup.alignments().enumerate() {
-                let record = alignment.record();
-                
+                let record = alignment.record();                
                 let qname = String::from_utf8_lossy(record.qname()).into_owned() ;
                 let read_seq = String::from_utf8_lossy(&record.seq().as_bytes()).into_owned();
                 // skip the alignment from the same read
@@ -171,6 +172,7 @@ pub fn extract_haplotypes_coordinates_from_bam(
                     continue;
                 }
                 readnames.insert(qname.clone());
+                bam_records.insert(qname.clone(), record.clone());
 
                 let sm = match util::get_sm_name_from_rg(&record, &rg_sm_map) {
                     Ok(a) => a,
@@ -293,8 +295,9 @@ pub fn extract_haplotypes_coordinates_from_bam(
         .collect();
 
     info!("Extracted {} reads from region", records.len());
+
    
-    Ok((records, read_coordinates, read_sequence_dict))
+    Ok((records, read_coordinates, read_sequence_dict, bam_records))
 }
 
 // Function to extract seqs from a FASTA file within a specified genomic region.
@@ -332,15 +335,16 @@ pub fn process_bam_file_by_coordinates(bam: &mut IndexedReader, chromosome: &str
 }
 
 
-pub fn process_bam_file(bam: &mut IndexedReader, chromosome: &str, start: usize, end: usize, primary_only: bool) -> Vec<fastq::Record> {
+pub fn process_bam_file(bam: &mut IndexedReader, chromosome: &str, start: usize, end: usize, primary_only: bool) -> (Vec<fastq::Record>, HashMap<String,HashMap<usize, f32>>) {
     
-    let (reads, read_coordinates, read_sequence_dictionary) = extract_haplotypes_coordinates_from_bam(
+    let (reads, read_coordinates, read_sequence_dictionary, bam_records) = extract_haplotypes_coordinates_from_bam(
         bam,
         &chromosome,
         start as u64,
         end as u64,
         primary_only, 
     ).unwrap();
+    let methyl_all_reads = methyl::start(bam_records,  &read_coordinates);
     info!("Extracted {} reads from region", reads.len());
     let mut filtered_reads = Vec::new();
     for r in reads.iter() {
@@ -366,7 +370,7 @@ pub fn process_bam_file(bam: &mut IndexedReader, chromosome: &str, start: usize,
         
     }
     
-    filtered_reads
+    (filtered_reads, methyl_all_reads)
 }
 
 pub fn process_fasta_file(reference: &Vec<fastq::Record>, chromosome: &str, start:usize, end:usize, sampleid: &String) -> Vec<fastq::Record> {
@@ -409,7 +413,7 @@ pub fn process_fasta_file(reference: &Vec<fastq::Record>, chromosome: &str, star
 }
 
 
-pub fn write_fasta_output(final_hap: HashMap<String, (String, Vec<String>, f64)>, output_path: &PathBuf) -> AnyhowResult<()> {
+pub fn write_fasta_output(final_hap: HashMap<String, (String, HashMap<String, HashMap<usize, f32>>, f64)>, output_path: &PathBuf) -> AnyhowResult<()> {
 
     
     let mut file = File::create(output_path)
@@ -421,7 +425,8 @@ pub fn write_fasta_output(final_hap: HashMap<String, (String, Vec<String>, f64)>
     for (sequence, (cigar, read_names, allele_frequency)) in final_hap {
         // Use the first read name as the sequence ID, or create a hash-based ID
         let sequence_id = if !read_names.is_empty() {
-            read_names.join(",")
+            let json_string =serde_json::to_string(&read_names).expect("Failed to serialize to JSON");
+            json_string
         } else {
             "unknown".to_string()   
         };
@@ -447,17 +452,24 @@ pub fn write_fasta_output(final_hap: HashMap<String, (String, Vec<String>, f64)>
     Ok(())
 }
 
-pub fn collapse_haplotypes(reads: &Vec<fastq::Record>, reference: &fastq::Record, min_reads: usize, frequency_min: f64) -> AnyhowResult<HashMap<String, (String, Vec<String>, f64)>> {
+pub fn collapse_haplotypes(reads: &Vec<fastq::Record>, read_methyl_dict: &HashMap<String,HashMap<usize, f32>>, reference: &fastq::Record, min_reads: usize, frequency_min: f64) -> AnyhowResult<HashMap<String, (String, HashMap<String, HashMap<usize, f32>>, f64)>> {
     // Read the reads records (name and sequence) into a vector.
-    let mut read_dictionary: HashMap<String, Vec<String>> = HashMap::new();
+    let mut read_dictionary: HashMap<String, HashMap<String, HashMap<usize, f32>>> = HashMap::new();
     for read in reads{
-        let contig_name = read.id().to_string();
+        let read_name_origin = read.id().to_string();
+        let contig_name = read_name_origin.split('|').next().unwrap().to_string();
+        // println!("contig_name: {:?}", contig_name);
         let contig = String::from_utf8_lossy(read.seq()).to_string();
-        read_dictionary.entry(contig).or_default().push(contig_name);
+        if !read_methyl_dict.contains_key(&contig_name){
+            read_dictionary.entry(contig).or_default().insert(contig_name, HashMap::new());
+        }else{
+            let methyl_dict = read_methyl_dict.get(&contig_name).unwrap();
+            read_dictionary.entry(contig).or_default().insert(contig_name, methyl_dict.clone());
+        }
     }
 
     let reference_seq = String::from_utf8_lossy(reference.seq()).to_string();
-    let mut final_hap: HashMap<String, (String, Vec<String>, f64)> = HashMap::new();
+    let mut final_hap: HashMap<String, (String, HashMap<String, HashMap<usize, f32>>, f64)> = HashMap::new();
 
     for (hap, vec) in read_dictionary.iter() {
         let allele_frequency = vec.len() as f64 / reads.len() as f64;
@@ -473,12 +485,12 @@ pub fn collapse_haplotypes(reads: &Vec<fastq::Record>, reference: &fastq::Record
 
 
 
-pub fn start(bam: &mut IndexedReader, reference_fa: &Vec<fastq::Record>, chromosome: &str, start: usize, end: usize, sampleid: &String, min_reads: usize, frequency_min: f64, primary_only: bool, write_output:bool) -> AnyhowResult<HashMap<String, (String, Vec<String>, f64)>>  {
-    let reads_list = process_bam_file( bam, chromosome, start, end, primary_only);  
+pub fn start(bam: &mut IndexedReader, reference_fa: &Vec<fastq::Record>, chromosome: &str, start: usize, end: usize, sampleid: &String, min_reads: usize, frequency_min: f64, primary_only: bool, write_output:bool) -> AnyhowResult<HashMap<String, (String, HashMap<String, HashMap<usize, f32>>, f64)>>  {
+    let (reads_list, read_methyl_dict) = process_bam_file( bam, chromosome, start, end, primary_only);  
     // let reads_list = process_bam_file_by_coordinates(bam, chromosome, start, end, primary_only, sampleid);
     let reference = process_fasta_file( reference_fa, chromosome, start, end, sampleid);
     let reference = reference.first().unwrap().clone();
-    let final_hap = collapse_haplotypes(&reads_list, &reference, min_reads, frequency_min)?;
+    let final_hap = collapse_haplotypes(&reads_list, &read_methyl_dict, &reference, min_reads, frequency_min)?;
     info!("Haplotype reconstruction completed");
     let final_hap_output = PathBuf::from(format!("{}/{}_{}_{}_{}_haplograph.fasta", ".", sampleid, chromosome, start, end));
     if write_output{    

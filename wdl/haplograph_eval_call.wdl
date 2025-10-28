@@ -268,7 +268,7 @@ task downsampleBam {
 
     command <<<
         set -eo pipefail
-        if [[ $scalingFactor < 1.0 ]]; then
+        if awk "BEGIN{ if((~{scalingFactor}) < 1.0) exit 0; else exit 1 }"; then
             gatk DownsampleSam -I ~{input_bam} -O ~{basename}_~{desiredCoverage}x.bam -R 7 -P ~{scalingFactor} -S ConstantMemory --VALIDATION_STRINGENCY LENIENT --CREATE_INDEX true
         else
             mv ~{input_bam} ~{basename}_~{desiredCoverage}x.bam
@@ -385,6 +385,7 @@ struct VcfdistOutputs {
 
 task Vcfdist {
     input {
+        String truth_sample
         String sample
         String genename
         String coverage
@@ -406,7 +407,7 @@ task Vcfdist {
     command <<<
         set -euxo pipefail
         bcftools index -t ~{truth_vcf}
-        bcftools view -s ~{sample} -r ~{locus} ~{truth_vcf} -Oz -o ~{sample}.~{locus}.base.vcf.gz
+        bcftools view -s ~{truth_sample} -r ~{locus} ~{truth_vcf} -Oz -o ~{sample}.~{locus}.base.vcf.gz
         bcftools index -t ~{sample}.~{locus}.base.vcf.gz
 
         bcftools index -t ~{eval_vcf}
