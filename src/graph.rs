@@ -137,7 +137,7 @@ pub fn write_gfa_output(
         // anchor_info_clone.seq = String::new();
         let json_string =
             serde_json::to_string(&node_info_clone).unwrap_or_else(|_| "{}".to_string());
-        let formatted_string = format!("S\t{}\t{}\tPG:J:{}\tRC:i:{}\tML:f:{:.2}", haplotype_id, haplotype_seq, json_string, read_names.len(), average_mod_score);
+        let formatted_string = format!("S\t{}\t{}\tPG:J:{}\tRC:i:{}\tML:f:{:.2}", haplotype_id, haplotype_seq, json_string, read_num, average_mod_score);
         node_output.push(formatted_string);
     }
 
