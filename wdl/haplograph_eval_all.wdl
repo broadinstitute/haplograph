@@ -99,6 +99,7 @@ workflow Haplograph_eval {
         Array[Array[File]] fasta = haplograph.asm_file
         Array[Array[File]] vcf = haplograph.vcf_file
         Array[Array[File]] eval = haplograph_eval.qv_scores
+        Array[Array[VcfdistOutputs]] vcfdist_summary = VCFdist_germline.outputs
     }
 }
 
