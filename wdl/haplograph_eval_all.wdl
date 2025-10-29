@@ -8,6 +8,8 @@ workflow Haplograph_eval {
         File truth_asm_1_annotation
         File truth_asm_2
         File truth_asm_2_annotation
+        File truth_vcf
+        File? truth_vcf_tbi
         File reference_fa
         String prefix
         File gene_bed
@@ -75,6 +77,18 @@ workflow Haplograph_eval {
                     query_fasta = haplograph.asm_file,
                     prefix = prefix + "_" + gene_name + "_" + desiredCoverage,
             }
+
+            call Vcfdist as VCFdist_germline {
+                input:
+                    sample = prefix,
+                    eval_vcf = haplograph.vcf_file,
+                    truth_vcf = truth_vcf,
+                    locus = locus,
+                    reference_fasta = reference_fa,
+                    coverage = desiredCoverage,
+                    genename = gene_name,
+                    extra_args = ""
+            }
         }
     }
 
@@ -112,9 +126,6 @@ task haplograph {
                                                         -m ~{minimal_supported_reads} \
                                                         -d gfa \
                                                         ~{extra_arg}
-        /haplograph/target/release/haplograph assemble -m -n 2 -f ~{fold_threshold} -g ~{prefix}.gfa -o ~{prefix}
-
-        /haplograph/target/release/haplograph call -g ~{prefix}.gfa -o ~{prefix} -s ~{prefix} -r ~{reference_fa} -p
         
         
     >>>
@@ -549,5 +560,82 @@ task parseBed {
     output {
         Array[String] locuslist = read_lines("~{output_prefix}_locus.txt")
         Array[String] genelist= read_lines("~{output_prefix}_gene.txt")
+    }
+}
+
+struct VcfdistOutputs {
+    File summary_vcf
+    File precision_recall_summary_tsv
+    File precision_recall_tsv
+    File query_tsv
+    File truth_tsv
+    File phasing_summary_tsv
+    File switchflips_tsv
+    File superclusters_tsv
+    File phase_blocks_tsv
+}
+
+task Vcfdist {
+    input {
+        String truth_sample
+        String sample
+        String genename
+        String coverage
+        File eval_vcf
+        File? eval_vcf_index
+        File truth_vcf
+        File? truth_vcf_index
+        String locus
+        File reference_fasta
+        String? extra_args
+        Int verbosity = 1
+
+        Int disk_size_gb = ceil(size(truth_vcf, "GiB") + 10)
+        Int mem_gb = 16
+        Int cpu = 2
+        Int preemptible = 1
+    }
+
+    command <<<
+        set -euxo pipefail
+        bcftools index -t ~{truth_vcf}
+        bcftools view -s ~{truth_sample} -r ~{locus} ~{truth_vcf} -Oz -o ~{sample}.~{locus}.base.vcf.gz
+        bcftools index -t ~{sample}.~{locus}.base.vcf.gz
+
+        bcftools index -t ~{eval_vcf}
+        bcftools filter -e 'INFO/SOMATIC=1' ~{eval_vcf} -Oz -o ~{sample}.filtered.query.vcf.gz
+        bcftools index -t ~{sample}.filtered.query.vcf.gz
+
+        vcfdist \
+            ~{sample}.filtered.query.vcf.gz \
+            ~{sample}.~{locus}.base.vcf.gz \
+            ~{reference_fasta} \
+            -v ~{verbosity} \
+            ~{extra_args}
+
+        for tsv in $(ls *.tsv); do mv $tsv ~{sample}.~{genename}.~{coverage}.$tsv; done
+        mv summary.vcf ~{sample}.~{genename}.~{coverage}.summary.vcf
+    >>>
+
+    output {
+        VcfdistOutputs outputs = {
+            "summary_vcf": "~{sample}.~{genename}.~{coverage}.summary.vcf",
+            "precision_recall_summary_tsv": "~{sample}.~{genename}.~{coverage}.precision-recall-summary.tsv",
+            "precision_recall_tsv": "~{sample}.~{genename}.~{coverage}.precision-recall.tsv",
+            "query_tsv": "~{sample}.~{genename}.~{coverage}.query.tsv",
+            "truth_tsv": "~{sample}.~{genename}.~{coverage}.truth.tsv",
+            "phasing_summary_tsv": "~{sample}.~{genename}.~{coverage}.phasing-summary.tsv",
+            "switchflips_tsv": "~{sample}.~{genename}.~{coverage}.switchflips.tsv",
+            "superclusters_tsv": "~{sample}.~{genename}.~{coverage}.superclusters.tsv",
+            "phase_blocks_tsv": "~{sample}.~{genename}.~{coverage}.phase-blocks.tsv"
+        }
+    }
+
+    runtime {
+        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/vcfdist:v1"
+        disks: "local-disk " + disk_size_gb + " HDD"
+        memory: mem_gb + " GiB"
+        cpu: cpu
+        preemptible: preemptible
     }
 }

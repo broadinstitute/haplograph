@@ -31,24 +31,12 @@ pub struct EdgeInfo {
     pub overlapping_reads: String,
 }
 
-// let mut node_info_clone = BTreeMap::new();
-// node_info_clone.insert("pos".to_string(), start.to_string());
-// // node_info_clone.insert("seq".to_string(), haplotype_seq);
-// node_info_clone.insert("cigar".to_string(), haplotype_cigar.to_string());
-// node_info_clone.insert("support_reads".to_string(), read_num.to_string());
-// node_info_clone.insert("allele_frequency".to_string(), allele_frequency.to_string());
-// node_info_clone.insert("read_names".to_string(), read_names.to_string());
-
-
-
 pub fn get_node_edge_info(windows: &Vec<(String, usize, usize)>, final_hap_list: &Vec<HashMap<String, (String, HashMap<String, HashMap<usize, f32>>, f64)>>, min_reads: usize, frequency_min: f64, haplotype_number: usize) -> (HashMap<String, NodeInfo>, HashMap<(String,String), EdgeInfo>) {
      let mut node_info = HashMap::new();
     let mut edge_info = HashMap::new();
 
     for (index, window) in windows.iter().enumerate() {
         let final_hap_list_index = final_hap_list[index].clone();
-        // let unique_read_set = find_unique_read_set(&final_hap_list_index);
-        // assert_eq!(unique_read_set.len(), final_hap_list_index.len());
 
         for (i, (final_haplotype_seq,(cigar, read_dict, allele_frequency))) in final_hap_list_index.iter().enumerate(){
             let read_vector = read_dict.keys().cloned().collect::<Vec<_>>();
@@ -108,10 +96,7 @@ pub fn write_gfa_output(
 
     let mut node_output = Vec::new();
     for (haplotype_id, node_info) in node_file.iter() {
-        // haplotype_id = format!("H.{}:{}-{}.{}", chromosome, window.0, window.1, i);
         let hap_name = haplotype_id.split(".").nth(1).unwrap().to_string();
-        // println!("hap_name: {}", hap_name);
-        // let pos_string = hap_name.split(".").next().unwrap().to_string();
         let (chromosome, start, end) = util::split_locus(hap_name);
         let haplotype_seq = node_info.seq.clone();
         let haplotype_cigar = node_info.cigar.clone();
@@ -173,10 +158,9 @@ pub fn start(bam: &mut IndexedReader, windows: &Vec<(String,usize, usize)>, refe
     }
 
     let (node_info, edge_info) = get_node_edge_info(&windows, &final_hap_list, 1 as usize, frequency_min, haplotype_number);
-    // let gfa_output = PathBuf::from(format!("{}/{}_{}_{}_{}_haplograph.gfa", cli.output, cli.sampleid, chromosome, start, end));
- 
+    
     let gfa_output = PathBuf::from(format!("{}.gfa", output_prefix));
-    write_gfa_output(&node_info, &edge_info, &gfa_output, methyl_threshold);
+    let _ = write_gfa_output(&node_info, &edge_info, &gfa_output, methyl_threshold);
 
     info!("Graph reconstruction completed");
     Ok(())
