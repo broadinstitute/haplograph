@@ -184,6 +184,13 @@ pub fn get_all_ref_seq(reference_fa: &String) -> Vec<fastq::Record> {
     reference_seqs
 }
 
+pub fn get_ref_seq_from_chromosome(reference_fa: &String, chromosome: &str) -> (Vec<fastq::Record>, Vec<fastq::Record>) {
+    let reference_seqs = get_all_ref_seq(reference_fa);
+    let reference_seqs_chromosome = reference_seqs.iter().filter(|r| r.id().to_string() == chromosome).map(|r| r.clone()).collect::<Vec<fastq::Record>>();
+    
+    (reference_seqs, reference_seqs_chromosome)
+}
+
 pub fn split_locus(locus: String) -> (String, usize, usize) {
     let parts: Vec<&str> = locus.split(':').collect();
     let chromosome = parts[0].to_string();

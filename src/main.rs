@@ -266,8 +266,7 @@ fn main() -> Result<()> {
                     info!("Primary only: {}", primary_only);
 
                     let mut bam = util::open_bam_file(&alignment_bam);
-                    let reference_seqs = util::get_all_ref_seq(&reference_fa);
-                    let reference_chromosome_seqs = util::get_chromosome_ref_seq(&reference_fa, &chromosome);
+                    let (reference_seqs, reference_chromosome_seqs) = util::get_ref_seq_from_chromosome(&reference_fa, &chromosome);
                     // // Extract read sequences from BAM file using utility function
                     let mut windows = Vec::new();
                     for i in (start..end).step_by(window_size as usize) {
