@@ -11,6 +11,7 @@ mod asm;
 mod call;
 mod methyl;
 mod eval;
+mod extract;
 
 #[derive(Parser)]
 #[command(name = "haplograph")]
@@ -166,6 +167,25 @@ enum Commands {
         /// Output prefix
         #[arg(short, long, default_value = "haplograph_eval")]
         output_prefix: PathBuf,
+
+        /// Verbose output
+        #[arg(short, long)]
+        verbose: bool,
+    },
+    /// extract all the seqeunces from the bam file
+    #[clap(arg_required_else_help = true)]
+    Extract {
+        /// Input Bam file
+        #[arg(short, long)]
+        bamfile: String,
+
+        /// locus as String (chromo:start-end)
+        #[arg(short, long)]
+        locus: String,
+
+        /// Output prefix
+        #[arg(short, long, default_value = "haplograph_extract")]
+        output_prefix: String,
 
         /// Verbose output
         #[arg(short, long)]
@@ -343,7 +363,23 @@ fn main() -> Result<()> {
             env_logger::init();
             eval::start(&truth_fasta, &query_fasta, seq_number, &output_prefix)?;
         }
+        Commands::Extract {
+            bamfile,
+            locus,
+            output_prefix,
+            verbose,
+        } => {
+            // Initialize logging
+            if verbose {
+                std::env::set_var("RUST_LOG", "debug");
+            } else {
     }
-     
+                std::env::set_var("RUST_LOG", "info");
+            env_logger::init();
+            let (chromosome, start, end) = util::split_locus(locus.clone());
+            let mut bam = util::open_bam_file(&bamfile);
+            extract::start(&mut bam, &chromosome, start, end, false, output_prefix.clone().to_string())?;
+        }
+    }
     Ok(())
 }

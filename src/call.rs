@@ -134,7 +134,7 @@ pub fn get_variants_from_cigar(
                         "-"
                     }
                 } } else {
-                   &format!("N{}", match ref_seq.get(ref_pos..ref_pos + length) {
+                   &format!("{}", match ref_seq.get(ref_pos..ref_pos + length) {
                         Some(allele) => allele,
                         None => {
                             println!("{} {} {}", ref_seq, ref_seq.len(), ref_pos);
@@ -151,7 +151,7 @@ pub fn get_variants_from_cigar(
                         }
                     }
                 } else {
-                    "-"
+                    "."
                 };
 
                 if ref_pos > 0 && alt_pos > 0 {
@@ -235,13 +235,6 @@ fn find_coverage_from_gfa(gfa_filename: &PathBuf) -> HashMap<usize, usize> {
         for node in nodes.iter() {
             let node_i = node_info.get(node).unwrap();
             allele_count += node_i.support_reads;
-        }
-        if interval == "chr6:29942560-29942660" {
-            println!("interval: {:?}, nodes: {:?}", interval, nodes);
-            for node in nodes.iter() {
-                let node_i = node_info.get(node).unwrap();
-                println!("node: {:?}, support_reads: {:?}, {}", node, node_i.support_reads, allele_count);
-            }
         }
         let (startpos, endpos) = eval::find_alignment_intervals(nodes.iter().map(|node| node.as_str()).collect::<Vec<_>>()).unwrap();
         for pos in startpos..endpos {   

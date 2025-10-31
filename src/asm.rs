@@ -400,12 +400,13 @@ pub fn find_full_range_haplotypes(node_info: &HashMap<String, NodeInfo>,node_hap
             let (start, end) = eval::find_alignment_intervals(path.iter().map(|x| x.as_str()).collect::<Vec<_>>()).unwrap();
             let supports = get_supports(node_info, path);
             println!("path: {:?}, supports: {:?}, supported_reads: {:?}, span: {:?}", hap_index, supports, supported_reads.len(), end-start );
-            if (end-start) > full_span * 0.8 as usize{
-                full_sequences.push((path.clone(), sequence.clone(), supported_reads.clone(), supports, end-start));
-            }
+
+            full_sequences.push((path.clone(), sequence.clone(), supported_reads.clone(), supports, end-start));
+            
         }
         //first compare the 4th element, then the 3th element
-        full_sequences.sort_by(|a, b| b.4.cmp(&a.4).then(b.3.cmp(&a.3)));
+        // full_sequences.sort_by(|a, b| b.3.cmp(&a.3).then(b.4.cmp(&a.4)));
+        full_sequences.sort_by(|a, b| b.2.len().cmp(&a.2.len()).then(b.3.cmp(&a.3)));
         best_paths.push(full_sequences[0].clone());
     }
     best_paths

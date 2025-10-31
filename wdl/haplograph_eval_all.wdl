@@ -15,6 +15,8 @@ workflow Haplograph_eval {
         File gene_bed
         Int windowsize
         Array[Int] desiredCoverages
+        Int hifiasm_mem
+        Int hifiasm_thread
     }
 
 
@@ -78,6 +80,22 @@ workflow Haplograph_eval {
                     prefix = prefix + "_" + gene_name + "_" + desiredCoverage,
             }
 
+            call hifiasm_asm {
+                input:
+                    bam = downsampleBam.downsampled_bam,
+                    bai = downsampleBam.downsampled_bai,
+                    prefix = prefix + "_" + gene_name + "_" + desiredCoverage,
+                    num_cpus = hifiasm_thread,
+                    mem_gb = hifiasm_mem
+            }
+
+            call haplograph_eval as hifiasm_eval {
+                input:
+                    truth_fasta = get_truth_haplotypes_from_annotation.fasta_file,
+                    query_fasta = hifiasm_asm.asm_file,
+                    prefix = prefix + "_" + gene_name + "_" + desiredCoverage,
+            }
+
             call Vcfdist as VCFdist_germline {
                 input:
                     sample = prefix,
@@ -98,7 +116,8 @@ workflow Haplograph_eval {
         Array[Array[File]] gfa = haplograph.graph_file
         Array[Array[File]] fasta = haplograph.asm_file
         Array[Array[File]] vcf = haplograph.vcf_file
-        Array[Array[File]] eval = haplograph_eval.qv_scores
+        Array[Array[File]] haplograph_eval_result = haplograph_eval.qv_scores
+        Array[Array[File]] hifiasm_eval_result = hifiasm_eval.qv_scores
         Array[Array[VcfdistOutputs]] vcfdist_summary = VCFdist_germline.outputs
     }
 }
@@ -640,3 +659,44 @@ task Vcfdist {
         preemptible: preemptible
     }
 }
+
+task hifiasm_asm{
+    input{
+        File bam
+        File bai
+        String prefix
+        Int num_cpus
+        Int mem_gb
+    }
+
+    Int disk_size = 10 + ceil(2 * size(bam, "GiB"))
+
+    command <<<
+
+        set -euxo pipefail
+
+        samtools fastq ~{bam} > ~{prefix}.fastq
+
+        /truvari/hifiasm-0.25.0/hifiasm -o ~{prefix} -t 4 ~{prefix}.fastq
+        awk '/^S/{print ">"$2;print $3}' ~{prefix}.bp.hap1.p_ctg.gfa > ~{prefix}.bp.hap1.p_ctg.fa
+        awk '/^S/{print ">"$2;print $3}' ~{prefix}.bp.hap2.p_ctg.gfa > ~{prefix}.bp.hap2.p_ctg.fa
+
+        cat ~{prefix}.bp.hap1.p_ctg.fa ~{prefix}.bp.hap2.p_ctg.fa > ~{prefix}.hifiasm.fa
+    >>>
+
+    output{
+        File assembly_hap1="~{prefix}.bp.hap1.p_ctg.fa"
+        File assembly_hap2="~{prefix}.bp.hap2.p_ctg.fa"
+        File asm_file = "~{prefix}.hifiasm.fa"
+    }
+    runtime {
+        cpu: num_cpus
+        memory: mem_gb + " GiB"
+        disks: "local-disk " + disk_size + " HDD" #"local-disk 100 HDD"
+        bootDiskSizeGb: 10
+        preemptible: 2
+        maxRetries: 1
+        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/hifiasm:0.25.0"
+    }    
+}
+
