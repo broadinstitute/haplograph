@@ -1,4 +1,4 @@
-use rust_htslib::bam::{self, IndexedReader, Read, Reader, Record, Read as BamRead, record::Aux, pileup::Pileup};
+use rust_htslib::bam::{ Record};
 use std::collections::{HashMap, HashSet};
 use log::{warn};
 

@@ -3,7 +3,7 @@ use log::info;
 use anyhow::{Result as AnyhowResult, Context};
 use bio::io::fastq;
 use std::path::PathBuf;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use crate::util;
 use crate::asm;
 use crate::eval;
@@ -30,7 +30,7 @@ pub fn get_variants_from_cigar(
     ref_seq: &str,
     alt_seq: &str,
     ref_start: usize,
-    allelecount: usize,
+    allele_count_dict: &HashMap<usize, usize>,
     node_id: &str,
 ) -> (Vec<Variant>, HashMap<usize, usize>) {
     let mut poscount = HashMap::new();
@@ -57,7 +57,8 @@ pub fn get_variants_from_cigar(
             '=' => {
                 for i in 0..length {
                     let pos = ref_start + ref_pos + i;
-                    *poscount.entry(pos).or_insert(0) += allelecount;
+                    let allele_count = allele_count_dict.get(&(alt_pos)).unwrap_or(&0);
+                    *poscount.entry(pos).or_insert(0) += allele_count;
                 }
                 ref_pos += length;
                 alt_pos += length;
@@ -65,7 +66,8 @@ pub fn get_variants_from_cigar(
             'X' => {
                 for i in 0..length {
                     let pos = ref_start + ref_pos + i;
-                    *poscount.entry(pos).or_insert(0) += allelecount;
+                    let allele_count = allele_count_dict.get(&(alt_pos)).unwrap_or(&0);
+                    *poscount.entry(pos).or_insert(0) += allele_count.clone();
                     let ref_allele = &ref_seq[ref_pos + i..ref_pos + i + 1];
                     let alt_allele = &alt_seq[alt_pos + i..alt_pos + i + 1];
                     variants.push(Variant {
@@ -74,7 +76,7 @@ pub fn get_variants_from_cigar(
                         ref_allele: ref_allele.to_string(),
                         alt_allele: alt_allele.to_string(),
                         variant_type: "SNP".to_string(),
-                        allele_count: allelecount,
+                        allele_count: allele_count.clone(),
                         node_id: node_id.to_string(),
                         haplotype_index: None,
                     });
@@ -84,6 +86,7 @@ pub fn get_variants_from_cigar(
             }
             'I' => {
                 let pos = ref_start + ref_pos;
+                let allele_count = allele_count_dict.get(&(alt_pos)).unwrap_or(&0);
                 // *poscount.entry(pos).or_insert(0) += allelecount;
                 let ref_allele = if ref_pos > 0 {
                     match ref_seq.get(ref_pos - 1..ref_pos) {
@@ -112,7 +115,7 @@ pub fn get_variants_from_cigar(
                     ref_allele: ref_allele.to_string(),
                     alt_allele: alt_allele.to_string(),
                     variant_type: "INS".to_string(),
-                    allele_count: allelecount,
+                    allele_count: allele_count.clone(),
                     node_id: node_id.to_string(),
                     haplotype_index: None,
                 });
@@ -122,10 +125,12 @@ pub fn get_variants_from_cigar(
             'D' => {
                 for i in 0..length {
                     let pos = ref_start + ref_pos + i;
-                    *poscount.entry(pos).or_insert(0) += allelecount;
+                    let allele_count = allele_count_dict.get(&(alt_pos)).unwrap_or(&0);
+                    *poscount.entry(pos).or_insert(0) += allele_count.clone();
                 }
                 let pos = ref_start + ref_pos;
                 let spos = if ref_pos > 0 { ref_pos - 1 } else { 0 };
+                let allele_count = allele_count_dict.get(&(alt_pos)).unwrap_or(&0);
                 
                 let ref_allele = if ref_pos > 0 { match ref_seq.get(spos..ref_pos + length) {
                     Some(allele) => allele,
@@ -154,16 +159,16 @@ pub fn get_variants_from_cigar(
                     "."
                 };
 
-                if ref_pos > 0 && alt_pos > 0 {
-                    if let (Some(r), Some(a)) = (
-                        ref_seq.get(ref_pos - 1..ref_pos),
-                        alt_seq.get(alt_pos - 1..alt_pos),
-                    ) {
-                        if r != a {
-                            println!("{} {} {}", r, a, cigar);
-                        }
-                    }
-                }
+                // if ref_pos > 0 && alt_pos > 0 {
+                //     if let (Some(r), Some(a)) = (
+                //         ref_seq.get(ref_pos - 1..ref_pos),
+                //         alt_seq.get(alt_pos - 1..alt_pos),
+                //     ) {
+                //         if r != a {
+                //             println!("{} {} {}", r, a, cigar);
+                //         }
+                //     }
+                // }
 
                 variants.push(Variant {
                     chromosome: ref_name.to_string(),
@@ -171,7 +176,7 @@ pub fn get_variants_from_cigar(
                     ref_allele: ref_allele.to_string(),
                     alt_allele: alt_allele.to_string(),
                     variant_type: "DEL".to_string(),
-                    allele_count: allelecount,
+                    allele_count: allele_count.clone(),
                     node_id: node_id.to_string(),
                     haplotype_index: None,
                 });
@@ -189,8 +194,7 @@ fn collapse_identical_records(variants: Vec<Variant>) -> Vec<Variant> {
     }
 
     let mut collapsed_ad = HashMap::new();
-    // let mut collapsed_af_node_id = HashMap::new();
-
+    let mut collapsed_haplotype_index = HashMap::new();
     for current_var in variants {
         let chromosome = current_var.chromosome;
         let pos = current_var.pos;
@@ -207,23 +211,31 @@ fn collapse_identical_records(variants: Vec<Variant>) -> Vec<Variant> {
             alt_allele.clone(),
             variant_type.clone(),
         );
-        *collapsed_ad.entry(key).or_insert(0) += allele_count;
+        *collapsed_ad.entry(key.clone()).or_insert(0) += allele_count;
+        collapsed_haplotype_index.entry(key.clone()).or_insert(HashSet::new()).extend(haplotype_index.clone().unwrap().iter().map(|x| x.clone()).collect::<HashSet<_>>());
     }
-    collapsed_ad
-        .into_iter()
-        .map(
-            |((chromosome, pos, ref_allele, alt_allele, variant_type), allele_count)| Variant {
-                chromosome,
-                pos,
-                ref_allele,
-                alt_allele,
-                variant_type,
-                allele_count,
-                node_id: "".to_string(),
-                haplotype_index: None,
-            },
-        )
-        .collect()
+
+    let mut collapsed_variants = Vec::new();
+    for (key, allele_count) in collapsed_ad.iter() {
+        let chromosome = key.0.clone();
+        let pos = key.1.clone();
+        let ref_allele = key.2.clone();
+        let alt_allele = key.3.clone();
+        let variant_type = key.4.clone();
+        let haplotype_index = collapsed_haplotype_index.get(key).unwrap().clone().iter().map(|x| x.clone()).collect::<Vec<_>>();
+        collapsed_variants.push(Variant {
+            chromosome,
+            pos,
+            ref_allele,
+            alt_allele,
+            variant_type,
+            allele_count: *allele_count,
+            node_id: "".to_string(),
+            haplotype_index: Some(haplotype_index),
+        });
+    }
+    collapsed_variants
+
 }
 
 fn find_coverage_from_gfa(gfa_filename: &PathBuf) -> HashMap<usize, usize> {
@@ -453,14 +465,8 @@ pub fn Phase_germline_variants(
     Ok(phased_variants)
 }
 
-
-
-pub fn start(graph_filename: &PathBuf, reference_seqs: &Vec<fastq::Record>, sampleid: &String, output_prefix: &String, haplotype_number: usize, phase_variants: bool, het_fold_threshold: f64) -> AnyhowResult<()> {
-    let (node_info, _) = asm::load_graph(graph_filename).unwrap();
+pub fn get_variants_from_gfa(node_info: &HashMap<String, asm::NodeInfo>, reference_seqs: &Vec<fastq::Record>) -> Vec<Variant> {
     let mut all_variants = Vec::new();
-    // let mut coverage = HashMap::new();
-    // 29942660 has a wired coverage issue, should be fixed.
-    let coverage = find_coverage_from_gfa(graph_filename);
     for (node_id, n_info) in node_info.iter() {
         let cigar = n_info.cigar.clone();
         let alt_seq = n_info.seq.clone();
@@ -471,15 +477,152 @@ pub fn start(graph_filename: &PathBuf, reference_seqs: &Vec<fastq::Record>, samp
         let full_ref_seq_ = reference_seqs.iter().find(|r| r.id().to_string() == chromosome).unwrap().seq();
         let full_ref_seq = String::from_utf8_lossy(full_ref_seq_).to_string();
         let ref_seq = full_ref_seq[start..end].to_string();
-        let (variants, poscounts) = get_variants_from_cigar(cigar.as_str(), &chromosome, ref_seq.as_str(), alt_seq.as_str(), start, support_reads, &node_id);
+        let mut allele_count_dict = HashMap::new();
+        for i in 0..alt_seq.len() {
+            allele_count_dict.insert(i, support_reads);
+        }
+        let (variants, poscounts) = get_variants_from_cigar(cigar.as_str(), &chromosome, ref_seq.as_str(), alt_seq.as_str(), start, &allele_count_dict, &node_id);
         all_variants.extend(variants);
     }
+    all_variants
+}
 
+fn get_ref_coord_from_node_name(node_name: &String) -> Vec<usize> {
+    let (chromosome,start, end )= util::split_locus(node_name.split(".").collect::<Vec<_>>()[1].to_string());
+    vec![start, end]
+}
+
+fn merge_concatenated_intervals(paths: &Vec<String>) -> Vec<Vec<String>> {
+    let mut merged_intervals = Vec::new();
+    let mut current_interval = Vec::new();
+    let length = paths.len();
+    for (index, node_id) in paths.clone().iter().enumerate() {
+        let (chromosome, start, end) = util::split_locus(node_id.split(".").collect::<Vec<_>>()[1].to_string());
+        if index + 1 < length {
+            let next_node_id = paths[index + 1].clone();
+            let (next_chromosome, next_start, next_end) = util::split_locus(next_node_id.split(".").collect::<Vec<_>>()[1].to_string());
+            if (chromosome == next_chromosome) && (end == next_start) {
+                current_interval.push(node_id.clone());
+            } else{
+                merged_intervals.push(current_interval.clone());
+                current_interval.clear();
+            }
+        }else{
+            merged_intervals.push(current_interval.clone());
+        }
+    }
+    merged_intervals
+}
+
+pub fn get_variants_from_path(node_info: &HashMap<String, asm::NodeInfo>,edge_info: &HashMap<String, Vec<String>>, haplotype_number: usize, het_fold_threshold: f64, reference_seqs: &fastq::Record) -> Vec<Variant> {
+    let (haplotype_reads, node_haplotype) = asm::find_node_haplotype(&node_info, &edge_info, haplotype_number, het_fold_threshold);
+    let mut haplotype_path = HashMap::new();
+    let mut phased_nodes = HashSet::new();
+    for (node_name, hap_set) in node_haplotype.iter() {
+        phased_nodes.insert(node_name.clone());
+        for hap_index in hap_set.iter() {
+            haplotype_path.entry(hap_index.clone()).or_insert(Vec::new()).push(node_name.clone());
+        }
+    }
+    let all_nodes = node_info.keys().map(|x| x.clone()).collect::<Vec<_>>();
+    let somatic_nodes = all_nodes.iter().filter(|x| !phased_nodes.contains(x.clone())).collect::<Vec<_>>();
+    println!("all_nodes: {:?}", all_nodes.len());
+    println!("phased_nodes: {:?}", phased_nodes.len());
+    println!("somatic_nodes: {:?}", somatic_nodes.len());
+    let chromosome = all_nodes[0].split(".").collect::<Vec<_>>()[1].split(":").collect::<Vec<_>>()[0];
+    let full_ref_seq_ = reference_seqs.seq();
+    let full_ref_seq = String::from_utf8_lossy(full_ref_seq_).to_string();
+
+    let mut variant_phase = HashMap::new();
+    let mut variant_dict = HashMap::new();
+    for (hap_index, path) in haplotype_path.iter() {
+        let mut path_list = path.iter().map(|x| x.clone()).collect::<Vec<String>>();
+        path_list.sort_by(|a, b| get_ref_coord_from_node_name(a)[0].cmp(&get_ref_coord_from_node_name(b)[0]));
+        let merged_intervals = merge_concatenated_intervals(&path_list);
+        for sub_path in merged_intervals.iter() {
+            
+            let (start, end) = eval::find_alignment_intervals(sub_path.iter().map(|x| x.as_str()).collect::<Vec<_>>()).unwrap();
+            println!("start: {}, end: {}, length: {}", start, end, end - start);
+            let ref_seq = &full_ref_seq[start..end].to_string();
+
+            let mut cigar = String::new();
+            let mut alt_seq = String::new();
+            let mut allele_count_dict = HashMap::new(); // key: alt-pos, value: allele_count
+            let mut alt_start_pos = 0;
+            for node_id in sub_path.iter() {
+                let node_dict = node_info.get(node_id).unwrap();
+                cigar += &node_dict.cigar.clone().trim_matches('"');
+
+                //debug
+                if node_dict.cigar.clone().trim_matches('"').contains("D") {
+                    println!("node_id: {}, cigar: {}, seq: {}", node_id, node_dict.cigar.clone().trim_matches('"'), get_ref_coord_from_node_name(node_id).iter().map(|x| x.to_string()).collect::<Vec<_>>().join(","));
+                }
+                //
+                alt_seq += &node_dict.seq.clone().trim_matches('"');
+                for i in 0..node_dict.seq.len() {
+                    let alt_pos = i + alt_start_pos;
+                    *allele_count_dict.entry(alt_pos).or_insert(0) += node_dict.support_reads;
+                }
+                alt_start_pos += node_dict.seq.len();
+            }
+            let expanded_cigar = util::process_cigar(cigar.as_str());
+            let combined_cigar = util::combine_cigar(expanded_cigar.as_str());
+            println!("combined_cigar: {}", combined_cigar);
+            let (variants, poscounts) = get_variants_from_cigar(combined_cigar.as_str(), &chromosome, ref_seq.as_str(), alt_seq.as_str(), start, &allele_count_dict, &sub_path.join("|").to_string());
+            for variant in variants.iter() {
+                let key = (variant.chromosome.clone(), variant.pos, variant.ref_allele.clone(), variant.alt_allele.clone(), variant.variant_type.clone());
+                variant_phase.entry(key.clone()).or_insert(HashSet::new()).insert(hap_index.clone());
+                variant_dict.insert(key.clone(), variant.clone());
+            }
+        }
+    }
+    let mut all_variants = Vec::new();
+    for (key, variants) in variant_dict.iter() {
+        let mut phased_variant = variants.clone();
+        let haplotype_index = variant_phase.get(key).unwrap();
+        phased_variant.haplotype_index = Some(haplotype_index.clone().iter().map(|x| x.clone() + 1).collect::<Vec<_>>()); // haplotype index starts from 1
+        all_variants.push(phased_variant);
+    }
+    for node_id in somatic_nodes.iter() {
+        let node_dict = node_info.get(node_id.clone()).unwrap();
+        let cigar = node_dict.cigar.clone().trim_matches('"').to_string();
+        let alt_seq = node_dict.seq.clone().trim_matches('"').to_string();
+        let locus = node_id.split(".").collect::<Vec<_>>()[1];
+        let (chromosome, start, end) = util::split_locus(locus.to_string());
+        let ref_seq = &full_ref_seq[start..end].to_string();
+        let mut allele_count_dict = HashMap::new();
+        for i in 0..alt_seq.len() {
+            allele_count_dict.insert(i, node_dict.support_reads);
+        }
+        let (variants, poscounts) = get_variants_from_cigar(&cigar, &chromosome, ref_seq.as_str(), &alt_seq, start, &allele_count_dict, &node_id);
+        for var in variants.iter() {
+            let mut somatic_variant = var.clone();
+            somatic_variant.haplotype_index = Some(Vec::new());
+            all_variants.push(somatic_variant);
+        }
+    }
+    all_variants
+
+}
+
+pub fn start(graph_filename: &PathBuf, reference_seqs: &Vec<fastq::Record>, sampleid: &String, output_prefix: &String, haplotype_number: usize, phase_variants: bool, het_fold_threshold: f64) -> AnyhowResult<()> {
+    let (node_info, edge_info) = asm::load_graph(graph_filename).unwrap();
+    
+    // let mut coverage = HashMap::new();
+    let coverage = find_coverage_from_gfa(graph_filename);
+    let chromosome = node_info.keys().collect::<Vec<_>>().iter().next().unwrap().split(".").collect::<Vec<_>>()[1].split(":").collect::<Vec<_>>()[0].to_string();
+    let ref_chromosome_seqs = reference_seqs.iter().find(|r| r.id().to_string() == chromosome).unwrap().clone();
     let variants = if phase_variants {
-        Phase_germline_variants(&graph_filename, &all_variants, haplotype_number, het_fold_threshold)?
+        // let all_variants = get_variants_from_gfa(&node_info, reference_seqs);
+        // Phase_germline_variants(&graph_filename, &all_variants, haplotype_number, het_fold_threshold)?
+        let all_variants = get_variants_from_path(&node_info, &edge_info, haplotype_number, het_fold_threshold, &ref_chromosome_seqs);
+        collapse_identical_records(all_variants)
     } else {
+        let all_variants = get_variants_from_gfa(&node_info, reference_seqs);
         collapse_identical_records(all_variants)
     };
+
+    // println!("variants: {:?}", variants.iter().map(|x| x.haplotype_index.clone()).collect::<Vec<_>>());
     
     // Write VCF file    
     write_vcf(

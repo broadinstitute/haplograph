@@ -282,3 +282,46 @@ pub fn import_bed(bed_file: &String) -> Vec<(String, usize, usize)> {
     }
     bed_list
 }
+
+pub fn process_cigar(cigar: &str) -> String {
+    let mut out = String::new();
+    let mut n = 0;
+    
+    for symbol in cigar.chars() {
+        if symbol.is_ascii_digit() {
+            n = 10 * n + symbol.to_digit(10).unwrap() as usize;
+        } else {
+            if n == 0 {
+                out.push(symbol);
+            } else {
+                out.push_str(&symbol.to_string().repeat(n));
+            }
+            n = 0;
+        }
+    }
+    
+    out
+}
+
+pub fn combine_cigar(cigar: &str) -> String {
+    if cigar.is_empty() {
+        return String::new();
+    }
+    
+    // Convert to Vec<char> for efficient indexing
+    let mut chars: Vec<char> = cigar.chars().collect();
+    chars.push('$'); // Add sentinel character to handle the last group
+    
+    let mut out = String::new();
+    let mut start = 0;
+    
+    for i in 1..chars.len() {
+        if chars[i - 1] != chars[i] {
+            let length = i - start;
+            out.push_str(&format!("{}{}", length, chars[i - 1]));
+            start = i;
+        }
+    }
+    
+    out
+}
