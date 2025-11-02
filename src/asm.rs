@@ -399,7 +399,7 @@ pub fn find_full_range_haplotypes(node_info: &HashMap<String, NodeInfo>,node_hap
         for (index, (path, sequence, supported_reads)) in path_list.iter().enumerate() {
             let (start, end) = eval::find_alignment_intervals(path.iter().map(|x| x.as_str()).collect::<Vec<_>>()).unwrap();
             let supports = get_supports(node_info, path);
-            println!("path: {:?}, supports: {:?}, supported_reads: {:?}, span: {:?}", hap_index, supports, supported_reads.len(), end-start );
+            info!("path: {:?}, supports: {:?}, supported_reads: {:?}, span: {:?}", hap_index, supports, supported_reads.len(), end-start );
 
             full_sequences.push((path.clone(), sequence.clone(), supported_reads.clone(), supports, end-start));
             
@@ -460,13 +460,13 @@ pub fn find_node_haplotype(node_info: &HashMap<String, NodeInfo>, edge_info: &Ha
     let (heterozygous_nodes, haplotype_reads) = identify_heterozygous_nodes(node_info, hap_number, het_fold_threshold);
     let (haplotype_reads_new, haplotype_nodes_new) = assign_unassigned_reads(node_info, &haplotype_reads);
     
-    println!("haplotype_reads_new: {:?}", haplotype_reads_new.iter().map(|(hap, reads)| format!("hap: {}, reads: {}", hap, reads.len())).collect::<Vec<_>>().join("\n"));
+    info!("haplotype_reads_new: {:?}", haplotype_reads_new.iter().map(|(hap, reads)| format!("hap: {}, reads: {}", hap, reads.len())).collect::<Vec<_>>().join(", "));
     if haplotype_reads.is_empty() {
         let node_haplotype = find_most_supported_path(node_info, &edge_info);
         return (haplotype_reads_new, node_haplotype);
     }else{
         let filtered_haplotype_nodes = filter_haplotype_nodes(node_info, &edge_info, &haplotype_nodes_new, &haplotype_reads_new);
-        println!("filtered_haplotype_nodes: {:?}", filtered_haplotype_nodes.len());
+        // println!("filtered_haplotype_nodes: {:?}", filtered_haplotype_nodes.len());
         let node_haplotype = assign_haplotype_to_nodes(&filtered_haplotype_nodes);
         // println!("node_haplotype: {:?}", node_haplotype);
         return (haplotype_reads_new, node_haplotype);
