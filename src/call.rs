@@ -505,6 +505,8 @@ pub fn get_variants_from_path(node_info: &HashMap<String, asm::NodeInfo>,edge_in
         .expect("Failed to enumerate all paths");
     let all_sequences = asm::construct_sequences_from_haplotype_path(&node_info, &all_paths);
     // let optimal_haplotypes = find_optimal_haplotypes(&node_info, &node_haplotype, &all_sequences, haplotype_number);
+
+    println!("all_paths: {:?}", all_sequences.iter().map(|(haplotype_index, path_info_list)| format!("haplotype_index: {:?}, path_number: {:?}",  haplotype_index, path_info_list.len())).collect::<Vec<_>>().join(","));
     
     // Select the best path for each haplotype (same as assemble function)
     // let primary_haplotypes = asm::find_full_range_haplotypes(&node_info, &node_haplotype, &all_sequences, haplotype_number);
@@ -532,9 +534,6 @@ pub fn get_variants_from_path(node_info: &HashMap<String, asm::NodeInfo>,edge_in
     let mut variant_phase = HashMap::new();
     let mut variant_dict = HashMap::new();
     
-    // Extract variants from the best paths for each haplotype
-    // Note: We need to determine the actual haplotype index for each path since find_full_range_haplotypes
-    // doesn't preserve it. We do this by checking which haplotype(s) the nodes in the path belong to.
     for (path_haplotypes, Info_list) in all_sequences.clone().iter() {
         // Determine haplotype indices for this path by checking node_haplotype
         for (path, sequence, read_names) in Info_list.iter() {
@@ -648,6 +647,7 @@ pub fn find_optimal_haplotypes(node_info: &HashMap<String, asm::NodeInfo>,node_h
     let full_span = full_range.1 - full_range.0;
     let mut best_paths = HashMap::new();
     for (hap_index,path_list) in all_sequences.iter() {
+        println!("hap_index {}, number of paths, {}", hap_index, path_list.len());
         // for each haplotype, select the best path
         let mut overlap_paths = HashMap::new();
         for (index, (path, sequence, supported_reads)) in path_list.iter().enumerate() {
@@ -720,9 +720,7 @@ pub fn start(graph_filename: &PathBuf, reference_seqs: &Vec<fastq::Record>, samp
         let all_variants = get_variants_from_gfa(&node_info, reference_seqs);
         collapse_identical_records(all_variants)
     };
-
-    // println!("variants: {:?}", variants.iter().map(|x| x.haplotype_index.clone()).collect::<Vec<_>>());
-    
+   
     // Write VCF file    
     write_vcf(
         &variants,
