@@ -12,6 +12,8 @@ use std::error::Error;
 use crate::eval;
 use crate::util;
 use std::path::Path;
+use ndarray::{Array2, Array1};
+use csv::Writer;
 
 #[derive(Debug, Clone)]
 pub struct NodeInfo {
@@ -191,6 +193,67 @@ pub fn find_unassigned_reads(node_info: &HashMap<String, NodeInfo>, haplotype_re
     all_reads.difference(&assigned_reads).cloned().collect()
 }
 
+pub fn construct_heterozygous_nodes_matrix(node_info: &HashMap<String, NodeInfo>, het_node_dict:HashMap<String, HashSet<String>>) -> (Array2<f64>, Vec<String>, Vec<String>) {
+    let mut node_list = HashSet::new();
+    let mut read_list = HashSet::new();
+    for (interval, node_vect) in het_node_dict.iter() {
+        node_list.extend(node_vect.iter().cloned());
+        for node in node_vect.iter() {
+            let read_name_list = get_read_name_list(node_info, node.clone());
+            read_list.extend(read_name_list.iter().cloned());
+        }
+    }
+    let node_list_sorted = node_list.iter().cloned().collect::<Vec<_>>();
+    let read_list_sorted = read_list.iter().cloned().collect::<Vec<_>>();
+    let mut matrix = Array2::<f64>::zeros((node_list.len(), read_list.len()));
+    for (interval, node_vect) in het_node_dict.iter() {
+        for node in node_vect.iter() {
+            let n_index = node_list_sorted.iter().position(|x| x == node).unwrap();
+            let read_name_list = get_read_name_list(node_info, node.clone());
+            for read in read_name_list {
+                let read_index = read_list_sorted.iter().position(|x| x == &read).unwrap();
+                matrix[[n_index, read_index]] = 1.0;
+            }
+        }
+    }
+    (matrix, node_list_sorted, read_list_sorted)
+}
+
+
+fn write_matrix_to_csv<P: AsRef<Path>>(
+    matrix: &Array2<f64>,
+    node_list: &[String],
+    read_list: &[String],
+    path: P
+) -> Result<(), Box<dyn Error>> {
+    // Create a file and CSV writer
+    let file = File::create(path)?;
+    let mut writer = Writer::from_writer(file);
+    
+    // Prepare header row (with empty cell for the corner)
+    let mut header = vec!["variant".to_string()];
+    header.extend(read_list.iter().cloned());
+    
+    // Write header
+    writer.write_record(&header)?;
+    
+    // Write each row with its row name
+    for (row_idx, node_name) in node_list.iter().enumerate() {
+        let mut row = vec![node_name.clone()];
+        
+        // Add the values from the matrix
+        for col_idx in 0..matrix.ncols() {
+            row.push(matrix[[row_idx, col_idx]].to_string());
+        }
+        writer.write_record(&row)?;
+    }
+    
+    // Flush and finish
+    writer.flush()?;
+    Ok(())
+}
+
+
 pub fn assign_unassigned_reads(node_info: &HashMap<String, NodeInfo>, haplotype_reads: &HashMap<usize, HashSet<String>>) -> (HashMap<usize, HashSet<String>>, HashMap<usize, HashSet<String>>) {
     let read_to_nodes = assign_node_to_reads(node_info);
     let haplotype_nodes = assign_haplotype_nodes(node_info, haplotype_reads);
@@ -241,7 +304,6 @@ pub fn find_most_supported_path(node_info: &HashMap<String, NodeInfo>, edge_info
             
     }
     
-
     node_haplotype
 }
 
@@ -463,6 +525,8 @@ pub fn filter_haplotype_nodes(node_info: &HashMap<String, NodeInfo>, edge_info: 
 pub fn find_node_haplotype(node_info: &HashMap<String, NodeInfo>, edge_info: &HashMap<String, Vec<String>>, hap_number: usize, het_fold_threshold: f64) -> (HashMap<usize, HashSet<String>>, HashMap<String, HashSet<usize>>) {
     let (heterozygous_nodes, haplotype_reads) = identify_heterozygous_nodes(node_info, hap_number, het_fold_threshold);
     info!("heterozygous_nodes: {:?}", heterozygous_nodes.len());
+    let (matrix, node_list, read_list) = construct_heterozygous_nodes_matrix(node_info, heterozygous_nodes);
+    write_matrix_to_csv(&matrix, &node_list, &read_list, &PathBuf::from("heterozygous_nodes.csv")).unwrap();
     let (haplotype_reads_new, haplotype_nodes_new) = assign_unassigned_reads(node_info, &haplotype_reads);
     info!("haplotype_reads: {:?}", haplotype_reads.iter().map(|(hap, reads)| format!("hap: {}, reads: {}", hap, reads.len())).collect::<Vec<_>>().join(", "));
     info!("haplotype_reads_new: {:?}", haplotype_reads_new.iter().map(|(hap, reads)| format!("hap: {}, reads: {}", hap, reads.len())).collect::<Vec<_>>().join(", "));
