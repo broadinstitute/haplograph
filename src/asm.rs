@@ -99,9 +99,8 @@ pub fn find_parallele_nodes(node_info: &HashMap<String, NodeInfo>) -> HashMap<St
     all_nodes
 }
 
-pub fn identify_heterozygous_nodes(node_info: &HashMap<String, NodeInfo>, hap_number: usize, het_fold_threshold: f64) -> (HashMap<String, HashSet<String>>, HashMap<usize, HashSet<String>>) {
+pub fn identify_heterozygous_nodes(node_info: &HashMap<String, NodeInfo>, hap_number: usize, het_fold_threshold: f64) -> HashMap<String, HashSet<String>> {
     let mut heterozygous_nodes: HashMap<String, HashSet<String>> = HashMap::new();
-    let mut haplotype_reads: HashMap<usize, HashSet<String>> = HashMap::new();
     let all_nodes = find_parallele_nodes(node_info);
     for (interval_name, node_vec) in all_nodes.iter() {
         if node_vec.len() < 2{
@@ -124,35 +123,48 @@ pub fn identify_heterozygous_nodes(node_info: &HashMap<String, NodeInfo>, hap_nu
         }
         if heterozygous {
             heterozygous_nodes.entry(interval_name.to_string().clone()).or_insert(HashSet::new()).extend(node_support.iter().take(hap_number).map(|(node, _)| node.clone()));
-            // assign reads to haplotypes
-            if haplotype_reads.is_empty() {
-                for index in 0..hap_number {
-                    let read_name_list = get_read_name_list(node_info, node_support[index].0.clone());
-                    haplotype_reads.entry(index).or_insert(HashSet::new()).extend(read_name_list.clone());
-                    // haplotype_reads[index] = haplotype_reads.get(index, set()) | find_read_name_list(node_info, node_support[index].0.clone());
-                }
-            }else{
-                for index in 0..hap_number {
-                    let read_name_list = get_read_name_list(node_info, node_support[index].0.clone());
-                    let mut max_overlap_reads = 0;
-                    let mut major_haplotype_index = hap_number + 1 as usize; 
-                    for (hap, hap_reads) in haplotype_reads.iter_mut() {
-                        let overlap_reads = hap_reads.intersection(&read_name_list).cloned().collect::<HashSet<_>>();
-                        if overlap_reads.len() > max_overlap_reads {
-                            max_overlap_reads = overlap_reads.len();
-                            major_haplotype_index = hap.clone();
-                        }
-                    }
-                    if max_overlap_reads > 0 {
-                        haplotype_reads.entry(major_haplotype_index).or_insert(HashSet::new()).extend(read_name_list.clone());
-                    }
-                }
-            }       
+     
         }
 
     }
-    (heterozygous_nodes, haplotype_reads)
+    heterozygous_nodes
 }
+
+pub fn assign_haplotype_reads(node_info: &HashMap<String, NodeInfo>, heterozygous_nodes: &HashMap<String, HashSet<String>>, hap_number: usize) -> HashMap<usize, HashSet<String>> {
+    // assign reads to haplotypes
+    let mut haplotype_reads = HashMap::new();
+    for (interval_name, node_set) in heterozygous_nodes.iter() {
+        if node_set.len() < hap_number{
+            continue;
+        }
+        if haplotype_reads.is_empty() {
+            for (index, node) in node_set.iter().enumerate() {
+                let read_name_list = get_read_name_list(node_info, node.clone());
+                haplotype_reads.entry(index).or_insert(HashSet::new()).extend(read_name_list.clone());
+                // haplotype_reads[index] = haplotype_reads.get(index, set()) | find_read_name_list(node_info, node_support[index].0.clone());
+            }
+        }else{
+            for (index, node) in node_set.iter().enumerate() {
+                let read_name_list = get_read_name_list(node_info, node.clone());
+                let mut max_overlap_reads = 0;
+                let mut major_haplotype_index = hap_number + 1 as usize; 
+                for (hap, hap_reads) in haplotype_reads.iter_mut() {
+                    let overlap_reads = hap_reads.intersection(&read_name_list).cloned().collect::<HashSet<_>>();
+                    if overlap_reads.len() > max_overlap_reads {
+                        max_overlap_reads = overlap_reads.len();
+                        major_haplotype_index = hap.clone();
+                    }
+                }
+                if max_overlap_reads > 0 {
+                    haplotype_reads.entry(major_haplotype_index).or_insert(HashSet::new()).extend(read_name_list.clone());
+                }
+            }
+        }  
+    }
+    
+    haplotype_reads
+}
+
 
 pub fn assign_node_to_reads(node_info: &HashMap<String, NodeInfo>) -> HashMap<String, HashSet<String>> {
     let mut read_to_nodes = HashMap::new();
@@ -486,7 +498,7 @@ pub fn filter_haplotype_nodes(node_info: &HashMap<String, NodeInfo>, edge_info: 
 }
 
 pub fn find_node_haplotype(node_info: &HashMap<String, NodeInfo>, edge_info: &HashMap<String, Vec<String>>, hap_number: usize, het_fold_threshold: f64) -> (HashMap<usize, HashSet<String>>, HashMap<String, HashSet<usize>>) {
-    let (heterozygous_nodes, haplotype_reads) = identify_heterozygous_nodes(node_info, hap_number, het_fold_threshold);
+    let heterozygous_nodes = identify_heterozygous_nodes(node_info, hap_number, het_fold_threshold);
     let (haplotype_reads_new, haplotype_nodes_new) = assign_unassigned_reads(node_info, &haplotype_reads);
     
     info!("haplotype_reads_new: {:?}", haplotype_reads_new.iter().map(|(hap, reads)| format!("hap: {}, reads: {}", hap, reads.len())).collect::<Vec<_>>().join(", "));
