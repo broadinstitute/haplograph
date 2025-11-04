@@ -12,6 +12,7 @@ use std::error::Error;
 use crate::eval;
 use crate::util;
 use std::path::Path;
+use ndarray::{Array2, Array1};
 
 #[derive(Debug, Clone)]
 pub struct NodeInfo {
@@ -153,7 +154,6 @@ pub fn identify_heterozygous_nodes(node_info: &HashMap<String, NodeInfo>, hap_nu
     (heterozygous_nodes, haplotype_reads)
 }
 
-
 pub fn assign_node_to_reads(node_info: &HashMap<String, NodeInfo>) -> HashMap<String, HashSet<String>> {
     let mut read_to_nodes = HashMap::new();
     let nodelist = node_info.keys().collect::<Vec<_>>();
@@ -187,9 +187,34 @@ pub fn find_unassigned_reads(node_info: &HashMap<String, NodeInfo>, haplotype_re
     all_reads.difference(&assigned_reads).cloned().collect()
 }
 
+pub fn construct_heterozygous_nodes_matrix(node_info: &HashMap<String, NodeInfo>, node_list:Vec<String>) -> Array2<f64> {
+    let mut read_vec = HashSet::new();
+    for node in node_list.iter() {
+        let read_name_list = get_read_name_list(node_info, node.clone());
+        read_vec.extend(read_name_list.iter().cloned());
+    } 
+    let read_list = read_vec.iter().cloned().collect::<Vec<_>>();
+    let mut matrix = Array2::<f64>::zeros((node_list.len(), read_list.len()));
+    for (n_index, node_name) in node_list.iter().enumerate() {
+        let read_name_list = get_read_name_list(node_info, node_name.clone());
+        for read in read_name_list {
+            let read_index = read_list.iter().position(|x| x == &read).unwrap();
+            matrix[[n_index, read_index]] = 1.0;
+        }
+    }
+    matrix 
+}
+
 pub fn assign_unassigned_reads(node_info: &HashMap<String, NodeInfo>, haplotype_reads: &HashMap<usize, HashSet<String>>) -> (HashMap<usize, HashSet<String>>, HashMap<usize, HashSet<String>>) {
     let read_to_nodes = assign_node_to_reads(node_info);
     let haplotype_nodes = assign_haplotype_nodes(node_info, haplotype_reads);
+    let mut filtered_haplotype_nodes = HashMap::new();
+    for (haplotype, nodes) in haplotype_nodes.iter() {
+        let node_list = nodes.iter().cloned().collect::<Vec<_>>();
+        let matrix = construct_heterozygous_nodes_matrix(node_info, node_list.clone());
+        let node_list_filtered = util::permutation_test(&matrix, 0.001, 100, node_list.clone());
+        filtered_haplotype_nodes.insert(haplotype.clone(), node_list_filtered.iter().cloned().collect::<HashSet<_>>());
+    }
     let unassigned_reads = find_unassigned_reads(node_info, haplotype_reads);
     let mut haplotype_reads_new = haplotype_reads.clone();
     let mut haplotype_nodes_new = haplotype_nodes.clone();
@@ -197,7 +222,7 @@ pub fn assign_unassigned_reads(node_info: &HashMap<String, NodeInfo>, haplotype_
         let read_nodes = read_to_nodes.get(&read).unwrap();
         let mut max_overlap = 0;
         let mut max_haplotype = 100;
-        for (haplotype, hap_nodes) in haplotype_nodes.iter() {
+        for (haplotype, hap_nodes) in filtered_haplotype_nodes.iter() {
             let overlap_nodes = hap_nodes.intersection(read_nodes).cloned().collect::<HashSet<_>>();
             if overlap_nodes.len() > max_overlap {
                 max_overlap = overlap_nodes.len();
@@ -212,6 +237,8 @@ pub fn assign_unassigned_reads(node_info: &HashMap<String, NodeInfo>, haplotype_
     }
     (haplotype_reads_new, haplotype_nodes_new)
 }
+
+
 
 pub fn find_most_supported_path(node_info: &HashMap<String, NodeInfo>, edge_info: &HashMap<String, Vec<String>>) -> HashMap<String, HashSet<usize>> {
     let mut node_haplotype = HashMap::new();
@@ -314,6 +341,8 @@ fn dfs_traverse_with_haplotype_constrains(
     }
 
     if haplotype_index.is_empty() {
+        current_path.pop();
+        all_paths.push((current_path.clone(), haplotype_index.clone()));
         return;
     }
 

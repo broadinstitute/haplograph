@@ -499,10 +499,12 @@ pub fn get_variants_from_gfa(node_info: &HashMap<String, asm::NodeInfo>, referen
 
 pub fn get_variants_from_path(node_info: &HashMap<String, asm::NodeInfo>,edge_info: &HashMap<String, Vec<String>>, haplotype_number: usize, het_fold_threshold: f64, reference_seqs: &fastq::Record) -> Vec<Variant> {
     let (_haplotype_reads, node_haplotype) = asm::find_node_haplotype(&node_info, &edge_info, haplotype_number, het_fold_threshold);
-    
     // Use the same path enumeration as assemble to ensure paths follow graph edges
     let all_paths = asm::enumerate_all_paths_with_haplotype(&node_info, &edge_info, &node_haplotype, haplotype_number)
         .expect("Failed to enumerate all paths");
+
+    let somatic_path = all_paths.iter().filter(|(path, haplotype_index)| haplotype_index.is_empty() && path.len() > 1).collect::<Vec<_>>();
+    // println!("somatic_path: {:?}", somatic_path);
     let all_sequences = asm::construct_sequences_from_haplotype_path(&node_info, &all_paths);
     // let optimal_haplotypes = find_optimal_haplotypes(&node_info, &node_haplotype, &all_sequences, haplotype_number);
 
