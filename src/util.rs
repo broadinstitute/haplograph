@@ -497,10 +497,11 @@ pub fn permutation_test(
         let test_index_value = &test_index[qi];
         if q_value > &p_value_threshold{
             excluded_index.push(test_index_value);
+            println!("excluded_index: {:?}, q_value: {:?}", test_index_value, q_value);
         }
     }
 
-    println!("{:?}", excluded_index);
+    // println!("{:?}, p-value: {:?}", excluded_index, qvalues);
     bar.finish();
 
 
