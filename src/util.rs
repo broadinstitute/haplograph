@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use url::Url;
@@ -10,6 +9,15 @@ use bio::alignment::pairwise::*;
 use bio::alignment::AlignmentOperation;
 use bio::io::fasta::Reader as FastaReader;
 use bio::io::fastq;
+use indicatif::{ProgressBar, ProgressStyle};
+use ndarray::{Array2, Array1};
+use ndarray::s;
+use rand::seq::SliceRandom;
+use rayon::prelude::*;
+use statrs::distribution::Normal;
+use statrs::distribution::ContinuousCDF;
+use adjustp::{adjust, Procedure};
+use std::error::Error;
 
 pub fn reverse_complement(kmer: &str) -> String {
     kmer.chars()
@@ -324,4 +332,190 @@ pub fn combine_cigar(cigar: &str) -> String {
     }
     
     out
+}
+
+
+fn jaccard_distance(vector1: &[bool], vector2: &[bool]) -> f64 {
+    assert_eq!(vector1.len(), vector2.len(), "Vectors must have the same length");
+    
+    let mut intersection_count = 0;
+    let mut union_count = 0;
+    
+    for (a, b) in vector1.iter().zip(vector2.iter()) {
+        if *a && *b {
+            intersection_count += 1;
+        }
+        if *a || *b {
+            union_count += 1;
+        }
+    }
+    
+    if union_count == 0 {
+        return 0.0; // Both vectors are all zeros
+    }
+    
+    1.0 - (intersection_count as f64 / union_count as f64)
+}
+
+/// Generate a null distribution through permutation testing
+fn get_null_distribution(
+    records: &Vec<String>,
+    matrix: &Array2<f64>, 
+    permutation_round: usize
+) -> Vec<f64> {
+
+    let bar = ProgressBar::new(permutation_round as u64);
+    let summary_statistics = (0..permutation_round).into_par_iter().flat_map(|_|  {
+        bar.inc(1);
+        let mut local_stats = Vec::new();
+        let mut rng = rand::rng();
+
+        for (i, index) in records.iter().enumerate() {
+            let vector = matrix.slice(s![i, ..]);
+            
+            // // Skip vectors with frequency > threshold
+            // let frequency = vector.sum() / vector.len() as f64;
+            // if frequency > threshold {
+            //     continue;
+            // }
+        
+            // Create a shuffled copy of the vector
+            let vector_data: Vec<f64> = vector.iter().copied().collect();
+            let mut shuffled_data = vector_data.clone();
+            shuffled_data.shuffle(&mut rng);
+            let shuffled = Array1::from(shuffled_data);
+
+            let mut all_coefficients = Vec::new();
+            
+            for (j, other_index) in records.iter().enumerate() {
+                if index == other_index {
+                    continue;
+                }
+
+                let other_vector = matrix.slice(s![j, ..]);
+                
+                let binary_vector: Vec<bool> = shuffled.iter().map(|&x| x > 0.5).collect();
+                let binary_other: Vec<bool> = other_vector.iter().map(|&x| x > 0.5).collect();
+
+                // Calculate Jaccard distance
+                let coor = (1.0 - jaccard_distance(&binary_vector, &binary_other)).abs();
+                all_coefficients.push(coor);
+            }
+           
+            local_stats.push(all_coefficients.iter().sum());
+        }
+        local_stats
+    }).collect::<Vec<f64>>();
+    bar.finish();
+    summary_statistics
+    
+}
+
+/// Calculate statistics for observed data
+fn calculate_observation_statistics(
+    recordlist: &Vec<String>,
+    index: usize,
+    matrix: &Array2<f64>, 
+) -> f64 {
+
+    let vector = &matrix.slice(s![index, ..]);
+    let mut all_coefficients = Vec::new();
+    
+    for (i, other_index) in recordlist.iter().enumerate() {
+        if i == index {
+            continue;
+        }
+        
+        let other_vector =&matrix.slice(s![i, ..]);
+        
+        // Convert arrays to binary vectors before calculating Jaccard distance
+        let binary_vector: Vec<bool> = vector.iter().map(|&x| x > 0.5).collect();
+        let binary_other: Vec<bool> = other_vector.iter().map(|&x| x > 0.5).collect();
+
+        // Calculate Jaccard distance
+        let coor = (1.0 - jaccard_distance(&binary_vector, &binary_other)).abs();
+        all_coefficients.push(coor);
+    }
+    
+    all_coefficients.iter().sum()
+}
+
+/// Calculate p-value using z-score approach
+fn calculate_p_value(statistics: &[f64], observation: f64) -> f64 {
+    let n = statistics.len() as f64;
+    
+    // Calculate mean
+    let mu = statistics.iter().sum::<f64>() / n;
+    
+    // Calculate standard deviation
+    let variance = statistics.iter()
+        .map(|&x| (x - mu).powi(2))
+        .sum::<f64>() / n;
+    let sigma = variance.sqrt();
+    // println!("{:?}, {}", statistics, observation);
+    
+    let z_score = (observation - mu) / sigma;
+    
+    // Calculate p-value using normal distribution CDF
+    let normal = Normal::new(0.0, 1.0).unwrap();
+    1.0 - normal.cdf(z_score)
+}
+
+pub fn permutation_test(
+    matrix: &Array2<f64>,
+    p_value_threshold: f64,
+    permutation_round: usize,
+    node_list: Vec<String>,
+) -> (Vec<String>) {
+
+    let bar = ProgressBar::new(node_list.len() as u64);
+    let statistics = get_null_distribution(&node_list, &matrix, permutation_round);
+    // Replace par_iter().enumerate() with this pattern
+    let (indices, collected_values): (Vec<_>, Vec<_>) = (0..node_list.len()).into_par_iter().map(|i| {
+        bar.inc(1);
+        let nodename = &node_list[i];
+        let observation = calculate_observation_statistics(&node_list, i, &matrix);
+        let p_value = calculate_p_value(&statistics, observation);
+        ((nodename.clone()), Some((p_value, nodename.clone())))
+
+ 
+    }).unzip(); 
+
+    let mut raw_p_values = Vec::new();
+    let mut test_index = Vec::new();
+
+    for item in collected_values.into_iter().flatten() {
+        let (p_value, node_name) = item;
+        raw_p_values.push(p_value);
+        test_index.push(node_name);
+    }
+
+    // adjust pvalues, create excluded_index list
+    let mut excluded_index = Vec::new();
+    let qvalues = adjust(&raw_p_values, Procedure::BenjaminiHochberg);
+    for (qi, q_value) in qvalues.iter().enumerate(){
+        let test_index_value = &test_index[qi];
+        if q_value > &p_value_threshold{
+            excluded_index.push(test_index_value);
+            println!("excluded_index: {:?}, q_value: {:?}", test_index_value, q_value);
+        }
+    }
+
+    // println!("{:?}, p-value: {:?}", excluded_index, qvalues);
+    bar.finish();
+
+
+    // filter variants
+    let mut index_list = Vec::new();
+    let mut f_node: Vec<String> = Vec::new();
+    // get index list and var_list
+    for (r, rindex) in node_list.iter().enumerate(){
+        if !excluded_index.contains(&rindex){
+            index_list.push(r);
+            f_node.push(rindex.clone());
+        }
+    }
+    
+    (f_node)
+    
 }

@@ -28,6 +28,9 @@ url = "=2.5.4"
 intervals = "2.1.0"
 minimap2 = "0.1.28"
 itertools = "0.14.0"
+rand = "0.9.2"
+statrs = "0.18.0"
+adjustp = "0.1.6"
 
 [dev-dependencies]
 criterion = "0.5"

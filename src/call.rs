@@ -499,26 +499,26 @@ pub fn get_variants_from_gfa(node_info: &HashMap<String, asm::NodeInfo>, referen
 
 pub fn get_variants_from_path(node_info: &HashMap<String, asm::NodeInfo>,edge_info: &HashMap<String, Vec<String>>, haplotype_number: usize, het_fold_threshold: f64, reference_seqs: &fastq::Record) -> Vec<Variant> {
     let (_haplotype_reads, node_haplotype) = asm::find_node_haplotype(&node_info, &edge_info, haplotype_number, het_fold_threshold);
-    
     // Use the same path enumeration as assemble to ensure paths follow graph edges
     let all_paths = asm::enumerate_all_paths_with_haplotype(&node_info, &edge_info, &node_haplotype, haplotype_number)
         .expect("Failed to enumerate all paths");
+
     let all_sequences = asm::construct_sequences_from_haplotype_path(&node_info, &all_paths);
     // let optimal_haplotypes = find_optimal_haplotypes(&node_info, &node_haplotype, &all_sequences, haplotype_number);
 
     println!("all_paths: {:?}", all_sequences.iter().map(|(haplotype_index, path_info_list)| format!("haplotype_index: {:?}, path_number: {:?}",  haplotype_index, path_info_list.len())).collect::<Vec<_>>().join(","));
     
     // Select the best path for each haplotype (same as assemble function)
-    // let primary_haplotypes = asm::find_full_range_haplotypes(&node_info, &node_haplotype, &all_sequences, haplotype_number);
+    let primary_haplotypes = asm::find_full_range_haplotypes(&node_info, &node_haplotype, &all_sequences, haplotype_number);
     
     // Collect all phased nodes from the paths
     let mut phased_nodes = HashSet::new();
-    for (hap_index, Info_list) in all_sequences.clone().iter() {
-        for (path, sequence, read_names) in Info_list.iter() {
-            for node in path.iter() {
-                phased_nodes.insert(node.clone());
-            }
+    for (hap_index, Info_list) in primary_haplotypes.clone().iter() {
+        let (path, sequence, read_names, _, _) = Info_list.clone();
+        for node in path.iter() {
+            phased_nodes.insert(node.clone());
         }
+        
     }
     
     let all_nodes = node_info.keys().map(|x| x.clone()).collect::<Vec<_>>();
@@ -706,8 +706,6 @@ pub fn find_optimal_haplotypes(node_info: &HashMap<String, asm::NodeInfo>,node_h
 
 pub fn start(graph_filename: &PathBuf, reference_seqs: &Vec<fastq::Record>, sampleid: &String, output_prefix: &String, haplotype_number: usize, phase_variants: bool, het_fold_threshold: f64) -> AnyhowResult<()> {
     let (node_info, edge_info) = asm::load_graph(graph_filename).unwrap();
-    
-    // let mut coverage = HashMap::new();
     let coverage = find_coverage_from_gfa(graph_filename);
     let chromosome = node_info.keys().collect::<Vec<_>>().iter().next().unwrap().split(".").collect::<Vec<_>>()[1].split(":").collect::<Vec<_>>()[0].to_string();
     let ref_chromosome_seqs = reference_seqs.iter().find(|r| r.id().to_string() == chromosome).unwrap().clone();

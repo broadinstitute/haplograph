@@ -1,125 +1,76 @@
 version 1.0
 
-workflow Haplograph_eval_regular_genes {
+workflow Haplograph_parameter_optimaize {
     input {
         File whole_genome_bam
         File whole_genome_bai
-        File hap1_asm_bam
-        File hap1_asm_bai
-        File hap2_asm_bam
-        File hap2_asm_bai
         File truth_vcf
-        File? truth_vcf_tbi
+        File truth_vcf_tbi
         File reference_fa
+        File reference_fai
+        File bed_file
         String prefix
-        File gene_bed
-        Int windowsize
-        Array[Int] desiredCoverages
-        Int hifiasm_mem
-        Int hifiasm_thread
+        String locus
+        String gene_name
+        Int coverage
+        Array[Int] windowsize
+        String truth_sample_name
         Float min_freq
     }
 
-
-
-    call parseBed {
+    call CalculateCoverage {
         input:
-            bed = gene_bed,
-            output_prefix = prefix
+            bam = whole_genome_bam,
+            bai = whole_genome_bai,
+            locus = locus,
+            prefix = prefix + "_" + gene_name
     }
 
-    scatter (pair in zip(parseBed.locuslist, parseBed.genelist)) {
-        String locus = pair.left
-        String gene_name = pair.right
 
-        call CalculateCoverage {
+    scatter (window in windowsize) {
+        
+        call downsampleBam {input:
+            input_bam = CalculateCoverage.subsetbam,
+            input_bam_bai = CalculateCoverage.subsetbai,
+            basename = prefix + "_" + gene_name,
+            desiredCoverage = coverage,
+            currentCoverage = CalculateCoverage.coverage,
+            preemptible_tries = 0
+        }
+
+        call haplograph {
             input:
-                bam = whole_genome_bam,
-                bai = whole_genome_bai,
+                bam = downsampleBam.downsampled_bam,
+                bai = downsampleBam.downsampled_bai,
+                reference_fa = reference_fa,
+                prefix = prefix + "_" + gene_name + "_" + window,
                 locus = locus,
-                prefix = prefix + "_" + gene_name
+                windowsize = window,
+                min_freq = min_freq
         }
 
-        call get_truth_haplotypes {
+        call VCFEval as VCFEVAL {
             input:
-                truth_hap1_bam = hap1_asm_bam,
-                truth_hap1_bai = hap1_asm_bai,
-                truth_hap2_bam = hap2_asm_bam,
-                truth_hap2_bai = hap2_asm_bai,
-                locus = locus,
-                prefix = prefix + "_" + gene_name
+                query_vcf = haplograph.vcf_file,
+                reference_fa = reference_fa,
+                reference_fai = reference_fai,
+                base_vcf = truth_vcf,
+                base_vcf_index = truth_vcf_tbi,
+                query_output_sample_name = prefix + "_" + window + "_" + gene_name,
+                prefix = prefix + "_" + window + "_" + gene_name,
+                truth_sample = truth_sample_name,
+                locus = locus
         }
 
-
-
-        scatter (desiredCoverage in desiredCoverages) {
-            
-            call downsampleBam {input:
-                input_bam = CalculateCoverage.subsetbam,
-                input_bam_bai = CalculateCoverage.subsetbai,
-                basename = prefix + "_" + gene_name,
-                desiredCoverage = desiredCoverage,
-                currentCoverage = CalculateCoverage.coverage,
-                preemptible_tries = 0
-            }
-
-            call haplograph {
-                input:
-                    bam = downsampleBam.downsampled_bam,
-                    bai = downsampleBam.downsampled_bai,
-                    reference_fa = reference_fa,
-                    prefix = prefix + "_" + gene_name + "_" + desiredCoverage,
-                    locus = locus,
-                    windowsize = windowsize,
-                    minimal_frequency = min_freq
-            }
-
-            call haplograph_eval {
-                input:
-                    truth_fasta = get_truth_haplotypes.fasta_file,
-                    query_fasta = haplograph.asm_file,
-                    prefix = prefix + "_" + gene_name + "_" + desiredCoverage,
-            }
-
-            call hifiasm_asm {
-                input:
-                    bam = downsampleBam.downsampled_bam,
-                    bai = downsampleBam.downsampled_bai,
-                    prefix = prefix + "_" + gene_name + "_" + desiredCoverage,
-                    num_cpus = hifiasm_thread,
-                    mem_gb = hifiasm_mem
-            }
-
-            call haplograph_eval as hifiasm_eval {
-                input:
-                    truth_fasta = get_truth_haplotypes.fasta_file,
-                    query_fasta = hifiasm_asm.asm_file,
-                    prefix = prefix + "_" + gene_name + "_" + desiredCoverage,
-            }
-
-            call Vcfdist as VCFdist_germline {
-                input:
-                    sample = prefix,
-                    eval_vcf = haplograph.vcf_file,
-                    truth_vcf = truth_vcf,
-                    locus = locus,
-                    reference_fasta = reference_fa,
-                    coverage = desiredCoverage,
-                    genename = gene_name,
-                    extra_args = ""
-            }
-        }
     }
+    
 
 
     output {
-        Array[Float] bam_coverage = CalculateCoverage.coverage
-        Array[Array[File]] gfa = haplograph.graph_file
-        Array[Array[File]] fasta = haplograph.asm_file
-        Array[Array[File]] vcf = haplograph.vcf_file
-        Array[Array[File]] haplograph_eval_result = haplograph_eval.qv_scores
-        Array[Array[File]] hifiasm_eval_result = hifiasm_eval.qv_scores
-        Array[Array[VcfdistOutputs]] vcfdist_summary = VCFdist_germline.outputs
+        Array[File] gfa = haplograph.graph_file
+        Array[File] fasta = haplograph.asm_file
+        Array[File] vcf = haplograph.vcf_file
+        Array[File] vcfeval_summary = VCFEVAL.summary_statistics
     }
 }
 
@@ -133,8 +84,8 @@ task haplograph {
         Int windowsize
         Int minimal_supported_reads
         Int fold_threshold
+        Float min_freq
         String extra_arg = ""
-        Float minimal_frequency
     }
 
     command <<<
@@ -145,9 +96,9 @@ task haplograph {
                                                         -o ~{prefix} \
                                                         -l ~{locus} \
                                                         -w ~{windowsize} \
-                                                        -f ~{minimal_frequency} \
                                                         -m ~{minimal_supported_reads} \
                                                         -d gfa \
+                                                        -f ~{min_freq}
                                                         ~{extra_arg}
         
         
@@ -459,6 +410,12 @@ struct VcfdistOutputs {
     File phase_blocks_tsv
 }
 
+struct RuntimeAttributes {
+    Int disk_size
+    Int cpu
+    Int memory
+}
+
 task Vcfdist {
     input {
         String truth_sample
@@ -487,11 +444,9 @@ task Vcfdist {
         bcftools index -t ~{sample}.~{locus}.base.vcf.gz
 
         bcftools index -t ~{eval_vcf}
-        bcftools filter -e 'INFO/SOMATIC=1' ~{eval_vcf} -Oz -o ~{sample}.filtered.query.vcf.gz
-        bcftools index -t ~{sample}.filtered.query.vcf.gz
 
         vcfdist \
-            ~{sample}.filtered.query.vcf.gz \
+            ~{eval_vcf} \
             ~{sample}.~{locus}.base.vcf.gz \
             ~{reference_fasta} \
             -v ~{verbosity} \
@@ -564,3 +519,118 @@ task hifiasm_asm{
     }    
 }
 
+task VCFEval {
+    input {
+        # Input VCF Files
+        File query_vcf
+        File reference_fa
+        File reference_fai
+        File base_vcf
+        File base_vcf_index
+        String query_output_sample_name
+        String truth_sample
+        String prefix
+        String locus
+
+        # Filtering params
+        Int? min_indel_length = 50  # Exclude indels smaller than this length (default 50bp for HiFi)
+
+        # Runtime params
+        Int? preemptible
+        RuntimeAttributes runtimeAttributes = {"disk_size": ceil(2 * size(query_vcf, "GB") + 2 * size(base_vcf, "GB") + size(reference_fa, "GB")) + 50,
+                                                  "cpu": 8, "memory": 16}
+    }
+
+    command <<<
+        set -xeuo pipefail
+        bcftools view -s ~{truth_sample} -r ~{locus} ~{base_vcf} -Oz -o ~{prefix}.~{locus}.base.vcf.gz
+        bcftools index -t ~{prefix}.~{locus}.base.vcf.gz
+
+        # Compress and Index vcf files
+        bcftools view ~{query_vcf} -O z -o ~{query_output_sample_name}.vcf.gz
+        bcftools index -t ~{query_output_sample_name}.vcf.gz
+        
+        # Filter out small indels (exclude indels where the indel length is less than min_indel_length)
+        # This keeps SNPs and large indels, but removes small indels that are less reliable in HiFi
+        # Expression: exclude if (TYPE="indel") AND (abs(length(REF) - length(ALT[0])) < min_indel_length)
+        bcftools filter -e 'TYPE="indel" && abs(length(REF) - length(ALT[0])) < ~{min_indel_length}' \
+            ~{query_output_sample_name}.vcf.gz -Oz -o ~{query_output_sample_name}.filtered.vcf.gz
+        bcftools index -t ~{query_output_sample_name}.filtered.vcf.gz
+        
+        # rtg vcfeval
+        rtg format -o rtg_ref ~{reference_fa}
+        rtg vcfeval \
+            -b ~{prefix}.~{locus}.base.vcf.gz  \
+            -c ~{query_output_sample_name}.filtered.vcf.gz \
+            -o reg \
+            -t rtg_ref \
+            --squash-ploidy \
+            --sample ALT,ALT 
+
+        mkdir output_dir
+        cp reg/summary.txt output_dir/~{query_output_sample_name}_summary.txt
+        
+    
+    >>>
+
+    runtime {
+        docker: "us.gcr.io/broad-dsde-methods/vcfeval_docker:v1.1-tmp"
+        preemptible: select_first([preemptible, 0])
+        disks: "local-disk " + runtimeAttributes.disk_size + " HDD"
+        cpu: runtimeAttributes.cpu
+        memory: runtimeAttributes.memory + " GB"
+    }
+
+    output {
+        File summary_statistics = "output_dir/~{query_output_sample_name}_summary.txt"
+        
+    }
+}
+
+task aardvark {
+    input {
+        File truth_vcf
+        File truth_vcf_index
+        File query_vcf
+        File reference_fa
+        String prefix
+        String locus
+        String truth_sample
+        File bedfile
+    }
+
+    command <<<
+        set -euxo pipefail
+
+        bcftools index -t ~{query_vcf}
+        
+        bcftools view -s ~{truth_sample} -r ~{locus} ~{truth_vcf} -Oz -o ~{prefix}.~{locus}.base.vcf.gz
+        bcftools index -t ~{prefix}.~{locus}.base.vcf.gz
+
+        /truvari/aardvark-v0.9.0-x86_64-unknown-linux-gnu/aardvark compare --min-variant-gap 1000 \
+                                                        --reference ~{reference_fa} \
+                                                        --truth-vcf ~{prefix}.~{locus}.base.vcf.gz  \
+                                                        --query-vcf ~{query_vcf} \
+                                                        --regions ~{bedfile} \
+                                                        --output-dir ~{prefix}
+
+        cp ~{prefix}/summary.tsv ~{prefix}.~{locus}.summary.tsv
+        cp ~{prefix}/truth.vcf.gz ~{prefix}.~{locus}.truth.vcf.gz
+        cp ~{prefix}/query.vcf.gz ~{prefix}.~{locus}.query.vcf.gz
+        
+    >>>
+
+    output {
+        File summary_file = "~{prefix}.~{locus}.summary.tsv"
+        File output_truth_vcf = "~{prefix}.~{locus}.truth.vcf.gz"
+        File output_query_vcf = "~{prefix}.~{locus}.query.vcf.gz"
+        
+    }
+
+    runtime {
+        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/aardvark:0.9.0"
+        memory: "16 GB"
+        cpu: 4
+        disks: "local-disk 100 SSD"
+    }
+}
