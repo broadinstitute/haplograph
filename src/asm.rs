@@ -335,11 +335,11 @@ pub fn enumerate_all_paths_with_haplotype(
     }
 
     for src in source_nodes.clone() {
-        let haplotype_intersection_src = node_haplotype.get(&src).unwrap_or(&HashSet::new()).intersection(&haplotype_index).cloned().collect::<HashSet<_>>();
+        let mut haplotype_intersection_src = node_haplotype.get(&src).unwrap_or(&HashSet::new()).intersection(&haplotype_index).cloned().collect::<HashSet<_>>();
         if haplotype_intersection_src.len() > 0 {
             let mut path = Vec::new();
             path.push(src.clone());
-            dfs_traverse_with_haplotype_constrains(&src, edge_info, &mut path, &mut all_paths, &mut haplotype_index, node_haplotype);
+            dfs_traverse_with_haplotype_constrains(&src, edge_info, &mut path, &mut all_paths, &mut haplotype_intersection_src, node_haplotype);
         }
     }
 
