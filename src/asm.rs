@@ -102,7 +102,10 @@ pub fn find_parallele_nodes(node_info: &HashMap<String, NodeInfo>) -> HashMap<St
 pub fn identify_heterozygous_nodes(node_info: &HashMap<String, NodeInfo>, hap_number: usize, het_fold_threshold: f64) -> HashMap<String, HashSet<String>> {
     let mut heterozygous_nodes: HashMap<String, HashSet<String>> = HashMap::new();
     let all_nodes = find_parallele_nodes(node_info);
-    for (interval_name, node_vec) in all_nodes.iter() {
+    let mut interval_list = all_nodes.keys().collect::<Vec<_>>();
+    interval_list.sort_by(|a, b| util::split_locus(a.to_string()).0.cmp(&util::split_locus(b.to_string()).0)); // ascending order a < b
+    for interval_name in interval_list.iter() {
+        let node_vec = all_nodes.get(interval_name.clone()).unwrap();
         if node_vec.len() < 2{
             continue;
         }
@@ -113,12 +116,12 @@ pub fn identify_heterozygous_nodes(node_info: &HashMap<String, NodeInfo>, hap_nu
         }
         node_support.sort_by(|a, b| b.1.cmp(&a.1));
         // println!("node_support: {:?}", node_support);
-        let mut heterozygous = true;
+        let mut heterozygous = false;
         for i in 0..hap_number - 1 {
             let ratio = node_support[i].1 as f64 / node_support[i+1].1 as f64;
             // let total_reads = node_vec_sorted.iter().map(|(_, read_name_list_len)| read_name_list_len).sum::<usize>()/node_vec_sorted.len();
-            if ratio > het_fold_threshold {
-                heterozygous = false;
+            if ratio <= het_fold_threshold {
+                heterozygous = true;
             }
         }
         if heterozygous {
@@ -516,7 +519,7 @@ pub fn find_node_haplotype(node_info: &HashMap<String, NodeInfo>, edge_info: &Ha
     let haplotype_reads = assign_haplotype_reads(node_info, &filtered_heterozygous_nodes, hap_number);
     println!("haplotype_reads: {:?}", haplotype_reads.iter().map(|(hap, reads)| format!("hap: {}, reads: {}", hap, reads.len())).collect::<Vec<_>>().join(", "));
     let (haplotype_reads_new, haplotype_nodes_new) = assign_unassigned_reads(node_info, &haplotype_reads);
-    
+    info!("haplotype_reads: {:?}", haplotype_reads.iter().map(|(hap, reads)| format!("hap: {}, reads: {}", hap, reads.len())).collect::<Vec<_>>().join(", "));
     info!("haplotype_reads_new: {:?}", haplotype_reads_new.iter().map(|(hap, reads)| format!("hap: {}, reads: {}", hap, reads.len())).collect::<Vec<_>>().join(", "));
     if haplotype_reads_new.is_empty() {
         let node_haplotype = find_most_supported_path(node_info, &edge_info);
