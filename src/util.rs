@@ -372,12 +372,6 @@ fn get_null_distribution(
 
         for (i, index) in records.iter().enumerate() {
             let vector = matrix.slice(s![i, ..]);
-            
-            // // Skip vectors with frequency > threshold
-            // let frequency = vector.sum() / vector.len() as f64;
-            // if frequency > threshold {
-            //     continue;
-            // }
         
             // Create a shuffled copy of the vector
             let vector_data: Vec<f64> = vector.iter().copied().collect();

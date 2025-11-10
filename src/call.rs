@@ -8,6 +8,7 @@ use crate::util;
 use crate::asm;
 use crate::eval;
 use rust_htslib::bcf::{self, index as BcfIndex, record::GenotypeAllele};
+use ndarray::Array2;
 
 
 
@@ -643,6 +644,23 @@ fn dfs_traverse(
     }
 }
 
+pub fn construct_var_read_matrix(node_info: &HashMap<String, asm::NodeInfo>, node_list:Vec<String>) -> Array2<f64> {
+    let mut read_vec = HashSet::new();
+    for node in node_list.iter() {
+        let read_name_list = asm::get_read_name_list(node_info, node.clone());
+        read_vec.extend(read_name_list.iter().cloned());
+    } 
+    let read_list = read_vec.iter().cloned().collect::<Vec<_>>();
+    let mut matrix = Array2::<f64>::zeros((node_list.len(), read_list.len()));
+    for (n_index, node_name) in node_list.iter().enumerate() {
+        let read_name_list = asm::get_read_name_list(node_info, node_name.clone());
+        for read in read_name_list {
+            let read_index = read_list.iter().position(|x| x == &read).unwrap();
+            matrix[[n_index, read_index]] = 1.0;
+        }
+    }
+    matrix 
+}
 
 pub fn start(graph_filename: &PathBuf, reference_seqs: &Vec<fastq::Record>, sampleid: &String, output_prefix: &String, haplotype_number: usize, phase_variants: bool, het_fold_threshold: f64) -> AnyhowResult<()> {
     let (node_info, edge_info) = asm::load_graph(graph_filename).unwrap();
