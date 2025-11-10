@@ -52,7 +52,7 @@ enum Commands {
 
         /// minimal variant allele frequency
         #[arg(short, long, default_value_t = 0.01)]
-        frequency_min: f64,
+        var_frequency_min: f64,
         
         /// Minimal Supported Reads
         #[arg(short, long, default_value_t = 2)]
@@ -68,7 +68,7 @@ enum Commands {
 
         ///output file format, accepted fasta, gfa, vcf
         #[arg(short, long, default_value = "gfa")]
-        default_file_format: String, 
+        file_format: String, 
 
         /// Haplotype number
         #[arg(short, long, default_value_t = 2)]
@@ -82,8 +82,12 @@ enum Commands {
         #[arg(short, long, default_value_t = 0.5)]
         threshold_methyl_likelihood: f32,
 
+        /// Sequencing technology, accepted hifi, nanopore
+        #[arg(short, long, default_value = "hifi")]
+        detection_technology: String,
+
         /// Verbose output
-        #[arg(short, long)]
+        #[arg(long)]
         verbose: bool,
     },
     /// Assemble haplotypes from GFA file
@@ -137,13 +141,13 @@ enum Commands {
         #[arg(short, long, default_value_t = 2)]
         maximum_haplotypes: usize,
 
-        /// Phase variants
-        #[arg(short, long, default_value = "false")]
-        phase_variants: bool,
-
         /// heterozygous coverage fold threshold, > 3.0 is not heterozygous,  the smaller the more strict
         #[arg(short, long, default_value_t = 3.0)]
         fold_threshold: f64,
+
+        /// Sequencing technology, accepted hifi, nanopore
+        #[arg(short, long, default_value = "hifi")]
+        detection_technology: String,
 
         /// Verbose output
        #[arg(short, long)]
@@ -212,7 +216,7 @@ fn main() -> Result<()> {
             // either locus as String (chromo:start-end) or a bed file
             locus,
             // Limited size of the region
-            frequency_min,
+            var_frequency_min,
             // Minimal Supported Reads
             min_reads,
             //window size
@@ -220,19 +224,21 @@ fn main() -> Result<()> {
             //if only primary reads are used
             primary_only, 
             //output file format
-            default_file_format, 
+            file_format, 
             // haplotype number
             number_of_haplotypes,
             // heterozygous coverage fold threshold, > 3.0 is not heterozygous,  the smaller the more strict
             coverage_fold_threshold,
             // methylation likelihood threshold, default to 0.5
             threshold_methyl_likelihood,
+            // Sequencing technology, accepted hifi, nanopore
+            detection_technology,
             // Verbose output
             verbose,
         } => {
                 // Validate format
-                if default_file_format != "fasta" && default_file_format != "gfa" && default_file_format != "vcf" {
-                    anyhow::bail!("Format must be either 'fasta' or 'gfa' or 'vcf', got: {}", default_file_format);
+                if file_format != "fasta" && file_format != "gfa" && file_format != "vcf" {
+                    anyhow::bail!("Format must be either 'fasta' or 'gfa' or 'vcf', got: {}", file_format);
                 }
 
                 // Initialize logging
@@ -248,12 +254,12 @@ fn main() -> Result<()> {
                     info!("Starting Haplograph analysis");
                     info!("Input BAM: {}", alignment_bam);
                     info!("Region in {}", locus);
-                    info!("Minimal vaf : {}", frequency_min);
+                    info!("Minimal vaf : {}", var_frequency_min);
                     info!("Minimal supported reads: {}", min_reads);
                     info!("Maximal Window size: {}", window_size);
                     info!("Primary only: {}", primary_only);
                     info!("Output prefix: {}", output_prefix);
-                    info!("Default file format: {}", default_file_format);
+                    info!("Default file format: {}", file_format);
                     info!("Verbose: {}", verbose);
 
                     let mut bam = util::open_bam_file(&alignment_bam);
@@ -268,10 +274,10 @@ fn main() -> Result<()> {
                         }
                     }
                     windows.sort_by(|a, b| a.1.cmp(&b.1).then(a.2.cmp(&b.2)));
-                    if default_file_format == "gfa" {
-                        graph::start( &mut bam, &windows, &reference_seqs, &sampleid, min_reads as usize, threshold_methyl_likelihood, frequency_min, primary_only, &output_prefix, number_of_haplotypes)?;
+                    if file_format == "gfa" {
+                        graph::start( &mut bam, &windows, &reference_seqs, &sampleid, min_reads as usize, threshold_methyl_likelihood, var_frequency_min, primary_only, &output_prefix, number_of_haplotypes)?;
                     } else {
-                        hap::start(&mut bam, &windows, &reference_seqs, &sampleid, min_reads as usize, frequency_min, primary_only, &output_prefix, &default_file_format)?;
+                        hap::start(&mut bam, &windows, &reference_seqs, &sampleid, min_reads as usize, var_frequency_min, primary_only, &output_prefix, &file_format)?;
                     }
 
                 } else {
@@ -280,7 +286,7 @@ fn main() -> Result<()> {
                     info!("Input BAM: {}", alignment_bam);
                     info!("Region: {}:{}-{}", chromosome, start, end);
                     info!("Locus size: {}", end - start);
-                    info!("Minimal vaf : {}", frequency_min);
+                    info!("Minimal vaf : {}", var_frequency_min);
                     info!("Minimal supported reads: {}", min_reads);
                     info!("Maximal Window size: {}", window_size);
                     info!("Primary only: {}", primary_only);
@@ -293,17 +299,17 @@ fn main() -> Result<()> {
                         let end_pos = std::cmp::min(i + window_size , end);
                         windows.push((chromosome.clone(), i, end_pos));
                     }
-                    if default_file_format == "gfa" {
-                        graph::start( &mut bam, &windows, &reference_chromosome_seqs, &sampleid, min_reads as usize, threshold_methyl_likelihood, frequency_min, primary_only, &output_prefix, number_of_haplotypes)?;
+                    if file_format == "gfa" {
+                        graph::start( &mut bam, &windows, &reference_chromosome_seqs, &sampleid, min_reads as usize, threshold_methyl_likelihood, var_frequency_min, primary_only, &output_prefix, number_of_haplotypes)?;
             
                     } else {
-                        hap::start(&mut bam, &windows, &reference_chromosome_seqs, &sampleid, min_reads as usize, frequency_min, primary_only, &output_prefix, &default_file_format)?;
+                        hap::start(&mut bam, &windows, &reference_chromosome_seqs, &sampleid, min_reads as usize, var_frequency_min, primary_only, &output_prefix, &file_format)?;
                     } 
 
                     let output_p = PathBuf::from(&output_prefix);
                     let graph_gfa = output_p.with_extension("gfa");
                     asm::start(&graph_gfa,  true, number_of_haplotypes,  &output_p, coverage_fold_threshold)?;                    
-                    call::start(&graph_gfa, &reference_seqs, &sampleid, &output_prefix, number_of_haplotypes, true, coverage_fold_threshold)?;
+                    call::start(&graph_gfa, &reference_seqs, &sampleid, &output_prefix, number_of_haplotypes, coverage_fold_threshold, &detection_technology)?;
 
                 }        
 
@@ -332,8 +338,8 @@ fn main() -> Result<()> {
             reference_fa,
             verbose,
             maximum_haplotypes,
-            phase_variants,
             fold_threshold,
+            detection_technology,
         } => {
             // Initialize logging
             if verbose {
@@ -344,7 +350,7 @@ fn main() -> Result<()> {
             env_logger::init();
 
             let reference_seqs = util::get_all_ref_seq(&reference_fa);
-            call::start(&gfa_file, &reference_seqs, &sampleid, &output_prefix, maximum_haplotypes, phase_variants, fold_threshold)?;
+            call::start(&gfa_file, &reference_seqs, &sampleid, &output_prefix, maximum_haplotypes, fold_threshold, &detection_technology)?;
         }
         Commands::Evaluate {
             truth_fasta,
