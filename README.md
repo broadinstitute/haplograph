@@ -1,6 +1,6 @@
 # Haplograph
 
-A  bioinformatics tool for local methylation-aware diploid assembly and variant calling from lrWGS BAM files using graph-based approaches.
+A  bioinformatics tool for local diploid assembly and variant calling, methylation analysis from lrWGS BAM files using graph-based approaches.
 
 ## Overview
 
