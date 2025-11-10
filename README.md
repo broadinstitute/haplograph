@@ -77,7 +77,7 @@ haplograph haplograph \
 - `--locus`: Genomic region (format: chr:start-end)
 - `--frequency-min`: Minimum allele frequency (default: 0.01)
 - `--min-reads`: Minimum supporting reads (default: 2)
-- `--window-size`: Window size for analysis (default: 1000)
+- `--window-size`: Window size for analysis (default: 100)
 - `--primary-only`: Use only primary alignments
 - `--default-file-format`: Output format (fasta or gfa, default: gfa)
 
