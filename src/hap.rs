@@ -9,21 +9,24 @@ use crate::Cli;
 use crate::util;
 use crate::intervals;
 use indicatif::{ProgressBar, ProgressStyle};
+use rayon::prelude::*;
 
-pub fn get_all_haplotypes_to_vcf(bam: &mut IndexedReader, windows: &Vec<(String, usize, usize)>,  reference_fa: &Vec<fastq::Record>, sampleid: &String, min_reads: usize, frequency_min: f64, primary_only: bool, output_prefix: &String, default_file_format: &String) -> AnyhowResult<()> {
-    for (i, window) in windows.iter().enumerate() {
-        let (chromosome, start, end) = window;
-        let haplotype_info = intervals::start(bam, &reference_fa, &chromosome, *start, *end, &sampleid, min_reads as usize, frequency_min, primary_only, false).unwrap();
-    }
-    Ok(())
-}
 
-pub fn start(bam: &mut IndexedReader, windows: &Vec<(String, usize, usize)>,  reference_fa: &Vec<fastq::Record>, sampleid: &String, min_reads: usize, frequency_min: f64, primary_only: bool, output_prefix: &String, default_file_format: &String) -> AnyhowResult<()> {
+
+pub fn start(bam_path: &String, windows: &Vec<(String, usize, usize)>,  reference_fa: &Vec<fastq::Record>, sampleid: &String, min_reads: usize, frequency_min: f64, primary_only: bool, output_prefix: &String, default_file_format: &String) -> AnyhowResult<()> {
     if default_file_format == "fasta" { 
-        for (i, window) in windows.iter().enumerate() {
-            let (chromosome, start, end) = window;
-            let haplotype_info = intervals::start(bam, &reference_fa, &chromosome, *start, *end, &sampleid, min_reads as usize, frequency_min, primary_only, true).unwrap();
-        }
+        info!("Processing {} windows in parallel", windows.len());
+        let final_hap_list: Vec<_> = windows
+            .par_iter()
+            .map(|window| {
+                let (chromosome, start, end) = window;
+                // Create a new BAM reader for this thread
+                let mut bam = util::open_bam_file(bam_path);
+                // Process this window
+                intervals::start(&mut bam, &reference_fa, &chromosome, *start, *end, &sampleid, min_reads as usize, frequency_min, primary_only, false)
+                    .with_context(|| format!("Failed to process window {}:{}-{}", chromosome, start, end))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
     } else if default_file_format == "vcf" {
         let mut header = bcf::Header::new();
         let mut reference_sequence = String::new();
@@ -54,7 +57,8 @@ pub fn start(bam: &mut IndexedReader, windows: &Vec<(String, usize, usize)>,  re
 
             let mut record = writer.empty_record();
             let reference_seq = reference_sequence[*start..*end].to_string();
-            let haplotype_info = intervals::start(bam, &reference_fa, &chromosome, *start, *end, &sampleid, min_reads as usize, frequency_min, primary_only, false).unwrap();
+            let mut bam = util::open_bam_file(&bam_path.clone());
+            let haplotype_info = intervals::start(&mut bam, &reference_fa, &chromosome, *start, *end, &sampleid, min_reads as usize, frequency_min, primary_only, false).unwrap();
             let mut record_list = Vec::new();
             record_list.push((&reference_seq, &0.0, 1 as usize));
             let mut coverage = 0;

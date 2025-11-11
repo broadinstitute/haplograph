@@ -8,7 +8,6 @@ workflow Haplograph_parameter_optimaize {
         File truth_vcf_tbi
         File reference_fa
         File reference_fai
-        File bed_file
         String prefix
         String locus
         String gene_name
@@ -51,7 +50,7 @@ workflow Haplograph_parameter_optimaize {
 
         call VCFEval as VCFEVAL {
             input:
-                query_vcf = haplograph.vcf_file,
+                query_vcf = haplograph.somatic_vcf_file,
                 reference_fa = reference_fa,
                 reference_fai = reference_fai,
                 base_vcf = truth_vcf,
@@ -69,7 +68,8 @@ workflow Haplograph_parameter_optimaize {
     output {
         Array[File] gfa = haplograph.graph_file
         Array[File] fasta = haplograph.asm_file
-        Array[File] vcf = haplograph.vcf_file
+        Array[File] germline_vcf = haplograph.germline_vcf_file
+        Array[File] somatic_vcf = haplograph.somatic_vcf_file
         Array[File] vcfeval_summary = VCFEVAL.summary_statistics
     }
 }
@@ -95,23 +95,26 @@ task haplograph {
                                                         -s ~{prefix} \
                                                         -o ~{prefix} \
                                                         -l ~{locus} \
-                                                        -w ~{windowsize} \
+                                                        -v ~{min_freq} \
                                                         -m ~{minimal_supported_reads} \
-                                                        -d gfa \
-                                                        -f ~{min_freq}
+                                                        -w ~{windowsize} \
+                                                        -f gfa \
+                                                        -c ~{fold_threshold}
                                                         ~{extra_arg}
         
-        
+        ls -l .
     >>>
 
     output {
         File graph_file = "~{prefix}.gfa"
         File asm_file = "~{prefix}.fasta"
-        File vcf_file = "~{prefix}.vcf.gz"
+        File germline_vcf_file = "~{prefix}.germline.vcf.gz"
+        File somatic_vcf_file = "~{prefix}.somatic.vcf.gz"
+        Array[File] methyl_bed = glob("*.bed")
     }
 
     runtime {
-        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograph:v2"
+        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograph:v3"
         memory: "16 GB"
         cpu: 4
         disks: "local-disk 100 SSD"
@@ -141,7 +144,7 @@ task haplograph_eval {
     }
 
     runtime {
-        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograph:v2"
+        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograph:v3"
         memory: "16 GB"
         cpu: 4
         disks: "local-disk 100 SSD"
@@ -180,7 +183,7 @@ task get_truth_haplotypes {
     }
 
     runtime {
-        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograph:v2"
+        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograph:v3"
         memory: "4 GB"
         cpu: 1
         disks: "local-disk 100 SSD"
@@ -468,6 +471,7 @@ task Vcfdist {
             "superclusters_tsv": "~{sample}.~{genename}.~{coverage}.superclusters.tsv",
             "phase_blocks_tsv": "~{sample}.~{genename}.~{coverage}.phase-blocks.tsv"
         }
+        File base_vcf = "~{sample}.~{locus}.base.vcf.gz"
     }
 
     runtime {
@@ -550,18 +554,11 @@ task VCFEval {
         bcftools view ~{query_vcf} -O z -o ~{query_output_sample_name}.vcf.gz
         bcftools index -t ~{query_output_sample_name}.vcf.gz
         
-        # Filter out small indels (exclude indels where the indel length is less than min_indel_length)
-        # This keeps SNPs and large indels, but removes small indels that are less reliable in HiFi
-        # Expression: exclude if (TYPE="indel") AND (abs(length(REF) - length(ALT[0])) < min_indel_length)
-        bcftools filter -e 'TYPE="indel" && abs(length(REF) - length(ALT[0])) < ~{min_indel_length}' \
-            ~{query_output_sample_name}.vcf.gz -Oz -o ~{query_output_sample_name}.filtered.vcf.gz
-        bcftools index -t ~{query_output_sample_name}.filtered.vcf.gz
-        
         # rtg vcfeval
         rtg format -o rtg_ref ~{reference_fa}
         rtg vcfeval \
             -b ~{prefix}.~{locus}.base.vcf.gz  \
-            -c ~{query_output_sample_name}.filtered.vcf.gz \
+            -c ~{query_output_sample_name}.vcf.gz \
             -o reg \
             -t rtg_ref \
             --squash-ploidy \
@@ -633,4 +630,44 @@ task aardvark {
         cpu: 4
         disks: "local-disk 100 SSD"
     }
+}
+
+task concat_vcfs {
+    input {
+        Array[File] vcfs
+        String prefix
+        Int disk_size_gb = 100
+        Int mem_gb = 16
+        Int cpu = 4
+        Int preemptible = 1
+    }
+
+    command <<<
+        set -euxo pipefail
+
+        for ff in ~{sep=' ' vcfs}; do bcftools index -t $ff; done
+
+        bcftools concat \
+            ~{sep=' ' vcfs} \
+            --allow-overlaps \
+            --ligate-force \
+            --remove-duplicates \
+            -Oz -o ~{prefix}.vcf.gz
+        bcftools index -t ~{prefix}.vcf.gz
+        bcftools sort ~{prefix}.vcf.gz -Oz -o ~{prefix}.sorted.vcf.gz
+        bcftools index -t ~{prefix}.sorted.vcf.gz
+    >>>
+    output {
+        File merged_vcf = "~{prefix}.sorted.vcf.gz"
+        File merged_vcf_tbi = "~{prefix}.sorted.vcf.gz.tbi"
+    }
+
+    runtime {
+        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/vcfdist:v1"
+        disks: "local-disk " + disk_size_gb + " HDD"
+        memory: mem_gb + " GiB"
+        cpu: cpu
+        preemptible: preemptible
+    }
+
 }

@@ -133,8 +133,8 @@ task haplograph {
         Int windowsize
         Int minimal_supported_reads
         Int fold_threshold
+        Float min_freq
         String extra_arg = ""
-        Float minimal_frequency
     }
 
     command <<<
@@ -144,23 +144,26 @@ task haplograph {
                                                         -s ~{prefix} \
                                                         -o ~{prefix} \
                                                         -l ~{locus} \
-                                                        -w ~{windowsize} \
-                                                        -f ~{minimal_frequency} \
+                                                        -v ~{min_freq} \
                                                         -m ~{minimal_supported_reads} \
-                                                        -d gfa \
+                                                        -w ~{windowsize} \
+                                                        -f gfa \
+                                                        -c ~{fold_threshold}
                                                         ~{extra_arg}
         
-        
+        ls -l .
     >>>
 
     output {
         File graph_file = "~{prefix}.gfa"
         File asm_file = "~{prefix}.fasta"
-        File vcf_file = "~{prefix}.vcf.gz"
+        File germline_vcf_file = "~{prefix}.germline.vcf.gz"
+        File somatic_vcf_file = "~{prefix}.somatic.vcf.gz"
+        Array[File] methyl_bed = glob("*.bed")
     }
 
     runtime {
-        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograph:v2"
+        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograph:v3"
         memory: "16 GB"
         cpu: 4
         disks: "local-disk 100 SSD"

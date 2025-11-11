@@ -275,9 +275,9 @@ fn main() -> Result<()> {
                     }
                     windows.sort_by(|a, b| a.1.cmp(&b.1).then(a.2.cmp(&b.2)));
                     if file_format == "gfa" {
-                        graph::start( &mut bam, &windows, &reference_seqs, &sampleid, min_reads as usize, threshold_methyl_likelihood, var_frequency_min, primary_only, &output_prefix, number_of_haplotypes)?;
+                        graph::start( &alignment_bam, &windows, &reference_seqs, &sampleid, min_reads as usize, threshold_methyl_likelihood, var_frequency_min, primary_only, &output_prefix, number_of_haplotypes)?;
                     } else {
-                        hap::start(&mut bam, &windows, &reference_seqs, &sampleid, min_reads as usize, var_frequency_min, primary_only, &output_prefix, &file_format)?;
+                        hap::start( &alignment_bam.clone(), &windows, &reference_seqs, &sampleid, min_reads as usize, var_frequency_min, primary_only, &output_prefix, &file_format)?;
                     }
 
                 } else {
@@ -289,7 +289,7 @@ fn main() -> Result<()> {
                     info!("Minimal vaf : {}", var_frequency_min);
                     info!("Minimal supported reads: {}", min_reads);
                     info!("Maximal Window size: {}", window_size);
-                    info!("Primary only: {}", primary_only);
+                    info!("Primary read only: {}", primary_only);
 
                     let mut bam = util::open_bam_file(&alignment_bam);
                     let (reference_seqs, reference_chromosome_seqs) = util::get_ref_seq_from_chromosome(&reference_fa, &chromosome);
@@ -300,10 +300,10 @@ fn main() -> Result<()> {
                         windows.push((chromosome.clone(), i, end_pos));
                     }
                     if file_format == "gfa" {
-                        graph::start( &mut bam, &windows, &reference_chromosome_seqs, &sampleid, min_reads as usize, threshold_methyl_likelihood, var_frequency_min, primary_only, &output_prefix, number_of_haplotypes)?;
+                        graph::start( &alignment_bam, &windows, &reference_chromosome_seqs, &sampleid, min_reads as usize, threshold_methyl_likelihood, var_frequency_min, primary_only, &output_prefix, number_of_haplotypes)?;
             
                     } else {
-                        hap::start(&mut bam, &windows, &reference_chromosome_seqs, &sampleid, min_reads as usize, var_frequency_min, primary_only, &output_prefix, &file_format)?;
+                        hap::start(&alignment_bam, &windows, &reference_chromosome_seqs, &sampleid, min_reads as usize, var_frequency_min, primary_only, &output_prefix, &file_format)?;
                     } 
 
                     let output_p = PathBuf::from(&output_prefix);

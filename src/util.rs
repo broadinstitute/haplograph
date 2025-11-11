@@ -494,8 +494,6 @@ pub fn permutation_test(
             // println!("excluded_index: {:?}, q_value: {:?}", test_index_value, q_value);
         }
     }
-
-    // println!("{:?}, p-value: {:?}", excluded_index, qvalues);
     bar.finish();
 
 

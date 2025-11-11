@@ -41,13 +41,16 @@ task bcftools_concat {
             -Oz -o ~{prefix}.vcf.gz
         bcftools index -t ~{prefix}.vcf.gz
 
-        gsutil cp ~{prefix}.vcf.gz ~{output_dir}
-        gsutil cp ~{prefix}.vcf.gz.tbi ~{output_dir}
+        bcftools sort ~{prefix}.vcf.gz -Oz -o ~{prefix}.sorted.vcf.gz
+        bcftools index -t ~{prefix}.sorted.vcf.gz
+
+        gsutil cp ~{prefix}.sorted.vcf.gz ~{output_dir}
+        gsutil cp ~{prefix}.sorted.vcf.gz.tbi ~{output_dir}
     >>>
 
     output {
-        File vcf = "~{prefix}.vcf.gz"
-        File tbi = "~{prefix}.vcf.gz.tbi"
+        File vcf = "~{prefix}.sorted.vcf.gz"
+        File tbi = "~{prefix}.sorted.vcf.gz.tbi"
     }
 
     runtime {

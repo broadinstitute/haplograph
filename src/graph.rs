@@ -12,6 +12,7 @@ use crate::methyl;
 use std::error::Error;
 use indicatif::{ProgressBar, ProgressStyle};
 use bio::io::fastq;
+use rayon::prelude::*;
 
 
 pub struct NodeInfo {
@@ -148,14 +149,21 @@ pub fn write_gfa_output(
 }
 
 
-pub fn start(bam: &mut IndexedReader, windows: &Vec<(String,usize, usize)>, reference_fa: &Vec<fastq::Record>, sampleid: &String, min_reads: usize, methyl_threshold: f32, frequency_min: f64, primary_only: bool, output_prefix: &String, haplotype_number: usize) -> AnyhowResult<()> {
+pub fn start(bam_path: &String, windows: &Vec<(String,usize, usize)>, reference_fa: &Vec<fastq::Record>, sampleid: &String, min_reads: usize, methyl_threshold: f32, frequency_min: f64, primary_only: bool, output_prefix: &String, haplotype_number: usize) -> AnyhowResult<()> {
 
-    let mut final_hap_list = Vec::new(); 
-    for (i, window) in windows.iter().enumerate() {
-        let (chromosome, start, end) = window;
-        let haplotype_info = intervals::start(bam, &reference_fa, &chromosome, *start, *end, &sampleid, min_reads as usize, frequency_min, primary_only, false).unwrap();
-        final_hap_list.push(haplotype_info);
-    }
+    // Parallelize window processing - each thread gets its own BAM reader
+    info!("Processing {} windows in parallel", windows.len());
+    let final_hap_list: Vec<_> = windows
+        .par_iter()
+        .map(|window| {
+            let (chromosome, start, end) = window;
+            // Create a new BAM reader for this thread
+            let mut bam = util::open_bam_file(bam_path);
+            // Process this window
+            intervals::start(&mut bam, &reference_fa, &chromosome, *start, *end, &sampleid, min_reads as usize, frequency_min, primary_only, false)
+                .with_context(|| format!("Failed to process window {}:{}-{}", chromosome, start, end))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     let (node_info, edge_info) = get_node_edge_info(&windows, &final_hap_list, 1 as usize, frequency_min, haplotype_number);
     
