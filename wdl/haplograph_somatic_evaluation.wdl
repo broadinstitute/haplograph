@@ -11,8 +11,8 @@ workflow Haplograph_parameter_optimaize {
         String prefix
         String locus
         String gene_name
-        Int coverage
-        Array[Int] windowsize
+        Int window
+        Array[Int] coverages
         String truth_sample_name
         Float min_freq
     }
@@ -26,7 +26,7 @@ workflow Haplograph_parameter_optimaize {
     }
 
 
-    scatter (window in windowsize) {
+    scatter (coverage in coverages) {
         
         call downsampleBam {input:
             input_bam = CalculateCoverage.subsetbam,
@@ -55,8 +55,8 @@ workflow Haplograph_parameter_optimaize {
                 reference_fai = reference_fai,
                 base_vcf = truth_vcf,
                 base_vcf_index = truth_vcf_tbi,
-                query_output_sample_name = prefix + "_" + window + "_" + gene_name,
-                prefix = prefix + "_" + window + "_" + gene_name,
+                query_output_sample_name = prefix + "_" + coverage + "_" + gene_name,
+                prefix = prefix + "_" + coverage + "_" + gene_name,
                 truth_sample = truth_sample_name,
                 locus = locus
         }
@@ -553,6 +553,8 @@ task VCFEval {
         # Compress and Index vcf files
         bcftools view ~{query_vcf} -O z -o ~{query_output_sample_name}.vcf.gz
         bcftools index -t ~{query_output_sample_name}.vcf.gz
+
+        # 
         
         # rtg vcfeval
         rtg format -o rtg_ref ~{reference_fa}

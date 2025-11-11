@@ -679,8 +679,11 @@ pub fn start(graph_filename: &PathBuf, reference_seqs: &Vec<fastq::Record>, samp
     let ref_chromosome_seqs = reference_seqs.iter().find(|r| r.id().to_string() == chromosome).unwrap().clone();
 
     let (phased_variants, somatic_variants) = get_variants_from_path(&node_info, &edge_info, haplotype_number, het_fold_threshold, &ref_chromosome_seqs);
-    let p_variants = collapse_identical_records(phased_variants);
-    let s_variants = collapse_identical_records(somatic_variants);
+    let all_variants = vec![phased_variants.clone(), somatic_variants.clone()].concat();
+    let all_variants_filtered = collapse_identical_records(all_variants);
+    let phased_keys = phased_variants.iter().map(|v| format!("{}.{}.{}.{}.{}", v.chromosome.clone(), v.pos, v.ref_allele.clone(), v.alt_allele.clone(), v.variant_type.clone())).collect::<HashSet<_>>();
+    let p_variants = all_variants_filtered.iter().filter(|v| phased_keys.contains(&format!("{}.{}.{}.{}.{}", v.chromosome.clone(), v.pos, v.ref_allele.clone(), v.alt_allele.clone(), v.variant_type.clone()))).cloned().collect::<Vec<_>>();
+    let s_variants = all_variants_filtered.iter().filter(|v| !phased_keys.contains(&format!("{}.{}.{}.{}.{}", v.chromosome.clone(), v.pos, v.ref_allele.clone(), v.alt_allele.clone(), v.variant_type.clone()))).cloned().collect::<Vec<_>>();
    
     // Write VCF file  
     let germline_output = format!("{}.germline", output_prefix);
@@ -693,7 +696,7 @@ pub fn start(graph_filename: &PathBuf, reference_seqs: &Vec<fastq::Record>, samp
         haplotype_number,
         true
     )?; 
-    info!("Total variants: {}", p_variants.len());
+    info!("Germline variants: {}", p_variants.len());
 
     //filter somatic variants
     let (matrix, var_list, read_list) = construct_var_read_matrix(&node_info, reference_seqs)?;
