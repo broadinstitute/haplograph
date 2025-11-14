@@ -1,6 +1,6 @@
 use rust_htslib::bam::{ Record};
 use std::collections::{HashMap, HashSet};
-use log::{warn};
+use log::{info, debug, warn};
 
 pub fn get_methylation_read(r: &Record, start: usize, end: usize, mod_char: char) -> HashMap<usize, f32> {
     let mut methyl_pos_dict: HashMap<usize, f32> = HashMap::new();
@@ -81,7 +81,7 @@ pub fn aggregate_methylation_reads(methyl_all_reads: HashMap<String,HashMap<usiz
 
 
 pub fn start (bam_records: HashMap<String, Record>, read_coordinates: &HashMap<String, (u64, u64)>) -> HashMap<String,HashMap<usize, f32>> {
-    println!("Processing Methylation Signals from BAM file");
+    debug!("Processing Methylation Signals from BAM file");
     // println!("Read coordinates: {:?}", read_coordinates);
     let mut read_name_set = HashSet::new();
     let mut methyl_all_reads: HashMap<String,HashMap<usize, f32>>= HashMap::new(); // extract directly from reference map
@@ -95,7 +95,7 @@ pub fn start (bam_records: HashMap<String, Record>, read_coordinates: &HashMap<S
         }
         // let read_name = String::from_utf8_lossy(&r.qname()).to_string();
         if !read_coordinates.contains_key(read_name){
-            println!("Read name not found in read coordinates: {:?}", read_name);
+            warn!("Read name not found in read coordinates: {:?}", read_name);
             continue
         }
         let (read_start, read_end) = read_coordinates.get(read_name).unwrap().clone();

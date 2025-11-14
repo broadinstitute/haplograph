@@ -1,4 +1,4 @@
-use log::{info, warn};
+use log::{info, warn, debug};
 use anyhow::{Result as AnyhowResult, Context};
 use bio::io::fastq;
 use rust_htslib::bam::{self, IndexedReader, Read as BamRead, record::Aux};
@@ -15,7 +15,7 @@ use rayon::prelude::*;
 
 pub fn start(bam_path: &String, windows: &Vec<(String, usize, usize)>,  reference_fa: &Vec<fastq::Record>, sampleid: &String, min_reads: usize, frequency_min: f64, primary_only: bool, output_prefix: &String, default_file_format: &String) -> AnyhowResult<()> {
     if default_file_format == "fasta" { 
-        info!("Processing {} windows in parallel", windows.len());
+        debug!("Processing {} windows in parallel", windows.len());
         let final_hap_list: Vec<_> = windows
             .par_iter()
             .map(|window| {

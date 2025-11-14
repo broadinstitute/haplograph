@@ -123,9 +123,9 @@ pub fn start(truth_fasta: &PathBuf, query_fasta: &PathBuf, haplotype_number: usi
     }
     
 
-    println!("optimal_score: {}", optimal_score);
-    println!("optimal_perm: {} pairs {:?}", hap_num, optimal_perm);
-    println!("optimal_qv_scores: {:?}", optimal_qv_scores);
+    info!("optimal_score: {}", optimal_score);
+    info!("optimal_perm: {} pairs {:?}", hap_num, optimal_perm);
+    info!("optimal_qv_scores: {:?}", optimal_qv_scores);
 
     let mut optimal_sequence_pairs = Vec::new();
     for (i, j, score) in optimal_perm.iter() {

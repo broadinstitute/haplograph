@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use url::Url;
 use rust_htslib::bam::{self, IndexedReader, Read as BamRead, record::Aux};
-use log::{info, warn};
+use log::{info, warn, debug};
 use anyhow::{Result as AnyhowResult, Context};
 use bio::alignment::pairwise::*;
 use bio::alignment::AlignmentOperation;
@@ -116,7 +116,7 @@ pub fn open_bam_file(alignment_bam: &String) -> IndexedReader {
         IndexedReader::from_path(&alignment_bam).unwrap()
     };
     
-    info!("Successfully opened BAM file");
+    debug!("Successfully opened BAM file");
 
     bam
 }
@@ -124,7 +124,7 @@ pub fn open_bam_file(alignment_bam: &String) -> IndexedReader {
 pub fn get_chromosome_ref_seq(reference_fa: &String, chromosome: &str) -> Vec<fastq::Record> {
     
     
-    info!("Opening FASTA file: {}", reference_fa);
+    debug!("Opening FASTA file: {}", reference_fa);
     
     // Open FASTA file
     let mut fasta_reader = FastaReader::from_file(&reference_fa)
@@ -139,7 +139,7 @@ pub fn get_chromosome_ref_seq(reference_fa: &String, chromosome: &str) -> Vec<fa
 
         // Check if this sequence matches the target chromosome
         if seq_id == chromosome {
-            info!("Extracting region {} from chromosome {}", 
+            debug!("Extracting region {} from chromosome {}", 
                 chromosome, seq_id);
             let chromosome_seq = sequence;
             let record_id = seq_id;
@@ -150,7 +150,7 @@ pub fn get_chromosome_ref_seq(reference_fa: &String, chromosome: &str) -> Vec<fa
                 vec![30; chromosome_seq.len()].as_slice() // Default quality score
             );
             reference_seqs.push(fastq_record);
-            info!("Extracted reference sequence: {} bp", chromosome_seq.len());
+            debug!("Extracted reference sequence: {} bp", chromosome_seq.len());
             
         }
     }
@@ -164,7 +164,7 @@ pub fn get_chromosome_ref_seq(reference_fa: &String, chromosome: &str) -> Vec<fa
 
 pub fn get_all_ref_seq(reference_fa: &String) -> Vec<fastq::Record> {
     
-    info!("Opening FASTA file: {}", reference_fa);
+    debug!("Opening FASTA file: {}", reference_fa);
     
     // Open FASTA file
     let mut fasta_reader = FastaReader::from_file(&reference_fa)
@@ -491,7 +491,7 @@ pub fn permutation_test(
         let test_index_value = &test_index[qi];
         if q_value > &p_value_threshold{
             excluded_index.push(test_index_value);
-            // println!("excluded_index: {:?}, q_value: {:?}", test_index_value, q_value);
+            debug!("excluded_index: {:?}, q_value: {:?}", test_index_value, q_value);
         }
     }
     bar.finish();

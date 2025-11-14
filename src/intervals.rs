@@ -1,4 +1,4 @@
-use log::{info, warn};
+use log::{info, warn, debug};
 use anyhow::{Result as AnyhowResult, Context};
 use bio::io::fastq;
 use rust_htslib::faidx::Reader;
@@ -128,7 +128,7 @@ pub fn extract_haplotypes_from_bam(
         .map(|(read_name, (read_seq, read_qual))| fastq::Record::with_attrs(read_name, None, read_seq, read_qual))
         .collect();
 
-    info!("Extracted {} reads from region", records.len());
+    debug!("Extracted {} reads from region", records.len());
    
     Ok((records))
 }
@@ -294,7 +294,7 @@ pub fn extract_haplotypes_coordinates_from_bam(
         .map(|sq| fastq::Record::with_attrs(sq.0.as_str(), None, sq.1.0.as_bytes(), sq.1.1.as_slice()))
         .collect();
 
-    info!("Extracted {} reads from region", records.len());
+    debug!("Extracted {} reads from region", records.len());
 
    
     Ok((records, read_coordinates, read_sequence_dict, bam_records))
@@ -330,7 +330,7 @@ pub fn process_bam_file_by_coordinates(bam: &mut IndexedReader, chromosome: &str
         &sampleid,
         primary_only, 
     ).unwrap();
-    info!("Extracted {} reads from region", reads.len());
+    debug!("Extracted {} reads from region", reads.len());
     reads
 }
 
@@ -345,7 +345,7 @@ pub fn process_bam_file(bam: &mut IndexedReader, chromosome: &str, start: usize,
         primary_only, 
     ).unwrap();
     let methyl_all_reads = methyl::start(bam_records,  &read_coordinates);
-    info!("Extracted {} reads from region", reads.len());
+    debug!("Extracted {} reads from region", reads.len());
     let mut filtered_reads = Vec::new();
     for r in reads.iter() {
         let r_name = r.id().to_string().split('|').next().unwrap().to_string();
@@ -380,7 +380,7 @@ pub fn process_fasta_file(reference: &Vec<fastq::Record>, chromosome: &str, star
         let sequence = String::from_utf8_lossy(record.seq()).to_string();
         // Check if this sequence matches the target chromosome
         if seq_id == chromosome {
-            info!("Extracting region {}:{}-{} from chromosome {}", 
+            debug!("Extracting region {}:{}-{} from chromosome {}", 
                 chromosome, start, end, seq_id);
             // Extract the specified region
             if start < sequence.len() && end <= sequence.len() {
@@ -396,7 +396,7 @@ pub fn process_fasta_file(reference: &Vec<fastq::Record>, chromosome: &str, star
                 );
                 
                 reference_seqs.push(fastq_record);
-                info!("Extracted reference sequence: {} bp", region_seq.len());
+                debug!("Extracted reference sequence: {} bp", region_seq.len());
             } else {
                 warn!("Region coordinates out of bounds for sequence length {}", sequence.len());
             }
@@ -408,7 +408,7 @@ pub fn process_fasta_file(reference: &Vec<fastq::Record>, chromosome: &str, star
         warn!("No matching chromosome '{}' found in FASTA file", chromosome);
     }
     
-    info!("Extracted {} reference sequences", reference_seqs.len());
+    debug!("Extracted {} reference sequences", reference_seqs.len());
     reference_seqs
 }
 
@@ -478,7 +478,7 @@ pub fn collapse_haplotypes(reads: &Vec<fastq::Record>, read_methyl_dict: &HashMa
             final_hap.insert(hap.clone(), (cigar, vec.clone(), allele_frequency));
         }
     }
-    info!("Extracted {} haplotypes from region, total reads: {:?}", final_hap.len(), read_dictionary.values().map(|x| x.len()).collect::<Vec<_>>());
+    debug!("Extracted {} haplotypes from region, total reads: {:?}", final_hap.len(), read_dictionary.values().map(|x| x.len()).collect::<Vec<_>>());
     Ok(final_hap)
 }
 

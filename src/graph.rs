@@ -1,5 +1,5 @@
 
-use log::{info, warn};
+use log::{info, warn, debug};
 use anyhow::{Result as AnyhowResult, Context};
 use rust_htslib::bam::{self, IndexedReader, Read as BamRead, record::Aux};
 use std::path::{PathBuf};

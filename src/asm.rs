@@ -414,7 +414,7 @@ pub fn construct_sequences_from_haplotype_path(node_info: &HashMap<String, NodeI
             // total_supported_reads += supported_reads;
         }
         for hap_ind in haplotype_index.iter() {
-            println!("path: {:?}, haplotype_index: {:?}, sequence length: {:?}", path.len(), hap_ind, sequence.len());
+            info!("path: {:?}, haplotype_index: {:?}, sequence length: {:?}", path.len(), hap_ind, sequence.len());
             all_sequences.entry(hap_ind.clone()).or_insert(Vec::new()).push((path.clone(), sequence.clone(), read_names.clone()));
         }
     }
