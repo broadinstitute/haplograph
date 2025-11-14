@@ -3,7 +3,6 @@ version 1.0
 workflow ConcatVCF {
     input {
         Array[File] vcfs
-        Array[File] tbis
         String prefix
         String output_dir
 
@@ -12,7 +11,6 @@ workflow ConcatVCF {
     call bcftools_concat {
         input:
             vcfs = vcfs,
-            tbis = tbis,
             prefix = prefix,
             output_dir = output_dir
     }
@@ -27,13 +25,17 @@ workflow ConcatVCF {
 task bcftools_concat {
     input {
         Array[File] vcfs
-        Array[File] tbis
         String prefix
         String output_dir
     }
 
     command <<<
         set -euxo pipefail
+
+        # Index all input VCF files
+        for vcf in ~{sep=' ' vcfs}; do
+            bcftools index "$vcf"
+        done
 
         bcftools concat \
             ~{sep=" " vcfs} \
@@ -55,8 +57,8 @@ task bcftools_concat {
 
     runtime {
         docker: "us.gcr.io/broad-dsp-lrma/lr-basic:0.1.1"
-        memory: "16 GB"
-        cpu: 4
-        disks: "local-disk 100 SSD"
+        memory: "32 GB"
+        cpu: 8
+        disks: "local-disk 1000 SSD"
     }
 }

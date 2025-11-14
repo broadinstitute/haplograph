@@ -99,7 +99,7 @@ workflow Haplograph_eval {
             call Vcfdist as VCFdist_germline {
                 input:
                     sample = prefix,
-                    eval_vcf = haplograph.vcf_file,
+                    eval_vcf = haplograph.germline_vcf_file,
                     truth_vcf = truth_vcf,
                     locus = locus,
                     reference_fasta = reference_fa,
@@ -115,7 +115,8 @@ workflow Haplograph_eval {
         Array[Float] bam_coverage = CalculateCoverage.coverage
         Array[Array[File]] gfa = haplograph.graph_file
         Array[Array[File]] fasta = haplograph.asm_file
-        Array[Array[File]] vcf = haplograph.vcf_file
+        Array[Array[File]] germline_vcf = haplograph.germline_vcf_file
+        Array[Array[File]] somatic_vcf = haplograph.somatic_vcf_file
         Array[Array[File]] haplograph_eval_result = haplograph_eval.qv_scores
         Array[Array[File]] hifiasm_eval_result = hifiasm_eval.qv_scores
         Array[Array[VcfdistOutputs]] vcfdist_summary = VCFdist_germline.outputs
@@ -132,6 +133,7 @@ task haplograph {
         Int windowsize
         Int minimal_supported_reads
         Int fold_threshold
+        Float min_freq
         String extra_arg = ""
     }
 
@@ -142,22 +144,26 @@ task haplograph {
                                                         -s ~{prefix} \
                                                         -o ~{prefix} \
                                                         -l ~{locus} \
-                                                        -w ~{windowsize} \
+                                                        -v ~{min_freq} \
                                                         -m ~{minimal_supported_reads} \
-                                                        -d gfa \
+                                                        -w ~{windowsize} \
+                                                        -f gfa \
+                                                        -c ~{fold_threshold}
                                                         ~{extra_arg}
         
-        
+        ls -l .
     >>>
 
     output {
         File graph_file = "~{prefix}.gfa"
         File asm_file = "~{prefix}.fasta"
-        File vcf_file = "~{prefix}.vcf.gz"
+        File germline_vcf_file = "~{prefix}.germline.vcf.gz"
+        File somatic_vcf_file = "~{prefix}.somatic.vcf.gz"
+        Array[File] methyl_bed = glob("*.bed")
     }
 
     runtime {
-        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograph:v2"
+        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograph:v3"
         memory: "16 GB"
         cpu: 4
         disks: "local-disk 100 SSD"
