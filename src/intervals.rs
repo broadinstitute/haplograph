@@ -491,7 +491,7 @@ pub fn start(bam: &mut IndexedReader, reference_fa: &Vec<fastq::Record>, chromos
     let reference = process_fasta_file( reference_fa, chromosome, start, end, sampleid);
     let reference = reference.first().unwrap().clone();
     let final_hap = collapse_haplotypes(&reads_list, &read_methyl_dict, &reference, min_reads, frequency_min)?;
-    info!("Haplotype reconstruction completed");
+    debug!("Haplotype reconstruction completed");
     let final_hap_output = PathBuf::from(format!("{}/{}_{}_{}_{}_haplograph.fasta", ".", sampleid, chromosome, start, end));
     if write_output{    
         write_fasta_output(final_hap.clone(), &final_hap_output)?;

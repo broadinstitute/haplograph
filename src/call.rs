@@ -407,16 +407,16 @@ fn write_vcf(
     
     info!("Created compressed VCF: {}", &output_file.display());
     
-    // Build tabix index for the compressed VCF file
-    let idx = std::ptr::null();
-    println!("Building index file: ");
-    let rs = unsafe {
-        rust_htslib::htslib::bcf_index_build3(
-            rust_htslib::utils::path_to_cstring(&output_file).unwrap().as_ptr(),
-            idx,
-            0,
-            4 as i32,
-    )};
+    // // Build tabix index for the compressed VCF file
+    // let idx = std::ptr::null();
+    // println!("Building index file: ");
+    // let rs = unsafe {
+    //     rust_htslib::htslib::bcf_index_build3(
+    //         rust_htslib::utils::path_to_cstring(&output_file).unwrap().as_ptr(),
+    //         idx,
+    //         0,
+    //         4 as i32,
+    // )};
 
     Ok(())
 }

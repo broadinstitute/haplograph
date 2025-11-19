@@ -216,7 +216,7 @@ task vg_graph_surject {
         docker:  "us.gcr.io/broad-dsp-lrma/hangsuunc/vg:1.69.0"
         cpu: 16
         memory: "64GB"
-        disks: "local-disk " + 200 + " HDD"
+        disks: "local-disk " + 1000 + " HDD"
         preemptible: 0
     }
     
@@ -449,13 +449,13 @@ task hifiasm_asm{
         Int mem_gb
     }
 
-    Int disk_size = 10 + ceil(2 * size(bam, "GiB"))
+    Int disk_size = 100 + ceil(2 * size(bam, "GiB"))
 
     command <<<
 
         set -euxo pipefail
 
-        samtools fastq ~{bam} > ~{prefix}.fastq
+        samtools view -b -F 4 ~{bam} | samtools fastq - > ~{prefix}.fastq
 
         /truvari/hifiasm-0.25.0/hifiasm -o ~{prefix} -t 4 ~{prefix}.fastq
         awk '/^S/{print ">"$2;print $3}' ~{prefix}.bp.hap1.p_ctg.gfa > ~{prefix}.bp.hap1.p_ctg.fa

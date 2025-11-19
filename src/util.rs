@@ -480,20 +480,26 @@ pub fn permutation_test(
 
     for item in collected_values.into_iter().flatten() {
         let (p_value, node_name) = item;
-        raw_p_values.push(p_value);
-        test_index.push(node_name);
+        if ! p_value.is_nan() {
+            raw_p_values.push(p_value);
+            test_index.push(node_name);
+        }
     }
 
     // adjust pvalues, create excluded_index list
     let mut excluded_index = Vec::new();
-    let qvalues = adjust(&raw_p_values, Procedure::BenjaminiHochberg);
-    for (qi, q_value) in qvalues.iter().enumerate(){
-        let test_index_value = &test_index[qi];
-        if q_value > &p_value_threshold{
-            excluded_index.push(test_index_value);
-            debug!("excluded_index: {:?}, q_value: {:?}", test_index_value, q_value);
+    println!("raw_p_values: {:?}", raw_p_values);
+    if ! raw_p_values.is_empty() {
+        let qvalues = adjust(&raw_p_values, Procedure::BenjaminiHochberg);
+        for (qi, q_value) in qvalues.iter().enumerate(){
+            let test_index_value = &test_index[qi];
+            if q_value > &p_value_threshold{
+                excluded_index.push(test_index_value);
+                debug!("excluded_index: {:?}, q_value: {:?}", test_index_value, q_value);
+            }
         }
     }
+
     bar.finish();
 
 

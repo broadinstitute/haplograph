@@ -144,7 +144,7 @@ pub fn assign_haplotype_reads(node_info: &HashMap<String, NodeInfo>, heterozygou
         }
         if haplotype_reads.is_empty() {
             for (index, node) in node_set.iter().enumerate() {
-                println!("node: {:?}, index: {:?}", node, index);
+                // println!("node: {:?}, index: {:?}", node, index);
                 let read_name_list = get_read_name_list(node_info, node.clone());
                 haplotype_reads.entry(index).or_insert(HashSet::new()).extend(read_name_list.clone());
              }
@@ -691,7 +691,7 @@ pub fn start(graph_filename: &PathBuf, germline_only:bool, haplotype_number: usi
     let (haplotype_reads, node_haplotype) = find_node_haplotype(&node_info, &edge_info, haplotype_number, het_fold_threshold);
     let all_paths = enumerate_all_paths_with_haplotype(&node_info, &edge_info, &node_haplotype, haplotype_number).expect("Failed to enumerate all paths");
     let allseq = construct_sequences_from_haplotype_path(&node_info, &all_paths);
-    println!("allseq: {:?}", allseq.iter().map(|(index, pathlist)| format!("index: {}, path num: {}", index, pathlist.len())).collect::<Vec<_>>().join("\n"));
+    // println!("allseq: {:?}", allseq.iter().map(|(index, pathlist)| format!("index: {}, path num: {}", index, pathlist.len())).collect::<Vec<_>>().join("\n"));
     let primary_haplotypes = find_full_range_haplotypes(&node_info, &node_haplotype, &allseq, haplotype_number);
     info!("All sequences constructed: {}", primary_haplotypes.len());
     // call methylation

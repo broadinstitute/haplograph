@@ -2,19 +2,24 @@ version 1.0
 
 workflow ConcatVCF {
     input {
-        Array[File] vcfs
+        File VcfFile_list
+        File TbiFile_list
+        String input_dir
         String prefix
         String output_dir
 
 
     }
+    Array[String] vcfs = read_lines(VcfFile_list)
+    Array[String] tbis = read_lines(TbiFile_list)
+
     call bcftools_concat {
         input:
             vcfs = vcfs,
+            vcf_tbis = tbis,
             prefix = prefix,
             output_dir = output_dir
     }
-
 
     output {
         File vcf = bcftools_concat.vcf
