@@ -674,6 +674,10 @@ pub fn construct_var_read_matrix(node_info: &HashMap<String, asm::NodeInfo>, ref
 
 pub fn start(graph_filename: &PathBuf, reference_seqs: &Vec<fastq::Record>, sampleid: &String, output_prefix: &String, haplotype_number: usize, het_fold_threshold: f64, sequencing_technology: &String) -> AnyhowResult<()> {
     let (node_info, edge_info) = asm::load_graph(graph_filename).unwrap();
+    if node_info.is_empty() {
+        warn!("No nodes found in the graph");
+        return Err(anyhow::anyhow!("No nodes found in the graph"));
+    }
     let coverage = find_coverage_from_gfa(graph_filename);
     let chromosome = node_info.keys().collect::<Vec<_>>().iter().next().unwrap().split(".").collect::<Vec<_>>()[1].split(":").collect::<Vec<_>>()[0].to_string();
     let ref_chromosome_seqs = reference_seqs.iter().find(|r| r.id().to_string() == chromosome).unwrap().clone();
