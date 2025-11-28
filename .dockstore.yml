@@ -1,0 +1,5 @@
+version: 1.2
+workflows:
+- name: Haplograph_eval_annotation
+  subclass: wdl
+  primaryDescriptorPath: /wdl/haplograph_eval_annotation.wdl
