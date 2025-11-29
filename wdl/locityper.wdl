@@ -11,7 +11,7 @@ workflow Locityper {
         String gcs_output_dir
         File gene_bed
     }
-    if ! ~{defined(count_file)} {
+    if (! defined(count_file)) {
         call Locityper_ref_construction {
             input:
                 reference_fa = reference_fa,
@@ -129,8 +129,8 @@ task Locityper_ref_construction {
     >>>
     runtime {
         preemptible: 0
-        memory: "8 GB"
-        cpu: "2"
+        memory: "64 GB"
+        cpu: "16"
         disks: "local-disk 100 HDD"
         docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/lr-locityper:latest"
     }
@@ -188,21 +188,26 @@ task Locityper_genotyping {
         locityper target -d db -r ~{reference_fa} -j ~{count_file} \
             -l ~{gene_name} ~{locus} ~{alleles_fasta}
 
+        mkdir -p bg/~{prefix}
+
         locityper preproc -a ~{align_bam} -r ~{reference_fa} -j ~{count_file} -o bg/~{prefix}
+
+        mkdir -p analysis/~{prefix}
 
         locityper genotype -a ~{align_bam} -d db -p bg/~{prefix} -o analysis/~{prefix}
 
         /usr/local/locityper/extra/into_csv.py \
             -i analysis/~{prefix}/* -o gts.csv
 
+        mkdir -p out-dir
         /usr/local/locityper/extra/into_fasta.py -i gts.csv -d db -o out-dir
 
 
     >>>
     runtime {
         preemptible: 0
-        memory: "8 GB"
-        cpu: "2"
+        memory: "64 GB"
+        cpu: "16"
         disks: "local-disk 100 HDD"
         docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/lr-locityper:latest"
     }
