@@ -6,7 +6,7 @@ workflow Haplograph_full_length {
         File whole_genome_bai
         File reference_fa
         File truth_vcf
-        File truth_vcf_index
+        File? truth_vcf_index
         String prefix
         String locus
         String truth_sample
@@ -42,40 +42,49 @@ workflow Haplograph_full_length {
                 input:
                     bam = CalculateCoverage.subsetbam,
                     bai = CalculateCoverage.subsetbai,
-                    samplename = sample_name,
                     reference_fa = reference_fa,
                     prefix = prefix + "_" + i,
-                    locus = region
+                    sample_id = prefix,
+                    locus = region,
+                    windowsize = 100
             }
         }
 
     }
 
-    call ligate_vcfs{
+    call ligate_vcfs as germline_ligate{
         input:
-            vcfs = select_all(haplograph.vcf_file),
+            vcfs = select_all(haplograph.germline_vcf_file),
             prefix = prefix + "_" + locus
     }
 
-    call Vcfdist {
+    call ligate_vcfs as somatic_ligate{
+        input:
+            vcfs = select_all(haplograph.somatic_vcf_file),
+            prefix = prefix + "_" + locus
+    }
+
+    call Vcfdist as VCFdist_germline {
         input:
             truth_sample = truth_sample,
             sample = prefix,
-            genename = locus,
-            coverage = coverage,
-            eval_vcf = ligate_vcfs.merged_vcf,
+            eval_vcf = germline_ligate.merged_vcf,
             truth_vcf = truth_vcf,
             locus = locus,
             reference_fasta = reference_fa,
+            coverage = coverage,
+            genename = locus,
+            extra_args = ""
     }
 
     
     output {
         Array[File?] asm_file = haplograph.asm_file
-        File vcf_file =  ligate_vcfs.merged_vcf
-        File vcf_index_file =  ligate_vcfs.merged_vcf_tbi
-        File precision_recall_summary = Vcfdist.precision_recall_summary_tsv
-        File phasing_summary = Vcfdist.phasing_summary_tsv
+        File germline_vcf_file =  germline_ligate.merged_vcf
+        File germline_vcf_index_file =  germline_ligate.merged_vcf_tbi
+        File somatic_vcf_file = somatic_ligate.merged_vcf
+        File somatic_vcf_index_file = somatic_ligate.merged_vcf_tbi
+        VcfdistOutputs vcf_summary = VCFdist_germline.outputs
 
     }
 }
@@ -86,36 +95,42 @@ task haplograph {
         File bai
         File reference_fa
         String prefix
-        String samplename
+        String sample_id
         String locus
         Int windowsize
         Int minimal_supported_reads
         Int fold_threshold
+        Float min_freq
         String extra_arg = ""
     }
 
     command <<<
-        set -uo pipefail
-        # Run haplograph - allow it to fail without stopping the task
+        set -euxo pipefail
         /haplograph/target/release/haplograph haplograph -a ~{bam} \
                                                         -r ~{reference_fa} \
-                                                        -s ~{samplename} \
+                                                        -s ~{sample_id} \
                                                         -o ~{prefix} \
                                                         -l ~{locus} \
-                                                        -w ~{windowsize} \
+                                                        -v ~{min_freq} \
                                                         -m ~{minimal_supported_reads} \
-                                                        -d gfa \
+                                                        -w ~{windowsize} \
+                                                        -f gfa \
+                                                        -c ~{fold_threshold}
                                                         ~{extra_arg}
+        
+        ls -l .
     >>>
 
     output {
         File graph_file = "~{prefix}.gfa"
         File asm_file = "~{prefix}.fasta"
-        File vcf_file = "~{prefix}.vcf.gz"
+        File germline_vcf_file = "~{prefix}.germline.vcf.gz"
+        File somatic_vcf_file = "~{prefix}.somatic.vcf.gz"
+        Array[File] methyl_bed = glob("*.bed")
     }
 
     runtime {
-        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograph:v2"
+        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograph:v3"
         memory: "16 GB"
         cpu: 4
         disks: "local-disk 100 SSD"
@@ -373,6 +388,18 @@ task ligate_vcfs {
 
 }
 
+struct VcfdistOutputs {
+    File summary_vcf
+    File precision_recall_summary_tsv
+    File precision_recall_tsv
+    File query_tsv
+    File truth_tsv
+    File phasing_summary_tsv
+    File switchflips_tsv
+    File superclusters_tsv
+    File phase_blocks_tsv
+}
+
 task Vcfdist {
     input {
         String truth_sample
@@ -380,33 +407,32 @@ task Vcfdist {
         String genename
         String coverage
         File eval_vcf
+        File? eval_vcf_index
         File truth_vcf
+        File? truth_vcf_index
         String locus
         File reference_fasta
         String? extra_args
         Int verbosity = 1
 
         Int disk_size_gb = ceil(size(truth_vcf, "GiB") + 10)
-        Int mem_gb = 32
-        Int cpu = 8
+        Int mem_gb = 16
+        Int cpu = 2
         Int preemptible = 1
     }
 
     command <<<
         set -euxo pipefail
-
         bcftools index -t ~{truth_vcf}
         bcftools view -s ~{truth_sample} -r ~{locus} ~{truth_vcf} -Oz -o ~{sample}.~{locus}.base.vcf.gz
         bcftools index -t ~{sample}.~{locus}.base.vcf.gz
 
         bcftools index -t ~{eval_vcf}
         bcftools filter -e 'INFO/SOMATIC=1' ~{eval_vcf} -Oz -o ~{sample}.filtered.query.vcf.gz
-        bcftools +fixploidy ~{sample}.filtered.query.vcf.gz -- -f 2 > ~{sample}.filtered.query.fixploidy.vcf
-        bcftools view ~{sample}.filtered.query.fixploidy.vcf -Oz -o ~{sample}.filtered.query.fixploidy.vcf.gz
-        bcftools index -t ~{sample}.filtered.query.fixploidy.vcf.gz
+        bcftools index -t ~{sample}.filtered.query.vcf.gz
 
         vcfdist \
-            ~{sample}.filtered.query.fixploidy.vcf.gz \
+            ~{sample}.filtered.query.vcf.gz \
             ~{sample}.~{locus}.base.vcf.gz \
             ~{reference_fasta} \
             -v ~{verbosity} \
@@ -417,13 +443,17 @@ task Vcfdist {
     >>>
 
     output {
-        File summary_vcf = "~{sample}.~{genename}.~{coverage}.summary.vcf"
-        File precision_recall_summary_tsv = "~{sample}.~{genename}.~{coverage}.precision-recall-summary.tsv"
-        File query_tsv = "~{sample}.~{genename}.~{coverage}.query.tsv"
-        File truth_tsv = "~{sample}.~{genename}.~{coverage}.truth.tsv"
-        File phasing_summary_tsv = "~{sample}.~{genename}.~{coverage}.phasing-summary.tsv"
-        File switchflips_tsv = "~{sample}.~{genename}.~{coverage}.switchflips.tsv"
-        File phase_blocks_tsv = "~{sample}.~{genename}.~{coverage}.phase-blocks.tsv"
+        VcfdistOutputs outputs = {
+            "summary_vcf": "~{sample}.~{genename}.~{coverage}.summary.vcf",
+            "precision_recall_summary_tsv": "~{sample}.~{genename}.~{coverage}.precision-recall-summary.tsv",
+            "precision_recall_tsv": "~{sample}.~{genename}.~{coverage}.precision-recall.tsv",
+            "query_tsv": "~{sample}.~{genename}.~{coverage}.query.tsv",
+            "truth_tsv": "~{sample}.~{genename}.~{coverage}.truth.tsv",
+            "phasing_summary_tsv": "~{sample}.~{genename}.~{coverage}.phasing-summary.tsv",
+            "switchflips_tsv": "~{sample}.~{genename}.~{coverage}.switchflips.tsv",
+            "superclusters_tsv": "~{sample}.~{genename}.~{coverage}.superclusters.tsv",
+            "phase_blocks_tsv": "~{sample}.~{genename}.~{coverage}.phase-blocks.tsv"
+        }
     }
 
     runtime {

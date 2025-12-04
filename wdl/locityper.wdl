@@ -52,8 +52,7 @@ workflow Locityper {
                 gene_name = gene_name,
                 locus = locus,
                 alleles_fasta = alleles_fasta,
-                align_bam = SubsetBam.output_bam,
-                align_bai = SubsetBam.output_bai,
+                read_fq = SubsetBam.output_fastq,
                 count_file = select_first([count_file, Locityper_ref_construction.output_count_file]),
                 prefix = prefix,
 
@@ -92,7 +91,7 @@ task SubsetBam {
 
         samtools view -bhX ~{whole_genome_bam} ~{whole_genome_bai} -L ~{bed_file} > ~{prefix}.bam
         samtools index ~{prefix}.bam
-        samtools fasta ~{prefix}.bam > ~{prefix}.fa
+        samtools fastq ~{prefix}.bam > ~{prefix}.fq
         
 
     >>>
@@ -106,7 +105,7 @@ task SubsetBam {
     output {
         File output_bam = "~{prefix}.bam"
         File output_bai = "~{prefix}.bam.bai"
-        File output_fasta = "~{prefix}.fa"
+        File output_fastq = "~{prefix}.fq"
     }
 }
 
@@ -175,10 +174,10 @@ task Locityper_genotyping {
         String gene_name
         String locus
         File alleles_fasta
-        File align_bam
-        File align_bai
+        File read_fq
         File count_file
         String prefix
+        Int threads = 8
     }
 
 
@@ -190,11 +189,20 @@ task Locityper_genotyping {
 
         mkdir -p bg/~{prefix}
 
-        locityper preproc -a ~{align_bam} -r ~{reference_fa} -j ~{count_file} -o bg/~{prefix}
+        locityper preproc -i ~{read_fq} \
+                          -r ~{reference_fa} \
+                          -@ ~{threads} \
+                          -j ~{count_file} \
+                          --technology hifi \
+                          -o bg/~{prefix}
 
         mkdir -p analysis/~{prefix}
 
-        locityper genotype -a ~{align_bam} -d db -p bg/~{prefix} -o analysis/~{prefix}
+        locityper genotype -i ~{read_fq} \
+                           -d db \
+                           -p bg/~{prefix} \
+                           -@ ~{threads} \
+                           -o analysis/~{prefix}
 
         /usr/local/locityper/extra/into_csv.py \
             -i analysis/~{prefix}/* -o gts.csv
