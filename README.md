@@ -44,7 +44,6 @@ Haplograph provides four main commands for different stages of haplotype analysi
 
 ### Quick-start
 ```bash
-# Basic haplotype extraction
 haplograph haplograph \
     --alignment-bam input.bam \
     --reference-fa reference.fa \
