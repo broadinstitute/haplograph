@@ -42,6 +42,17 @@ cargo install --path .
 
 Haplograph provides four main commands for different stages of haplotype analysis:
 
+### Quick-start
+```bash
+# Basic haplotype extraction
+haplograph haplograph \
+    --alignment-bam input.bam \
+    --reference-fa reference.fa \
+    --sampleid SAMPLE001 \
+    --locus chr6:29943661-29943700 \
+    --output-prefix output/HLA_A
+```
+
 ### 1. Haplotype Extraction
 
 Extract haplotypes from BAM files and build sequence graphs:
