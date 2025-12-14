@@ -55,7 +55,9 @@ pub fn gcs_authorize_data_access() {
         .to_string();
 
     // Set the environment variable
-    std::env::set_var("GCS_OAUTH_TOKEN", token);
+    unsafe {
+        std::env::set_var("GCS_OAUTH_TOKEN", token);
+    }
 }
 
 
@@ -476,7 +478,7 @@ pub fn permutation_test(
 
     // adjust pvalues, create excluded_index list
     let mut excluded_index = Vec::new();
-    println!("raw_p_values: {:?}", raw_p_values);
+    // println!("raw_p_values: {:?}", raw_p_values);
     if ! raw_p_values.is_empty() {
         let qvalues = adjust(&raw_p_values, Procedure::BenjaminiHochberg);
         for (qi, q_value) in qvalues.iter().enumerate(){
