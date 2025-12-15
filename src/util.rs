@@ -1,25 +1,23 @@
-use std::collections::{HashMap, HashSet};
-use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
-use url::Url;
-use rust_htslib::bam::{self, IndexedReader, Read as BamRead, record::Aux};
-use log::{info, warn, debug};
-use anyhow::{Result as AnyhowResult, Context};
+use adjustp::{adjust, Procedure};
+use anyhow::Result as AnyhowResult;
 use bio::alignment::pairwise::*;
 use bio::alignment::AlignmentOperation;
 use bio::io::fasta::Reader as FastaReader;
 use bio::io::fastq;
-use indicatif::{ProgressBar, ProgressStyle};
-use ndarray::{Array2, Array1};
+use flate2::read::GzDecoder;
+use indicatif::ProgressBar;
+use log::{debug, warn};
 use ndarray::s;
+use ndarray::{Array1, Array2};
 use rand::seq::SliceRandom;
 use rayon::prelude::*;
-use statrs::distribution::Normal;
+use rust_htslib::bam::{self, record::Aux, IndexedReader, Read as BamRead};
 use statrs::distribution::ContinuousCDF;
-use adjustp::{adjust, Procedure};
-use std::error::Error;
-
-
+use statrs::distribution::Normal;
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+use url::Url;
 
 pub fn gcs_gcloud_is_installed() -> bool {
     // Check if gcloud is installed on the PATH
@@ -60,7 +58,6 @@ pub fn gcs_authorize_data_access() {
     }
 }
 
-
 // Function to get a mapping between read group and sample name from a BAM header.
 pub fn get_rg_to_sm_mapping(bam: &IndexedReader) -> HashMap<String, String> {
     let header = bam::Header::from_template(bam.header());
@@ -76,7 +73,10 @@ pub fn get_rg_to_sm_mapping(bam: &IndexedReader) -> HashMap<String, String> {
     rg_sm_map
 }
 
-pub fn get_sm_name_from_rg(read: &bam::Record, rg_sm_map: &HashMap<String, String>) -> AnyhowResult<String> {
+pub fn get_sm_name_from_rg(
+    read: &bam::Record,
+    rg_sm_map: &HashMap<String, String>,
+) -> AnyhowResult<String> {
     let rg = read.aux(b"RG")?;
 
     if let Aux::String(v) = rg {
@@ -93,32 +93,35 @@ pub fn get_sm_name_from_rg(read: &bam::Record, rg_sm_map: &HashMap<String, Strin
     }
 }
 
-
 pub fn open_bam_file(alignment_bam: &String) -> IndexedReader {
     // Open BAM file
     if alignment_bam.starts_with("gs://") && std::env::var("GCS_OAUTH_TOKEN").is_err() {
         gcs_authorize_data_access();
     }
-    let mut bam = if alignment_bam.starts_with("gs://") {
-        let url = Url::parse(&alignment_bam).unwrap();
+    let bam = if alignment_bam.starts_with("gs://") {
+        let url = Url::parse(alignment_bam).unwrap();
         IndexedReader::from_url(&url).unwrap()
     } else {
-        IndexedReader::from_path(&alignment_bam).unwrap()
+        IndexedReader::from_path(alignment_bam).unwrap()
     };
-    
+
     debug!("Successfully opened BAM file");
 
     bam
 }
 
 pub fn get_chromosome_ref_seq(reference_fa: &String, chromosome: &str) -> Vec<fastq::Record> {
-    
-    
     debug!("Opening FASTA file: {}", reference_fa);
-    
-    // Open FASTA file
-    let mut fasta_reader = FastaReader::from_file(&reference_fa)
-        .expect("Failed to open FASTA file");
+
+    // Open FASTA file (supports both regular and gzipped files)
+    let file = File::open(reference_fa).expect("Failed to open FASTA file");
+    let reader: Box<dyn BufRead> = if reference_fa.ends_with(".gz") {
+        let gz_decoder = GzDecoder::new(file);
+        Box::new(BufReader::new(gz_decoder))
+    } else {
+        Box::new(BufReader::new(file))
+    };
+    let fasta_reader = FastaReader::new(reader);
 
     let mut reference_seqs = Vec::new();
 
@@ -129,36 +132,45 @@ pub fn get_chromosome_ref_seq(reference_fa: &String, chromosome: &str) -> Vec<fa
 
         // Check if this sequence matches the target chromosome
         if seq_id == chromosome {
-            debug!("Extracting region {} from chromosome {}", 
-                chromosome, seq_id);
+            debug!(
+                "Extracting region {} from chromosome {}",
+                chromosome, seq_id
+            );
             let chromosome_seq = sequence;
             let record_id = seq_id;
             let fastq_record = fastq::Record::with_attrs(
                 &record_id,
                 None,
                 chromosome_seq.as_bytes(),
-                vec![30; chromosome_seq.len()].as_slice() // Default quality score
+                vec![30; chromosome_seq.len()].as_slice(), // Default quality score
             );
             reference_seqs.push(fastq_record);
             debug!("Extracted reference sequence: {} bp", chromosome_seq.len());
-            
         }
     }
-    
+
     if reference_seqs.is_empty() {
-        warn!("No matching chromosome '{}' found in FASTA file", chromosome);
+        warn!(
+            "No matching chromosome '{}' found in FASTA file",
+            chromosome
+        );
     }
-    
+
     reference_seqs
 }
 
 pub fn get_all_ref_seq(reference_fa: &String) -> Vec<fastq::Record> {
-    
     debug!("Opening FASTA file: {}", reference_fa);
-    
-    // Open FASTA file
-    let mut fasta_reader = FastaReader::from_file(&reference_fa)
-        .expect("Failed to open FASTA file");
+
+    // Open FASTA file (supports both regular and gzipped files)
+    let file = File::open(reference_fa).expect("Failed to open FASTA file");
+    let reader: Box<dyn BufRead> = if reference_fa.ends_with(".gz") {
+        let gz_decoder = GzDecoder::new(file);
+        Box::new(BufReader::new(gz_decoder))
+    } else {
+        Box::new(BufReader::new(file))
+    };
+    let fasta_reader = FastaReader::new(reader);
 
     let mut reference_seqs = Vec::new();
 
@@ -171,29 +183,45 @@ pub fn get_all_ref_seq(reference_fa: &String) -> Vec<fastq::Record> {
             &seq_id,
             None,
             sequence.as_bytes(),
-            vec![30; sequence.len()].as_slice() // Default quality score
+            vec![30; sequence.len()].as_slice(), // Default quality score
         );
         reference_seqs.push(fastq_record);
         // info!("Extracted {} reference sequences", reference_seqs.len());
-            
-        
     }
-    
+
     reference_seqs
 }
 
-pub fn get_ref_seq_from_chromosome(reference_fa: &String, chromosome: &str) -> (Vec<fastq::Record>, Vec<fastq::Record>) {
+pub fn get_ref_seq_from_chromosome(
+    reference_fa: &String,
+    chromosome: &str,
+) -> (Vec<fastq::Record>, Vec<fastq::Record>) {
     let reference_seqs = get_all_ref_seq(reference_fa);
-    let reference_seqs_chromosome = reference_seqs.iter().filter(|r| r.id().to_string() == chromosome).map(|r| r.clone()).collect::<Vec<fastq::Record>>();
-    
+    let reference_seqs_chromosome = reference_seqs
+        .iter()
+        .filter(|r| r.id() == chromosome).cloned()
+        .collect::<Vec<fastq::Record>>();
+
     (reference_seqs, reference_seqs_chromosome)
 }
 
 pub fn split_locus(locus: String) -> (String, usize, usize) {
     let parts: Vec<&str> = locus.split(':').collect();
     let chromosome = parts[0].to_string();
-    let start: usize = parts[1].split("-").collect::<Vec<&str>>().first().unwrap().parse().unwrap();
-    let end: usize = parts[1].split("-").collect::<Vec<&str>>().last().unwrap().parse().unwrap();
+    let start: usize = parts[1]
+        .split("-")
+        .collect::<Vec<&str>>()
+        .first()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let end: usize = parts[1]
+        .split("-")
+        .collect::<Vec<&str>>()
+        .last()
+        .unwrap()
+        .parse()
+        .unwrap();
     (chromosome, start, end)
 }
 
@@ -245,19 +273,24 @@ pub fn gap_open_aligner(reference: &str, sequence: &str) -> String {
     let alignment = aligner.global(sequence.as_bytes(), reference.as_bytes());
 
     // Get the aligned sequences
-    let cigar = alignment_to_cigar(&alignment.operations);
+    
     // println!("{:?}", cigar);
 
-    cigar
+    alignment_to_cigar(&alignment.operations)
 }
 
 /// Find overlapping reads between two read vectors
 pub fn find_overlapping_reads(read_vector1: &[String], read_vector2: &[String]) -> Vec<String> {
-    let set1: std::collections::HashSet<String> = read_vector1.iter().map(|s| s.split('|').next().unwrap().to_string()).collect();
-    let set2: std::collections::HashSet<String> = read_vector2.iter().map(|s| s.split('|').next().unwrap().to_string()).collect();
-    
-    set1.intersection(&set2)
-        .map(|read_name| read_name.clone())
+    let set1: std::collections::HashSet<String> = read_vector1
+        .iter()
+        .map(|s| s.split('|').next().unwrap().to_string())
+        .collect();
+    let set2: std::collections::HashSet<String> = read_vector2
+        .iter()
+        .map(|s| s.split('|').next().unwrap().to_string())
+        .collect();
+
+    set1.intersection(&set2).cloned()
         .collect()
 }
 
@@ -268,14 +301,22 @@ pub fn import_bed(bed_file: &String) -> Vec<(String, usize, usize)> {
         let reader = BufReader::new(file);
         for line in reader.lines() {
             let line = line.unwrap();
-            bed_list.push((line.split('\t').next().unwrap().to_string(), line.split('\t').nth(1).unwrap().parse().unwrap(), line.split('\t').nth(2).unwrap().parse().unwrap()));
+            bed_list.push((
+                line.split('\t').next().unwrap().to_string(),
+                line.split('\t').nth(1).unwrap().parse().unwrap(),
+                line.split('\t').nth(2).unwrap().parse().unwrap(),
+            ));
         }
     } else {
-    let file = File::open(bed_file).unwrap();
-    let reader = BufReader::new(file);
-    for line in reader.lines() {
-        let line = line.unwrap();
-        bed_list.push((line.split('\t').next().unwrap().to_string(), line.split('\t').nth(1).unwrap().parse().unwrap(), line.split('\t').nth(2).unwrap().parse().unwrap()));
+        let file = File::open(bed_file).unwrap();
+        let reader = BufReader::new(file);
+        for line in reader.lines() {
+            let line = line.unwrap();
+            bed_list.push((
+                line.split('\t').next().unwrap().to_string(),
+                line.split('\t').nth(1).unwrap().parse().unwrap(),
+                line.split('\t').nth(2).unwrap().parse().unwrap(),
+            ));
         }
     }
     bed_list
@@ -284,7 +325,7 @@ pub fn import_bed(bed_file: &String) -> Vec<(String, usize, usize)> {
 pub fn process_cigar(cigar: &str) -> String {
     let mut out = String::new();
     let mut n = 0;
-    
+
     for symbol in cigar.chars() {
         if symbol.is_ascii_digit() {
             n = 10 * n + symbol.to_digit(10).unwrap() as usize;
@@ -297,7 +338,7 @@ pub fn process_cigar(cigar: &str) -> String {
             n = 0;
         }
     }
-    
+
     out
 }
 
@@ -305,14 +346,14 @@ pub fn combine_cigar(cigar: &str) -> String {
     if cigar.is_empty() {
         return String::new();
     }
-    
+
     // Convert to Vec<char> for efficient indexing
     let mut chars: Vec<char> = cigar.chars().collect();
     chars.push('$'); // Add sentinel character to handle the last group
-    
+
     let mut out = String::new();
     let mut start = 0;
-    
+
     for i in 1..chars.len() {
         if chars[i - 1] != chars[i] {
             let length = i - start;
@@ -320,17 +361,20 @@ pub fn combine_cigar(cigar: &str) -> String {
             start = i;
         }
     }
-    
+
     out
 }
 
-
 fn jaccard_distance(vector1: &[bool], vector2: &[bool]) -> f64 {
-    assert_eq!(vector1.len(), vector2.len(), "Vectors must have the same length");
-    
+    assert_eq!(
+        vector1.len(),
+        vector2.len(),
+        "Vectors must have the same length"
+    );
+
     let mut intersection_count = 0;
     let mut union_count = 0;
-    
+
     for (a, b) in vector1.iter().zip(vector2.iter()) {
         if *a && *b {
             intersection_count += 1;
@@ -339,79 +383,79 @@ fn jaccard_distance(vector1: &[bool], vector2: &[bool]) -> f64 {
             union_count += 1;
         }
     }
-    
+
     if union_count == 0 {
         return 0.0; // Both vectors are all zeros
     }
-    
+
     1.0 - (intersection_count as f64 / union_count as f64)
 }
 
 /// Generate a null distribution through permutation testing
 fn get_null_distribution(
     records: &Vec<String>,
-    matrix: &Array2<f64>, 
-    permutation_round: usize
+    matrix: &Array2<f64>,
+    permutation_round: usize,
 ) -> Vec<f64> {
-
     let bar = ProgressBar::new(permutation_round as u64);
-    let summary_statistics = (0..permutation_round).into_par_iter().flat_map(|_|  {
-        bar.inc(1);
-        let mut local_stats = Vec::new();
-        let mut rng = rand::rng();
+    let summary_statistics = (0..permutation_round)
+        .into_par_iter()
+        .flat_map(|_| {
+            bar.inc(1);
+            let mut local_stats = Vec::new();
+            let mut rng = rand::rng();
 
-        for (i, index) in records.iter().enumerate() {
-            let vector = matrix.slice(s![i, ..]);
-        
-            // Create a shuffled copy of the vector
-            let vector_data: Vec<f64> = vector.iter().copied().collect();
-            let mut shuffled_data = vector_data.clone();
-            shuffled_data.shuffle(&mut rng);
-            let shuffled = Array1::from(shuffled_data);
+            for (i, index) in records.iter().enumerate() {
+                let vector = matrix.slice(s![i, ..]);
 
-            let mut all_coefficients = Vec::new();
-            
-            for (j, other_index) in records.iter().enumerate() {
-                if index == other_index {
-                    continue;
+                // Create a shuffled copy of the vector
+                let vector_data: Vec<f64> = vector.iter().copied().collect();
+                let mut shuffled_data = vector_data.clone();
+                shuffled_data.shuffle(&mut rng);
+                let shuffled = Array1::from(shuffled_data);
+
+                let mut all_coefficients = Vec::new();
+
+                for (j, other_index) in records.iter().enumerate() {
+                    if index == other_index {
+                        continue;
+                    }
+
+                    let other_vector = matrix.slice(s![j, ..]);
+
+                    let binary_vector: Vec<bool> = shuffled.iter().map(|&x| x > 0.5).collect();
+                    let binary_other: Vec<bool> = other_vector.iter().map(|&x| x > 0.5).collect();
+
+                    // Calculate Jaccard distance
+                    let coor = (1.0 - jaccard_distance(&binary_vector, &binary_other)).abs();
+                    all_coefficients.push(coor);
                 }
 
-                let other_vector = matrix.slice(s![j, ..]);
-                
-                let binary_vector: Vec<bool> = shuffled.iter().map(|&x| x > 0.5).collect();
-                let binary_other: Vec<bool> = other_vector.iter().map(|&x| x > 0.5).collect();
-
-                // Calculate Jaccard distance
-                let coor = (1.0 - jaccard_distance(&binary_vector, &binary_other)).abs();
-                all_coefficients.push(coor);
+                local_stats.push(all_coefficients.iter().sum());
             }
-           
-            local_stats.push(all_coefficients.iter().sum());
-        }
-        local_stats
-    }).collect::<Vec<f64>>();
+            local_stats
+        })
+        .collect::<Vec<f64>>();
     bar.finish();
     summary_statistics
-    
 }
 
 /// Calculate statistics for observed data
 fn calculate_observation_statistics(
     recordlist: &Vec<String>,
     index: usize,
-    matrix: &Array2<f64>, 
+    matrix: &Array2<f64>,
 ) -> f64 {
-
     let vector = &matrix.slice(s![index, ..]);
     let mut all_coefficients = Vec::new();
-    
+
     for (i, other_index) in recordlist.iter().enumerate() {
         if i == index {
             continue;
         }
-        
-        let other_vector =&matrix.slice(s![i, ..]);
-        
+
+        let other_vector = &matrix.slice(s![i, ..]);
+
         // Convert arrays to binary vectors before calculating Jaccard distance
         let binary_vector: Vec<bool> = vector.iter().map(|&x| x > 0.5).collect();
         let binary_other: Vec<bool> = other_vector.iter().map(|&x| x > 0.5).collect();
@@ -420,26 +464,24 @@ fn calculate_observation_statistics(
         let coor = (1.0 - jaccard_distance(&binary_vector, &binary_other)).abs();
         all_coefficients.push(coor);
     }
-    
+
     all_coefficients.iter().sum()
 }
 
 /// Calculate p-value using z-score approach
 fn calculate_p_value(statistics: &[f64], observation: f64) -> f64 {
     let n = statistics.len() as f64;
-    
+
     // Calculate mean
     let mu = statistics.iter().sum::<f64>() / n;
-    
+
     // Calculate standard deviation
-    let variance = statistics.iter()
-        .map(|&x| (x - mu).powi(2))
-        .sum::<f64>() / n;
+    let variance = statistics.iter().map(|&x| (x - mu).powi(2)).sum::<f64>() / n;
     let sigma = variance.sqrt();
     // println!("{:?}, {}", statistics, observation);
-    
+
     let z_score = (observation - mu) / sigma;
-    
+
     // Calculate p-value using normal distribution CDF
     let normal = Normal::new(0.0, 1.0).unwrap();
     1.0 - normal.cdf(z_score)
@@ -450,27 +492,27 @@ pub fn permutation_test(
     p_value_threshold: f64,
     permutation_round: usize,
     node_list: Vec<String>,
-) -> (Vec<String>) {
-
+) -> Vec<String> {
     let bar = ProgressBar::new(node_list.len() as u64);
-    let statistics = get_null_distribution(&node_list, &matrix, permutation_round);
+    let statistics = get_null_distribution(&node_list, matrix, permutation_round);
     // Replace par_iter().enumerate() with this pattern
-    let (indices, collected_values): (Vec<_>, Vec<_>) = (0..node_list.len()).into_par_iter().map(|i| {
-        bar.inc(1);
-        let nodename = &node_list[i];
-        let observation = calculate_observation_statistics(&node_list, i, &matrix);
-        let p_value = calculate_p_value(&statistics, observation);
-        ((nodename.clone()), Some((p_value, nodename.clone())))
-
- 
-    }).unzip(); 
+    let (indices, collected_values): (Vec<_>, Vec<_>) = (0..node_list.len())
+        .into_par_iter()
+        .map(|i| {
+            bar.inc(1);
+            let nodename = &node_list[i];
+            let observation = calculate_observation_statistics(&node_list, i, matrix);
+            let p_value = calculate_p_value(&statistics, observation);
+            ((nodename.clone()), Some((p_value, nodename.clone())))
+        })
+        .unzip();
 
     let mut raw_p_values = Vec::new();
     let mut test_index = Vec::new();
 
     for item in collected_values.into_iter().flatten() {
         let (p_value, node_name) = item;
-        if ! p_value.is_nan() {
+        if !p_value.is_nan() {
             raw_p_values.push(p_value);
             test_index.push(node_name);
         }
@@ -479,31 +521,32 @@ pub fn permutation_test(
     // adjust pvalues, create excluded_index list
     let mut excluded_index = Vec::new();
     // println!("raw_p_values: {:?}", raw_p_values);
-    if ! raw_p_values.is_empty() {
+    if !raw_p_values.is_empty() {
         let qvalues = adjust(&raw_p_values, Procedure::BenjaminiHochberg);
-        for (qi, q_value) in qvalues.iter().enumerate(){
+        for (qi, q_value) in qvalues.iter().enumerate() {
             let test_index_value = &test_index[qi];
-            if q_value > &p_value_threshold{
+            if q_value > &p_value_threshold {
                 excluded_index.push(test_index_value);
-                debug!("excluded_index: {:?}, q_value: {:?}", test_index_value, q_value);
+                debug!(
+                    "excluded_index: {:?}, q_value: {:?}",
+                    test_index_value, q_value
+                );
             }
         }
     }
 
     bar.finish();
 
-
     // filter variants
     let mut index_list = Vec::new();
     let mut f_node: Vec<String> = Vec::new();
     // get index list and var_list
-    for (r, rindex) in node_list.iter().enumerate(){
-        if !excluded_index.contains(&rindex){
+    for (r, rindex) in node_list.iter().enumerate() {
+        if !excluded_index.contains(&rindex) {
             index_list.push(r);
             f_node.push(rindex.clone());
         }
     }
-    
-    (f_node)
-    
+
+    f_node
 }

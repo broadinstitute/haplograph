@@ -1,6 +1,6 @@
-use log::{info};
-use anyhow::{Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
+use log::info;
 use std::path::PathBuf;
 
 #[derive(Debug, Subcommand)]
@@ -11,7 +11,7 @@ enum DevToolsCommands {
         /// Input GFA file
         #[arg(short, long)]
         graph_gfa: PathBuf,
-        
+
         /// Output prefix
         #[arg(short, long, default_value = "haplograph_asm")]
         output_prefix: PathBuf,
@@ -29,8 +29,8 @@ enum DevToolsCommands {
         fold_threshold: f64,
 
         /// Verbose output
-       #[arg(short, long)]
-       verbose: bool,
+        #[arg(short, long)]
+        verbose: bool,
     },
 
     /// Call variants from GFA file
@@ -65,20 +65,20 @@ enum DevToolsCommands {
         detection_technology: String,
 
         /// Verbose output
-       #[arg(short, long)]
-       verbose: bool,
+        #[arg(short, long)]
+        verbose: bool,
     },
 }
 
-mod util;
-mod hap;
-mod intervals;
-mod graph;
 mod asm;
 mod call;
-mod methyl;
 mod eval;
 mod extract;
+mod graph;
+mod hap;
+mod intervals;
+mod methyl;
+mod util;
 
 #[derive(Parser)]
 #[command(name = "haplograph")]
@@ -87,23 +87,21 @@ mod extract;
 pub struct Cli {
     #[clap(subcommand)]
     command: Commands,
- 
 }
-
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Haplograph Analysis from BAM file for a continuous genomic region (usually a locus > 1kb) 
+    /// Haplograph Analysis from BAM file for a continuous genomic region (usually a locus > 1kb)
     #[clap(arg_required_else_help = true)]
     Haplograph {
         /// Input BAM file
         #[arg(short, long)]
         alignment_bam: String,
-   
+
         /// Input Reference FASTA file
         #[arg(short, long)]
         reference_fa: String,
-        
+
         /// Sample ID
         #[arg(short, long)]
         sampleid: String,
@@ -111,7 +109,7 @@ enum Commands {
         /// Output prefix
         #[arg(short, long, default_value = "./haplograph_")]
         output_prefix: String,
-       
+
         /// a continuous genomic region as String (chromo:start-end) or a bed file as String
         #[arg(short, long)]
         locus: String,
@@ -119,7 +117,7 @@ enum Commands {
         /// minimal variant allele frequency
         #[arg(short, long, default_value_t = 0.01)]
         var_frequency_min: f64,
-        
+
         /// Minimal Supported Reads
         #[arg(short, long, default_value_t = 2)]
         min_reads: u8,
@@ -127,14 +125,14 @@ enum Commands {
         ///window size
         #[arg(short, long, default_value_t = 100)]
         window_size: usize,
-   
+
         ///if only primary reads are used
         #[arg(short, long, default_value = "false")]
-        primary_only: bool, 
+        primary_only: bool,
 
         ///output file format, accepted fasta, gfa, vcf
         #[arg(short, long, default_value = "gfa")]
-        file_format: String, 
+        file_format: String,
 
         /// Haplotype number
         #[arg(short, long, default_value_t = 2)]
@@ -156,17 +154,17 @@ enum Commands {
         #[arg(long)]
         verbose: bool,
     },
-    /// Haplotype Analysis from BAM file for a set of genomic region (usually a locus < 1kb) 
+    /// Haplotype Analysis from BAM file for a set of genomic region (usually a locus < 1kb)
     #[clap(arg_required_else_help = true)]
     Haplointervals {
         /// Input BAM file
         #[arg(short, long)]
         alignment_bam: String,
-   
+
         /// Input ReferenceFASTA file
         #[arg(short, long)]
         reference_fa: String,
-        
+
         /// Sample ID
         #[arg(short, long)]
         sampleid: String,
@@ -174,7 +172,7 @@ enum Commands {
         /// Output prefix
         #[arg(short, long, default_value = "./haplograph_")]
         output_prefix: String,
-       
+
         /// a bed file containing the genomic regions to be analyzed
         #[arg(short, long)]
         bed_file: String,
@@ -182,7 +180,7 @@ enum Commands {
         /// minimal variant allele frequency
         #[arg(short, long, default_value_t = 0.01)]
         var_frequency_min: f64,
-        
+
         /// Minimal Supported Reads
         #[arg(short, long, default_value_t = 2)]
         min_reads: u8,
@@ -190,10 +188,10 @@ enum Commands {
         ///Maximalwindow size
         #[arg(short, long, default_value_t = 1000)]
         window_size: usize,
-   
+
         ///if only primary reads are used
         #[arg(short, long, default_value = "false")]
-        primary_only: bool, 
+        primary_only: bool,
 
         /// methylation likelihood threshold, default to 0.5
         #[arg(short, long, default_value_t = 0.5)]
@@ -253,7 +251,6 @@ enum Commands {
     /// Development tools
     #[clap(subcommand)]
     DevTools(DevToolsCommands),
-
 }
 
 fn main() -> Result<()> {
@@ -269,7 +266,7 @@ fn main() -> Result<()> {
             sampleid,
             // Output directory
             output_prefix,
-            // either locus as String (chromo:start-end) 
+            // either locus as String (chromo:start-end)
             locus,
             // Limited size of the region
             var_frequency_min,
@@ -278,9 +275,9 @@ fn main() -> Result<()> {
             //window size
             window_size,
             //if only primary reads are used
-            primary_only, 
+            primary_only,
             //output file format
-            file_format, 
+            file_format,
             // haplotype number
             number_of_haplotypes,
             // heterozygous coverage fold threshold, > 3.0 is not heterozygous,  the smaller the more strict
@@ -292,47 +289,87 @@ fn main() -> Result<()> {
             // Verbose output
             verbose,
         } => {
-                // Validate format
-                if file_format != "fasta" && file_format != "gfa" && file_format != "vcf" {
-                    anyhow::bail!("Format must be either 'fasta' or 'gfa' or 'vcf', got: {}", file_format);
-                }
+            // Validate format
+            if file_format != "fasta" && file_format != "gfa" && file_format != "vcf" {
+                anyhow::bail!(
+                    "Format must be either 'fasta' or 'gfa' or 'vcf', got: {}",
+                    file_format
+                );
+            }
 
-                // Initialize logging
-                env_logger::Builder::from_default_env()
-                    .filter_level(if verbose { log::LevelFilter::Debug } else { log::LevelFilter::Info })
-                    .init();
-
-                let (chromosome, start, end) = util::split_locus(locus.clone());
-                info!("Starting Haplograph analysis");
-                info!("Input BAM: {}", alignment_bam);
-                info!("Region: {}:{}-{}", chromosome, start, end);
-                info!("Locus size: {}", end - start);
-                info!("Minimal vaf : {}", var_frequency_min);
-                info!("Minimal supported reads: {}", min_reads);
-                info!("Maximal Window size: {}", window_size);
-                info!("Primary read only: {}", primary_only);
-
-                let (reference_seqs, reference_chromosome_seqs) = util::get_ref_seq_from_chromosome(&reference_fa, &chromosome);
-                // // Extract read sequences from BAM file using utility function
-                let mut windows = Vec::new();
-                for i in (start..end).step_by(window_size as usize) {
-                    let end_pos = std::cmp::min(i + window_size , end);
-                    windows.push((chromosome.clone(), i, end_pos));
-                }
-                if file_format == "gfa" {
-                    graph::start( &alignment_bam, &windows, &reference_chromosome_seqs, &sampleid, min_reads as usize, threshold_methyl_likelihood, var_frequency_min, primary_only, &output_prefix, number_of_haplotypes)?;
-        
+            // Initialize logging
+            env_logger::Builder::from_default_env()
+                .filter_level(if verbose {
+                    log::LevelFilter::Debug
                 } else {
-                    hap::start(&alignment_bam, &windows, &reference_chromosome_seqs, &sampleid, min_reads as usize, var_frequency_min, primary_only, &output_prefix, &file_format, threshold_methyl_likelihood)?;
-                } 
+                    log::LevelFilter::Info
+                })
+                .init();
 
-                let output_p = PathBuf::from(&output_prefix);
-                let graph_gfa = output_p.with_extension("gfa");
-                asm::start(&graph_gfa,  true, number_of_haplotypes,  &output_p, coverage_fold_threshold)?;                    
-                call::start(&graph_gfa, &reference_seqs, &sampleid, &output_prefix, number_of_haplotypes, coverage_fold_threshold, &detection_technology)?;
+            let (chromosome, start, end) = util::split_locus(locus.clone());
+            info!("Starting Haplograph analysis");
+            info!("Input BAM: {}", alignment_bam);
+            info!("Region: {}:{}-{}", chromosome, start, end);
+            info!("Locus size: {}", end - start);
+            info!("Minimal vaf : {}", var_frequency_min);
+            info!("Minimal supported reads: {}", min_reads);
+            info!("Maximal Window size: {}", window_size);
+            info!("Primary read only: {}", primary_only);
 
-            
+            let (reference_seqs, reference_chromosome_seqs) =
+                util::get_ref_seq_from_chromosome(&reference_fa, &chromosome);
+            // // Extract read sequences from BAM file using utility function
+            let mut windows = Vec::new();
+            for i in (start..end).step_by(window_size) {
+                let end_pos = std::cmp::min(i + window_size, end);
+                windows.push((chromosome.clone(), i, end_pos));
+            }
+            if file_format == "gfa" {
+                graph::start(
+                    &alignment_bam,
+                    &windows,
+                    &reference_chromosome_seqs,
+                    &sampleid,
+                    min_reads as usize,
+                    threshold_methyl_likelihood,
+                    var_frequency_min,
+                    primary_only,
+                    &output_prefix,
+                    number_of_haplotypes,
+                )?;
+            } else {
+                hap::start(
+                    &alignment_bam,
+                    &windows,
+                    &reference_chromosome_seqs,
+                    &sampleid,
+                    min_reads as usize,
+                    var_frequency_min,
+                    primary_only,
+                    &output_prefix,
+                    &file_format,
+                    threshold_methyl_likelihood,
+                )?;
+            }
 
+            let output_p = PathBuf::from(&output_prefix);
+            let graph_gfa = output_p.with_extension("gfa");
+            asm::start(
+                &graph_gfa,
+                true,
+                number_of_haplotypes,
+                &output_p,
+                coverage_fold_threshold,
+            )?;
+            call::start(
+                &graph_gfa,
+                &reference_seqs,
+                &sampleid,
+                &output_prefix,
+                number_of_haplotypes,
+                coverage_fold_threshold,
+                &detection_technology,
+            )?;
         }
         Commands::Haplointervals {
             // Input BAM file
@@ -352,7 +389,7 @@ fn main() -> Result<()> {
             //window size
             window_size,
             //if only primary reads are used
-            primary_only, 
+            primary_only,
             // methylation likelihood threshold, default to 0.5
             threshold_methyl_likelihood,
             // Sequencing technology, accepted hifi, nanopore
@@ -360,44 +397,60 @@ fn main() -> Result<()> {
             // Verbose output
             verbose,
         } => {
-                // Initialize logging
-                env_logger::Builder::from_default_env()
-                    .filter_level(if verbose { log::LevelFilter::Debug } else { log::LevelFilter::Info })
-                    .init();
+            // Initialize logging
+            env_logger::Builder::from_default_env()
+                .filter_level(if verbose {
+                    log::LevelFilter::Debug
+                } else {
+                    log::LevelFilter::Info
+                })
+                .init();
 
-                    
-                info!("Starting Haplograph analysis");
-                info!("Input BAM: {}", alignment_bam);
-                info!("Region in {}", bed_file);
-                info!("Minimal vaf : {}", var_frequency_min);
-                info!("Minimal supported reads: {}", min_reads);
-                info!("Maximal Window size: {}", window_size);
-                info!("Primary only: {}", primary_only);
-                info!("Output prefix: {}", output_prefix);
-                info!("Default output file format: {}", "vcf");
-                info!("Verbose: {}", verbose);
+            info!("Starting Haplograph analysis");
+            info!("Input BAM: {}", alignment_bam);
+            info!("Region in {}", bed_file);
+            info!("Minimal vaf : {}", var_frequency_min);
+            info!("Minimal supported reads: {}", min_reads);
+            info!("Maximal Window size: {}", window_size);
+            info!("Primary only: {}", primary_only);
+            info!("Output prefix: {}", output_prefix);
+            info!("Default output file format: {}", "vcf");
+            info!("Verbose: {}", verbose);
 
-                let reference_seqs = util::get_all_ref_seq(&reference_fa);
-                // // Extract read sequences from BAM file using utility function
-                let bed_list = util::import_bed(&bed_file);
-                let mut windows = Vec::new();
-                for (chromosome, start, end) in bed_list {
-                    if end - start > window_size {
-                        info!("Window size is too large, skipping region: {}:{}-{}", chromosome, start, end);
-                        continue;
-                    }else{
-                        for i in (start..end).step_by(window_size as usize) {
-                            let end_pos = std::cmp::min(i + window_size , end);
-                            windows.push((chromosome.clone(), i, end_pos));
-                        }
+            let reference_seqs = util::get_all_ref_seq(&reference_fa);
+            // // Extract read sequences from BAM file using utility function
+            let bed_list = util::import_bed(&bed_file);
+            let mut windows = Vec::new();
+            for (chromosome, start, end) in bed_list {
+                if end - start > window_size {
+                    info!(
+                        "Window size is too large, skipping region: {}:{}-{}",
+                        chromosome, start, end
+                    );
+                    continue;
+                } else {
+                    for i in (start..end).step_by(window_size) {
+                        let end_pos = std::cmp::min(i + window_size, end);
+                        windows.push((chromosome.clone(), i, end_pos));
                     }
                 }
-                windows.sort_by(|a, b| a.1.cmp(&b.1).then(a.2.cmp(&b.2)));
+            }
+            windows.sort_by(|a, b| a.1.cmp(&b.1).then(a.2.cmp(&b.2)));
 
-                hap::start( &alignment_bam.clone(), &windows, &reference_seqs, &sampleid, min_reads as usize, var_frequency_min, primary_only, &output_prefix, &"vcf".to_string(), threshold_methyl_likelihood)?;
+            hap::start(
+                &alignment_bam.clone(),
+                &windows,
+                &reference_seqs,
+                &sampleid,
+                min_reads as usize,
+                var_frequency_min,
+                primary_only,
+                &output_prefix,
+                &"vcf".to_string(),
+                threshold_methyl_likelihood,
+            )?;
         }
 
-        
         Commands::DevTools(dev_tools_cmd) => {
             match dev_tools_cmd {
                 DevToolsCommands::Assemble {
@@ -410,9 +463,19 @@ fn main() -> Result<()> {
                 } => {
                     // Initialize logging
                     env_logger::Builder::from_default_env()
-                        .filter_level(if verbose { log::LevelFilter::Debug } else { log::LevelFilter::Info })
+                        .filter_level(if verbose {
+                            log::LevelFilter::Debug
+                        } else {
+                            log::LevelFilter::Info
+                        })
                         .init();
-                    asm::start(&graph_gfa,  major_haplotype_only, number_of_haplotypes,  &output_prefix, fold_threshold)?;
+                    asm::start(
+                        &graph_gfa,
+                        major_haplotype_only,
+                        number_of_haplotypes,
+                        &output_prefix,
+                        fold_threshold,
+                    )?;
                 }
                 DevToolsCommands::Call {
                     gfa_file,
@@ -426,11 +489,23 @@ fn main() -> Result<()> {
                 } => {
                     // Initialize logging
                     env_logger::Builder::from_default_env()
-                        .filter_level(if verbose { log::LevelFilter::Debug } else { log::LevelFilter::Info })
+                        .filter_level(if verbose {
+                            log::LevelFilter::Debug
+                        } else {
+                            log::LevelFilter::Info
+                        })
                         .init();
 
                     let reference_seqs = util::get_all_ref_seq(&reference_fa);
-                    call::start(&gfa_file, &reference_seqs, &sampleid, &output_prefix, maximum_haplotypes, fold_threshold, &detection_technology)?;
+                    call::start(
+                        &gfa_file,
+                        &reference_seqs,
+                        &sampleid,
+                        &output_prefix,
+                        maximum_haplotypes,
+                        fold_threshold,
+                        &detection_technology,
+                    )?;
                 }
             }
         }
@@ -441,10 +516,13 @@ fn main() -> Result<()> {
             output_prefix,
             verbose,
         } => {
-
             // Initialize logging
             env_logger::Builder::from_default_env()
-                .filter_level(if verbose { log::LevelFilter::Debug } else { log::LevelFilter::Info })
+                .filter_level(if verbose {
+                    log::LevelFilter::Debug
+                } else {
+                    log::LevelFilter::Info
+                })
                 .init();
             eval::start(&truth_fasta, &query_fasta, seq_number, &output_prefix)?;
         }
@@ -456,11 +534,22 @@ fn main() -> Result<()> {
         } => {
             // Initialize logging
             env_logger::Builder::from_default_env()
-                .filter_level(if verbose { log::LevelFilter::Debug } else { log::LevelFilter::Info })
+                .filter_level(if verbose {
+                    log::LevelFilter::Debug
+                } else {
+                    log::LevelFilter::Info
+                })
                 .init();
             let (chromosome, start, end) = util::split_locus(locus.clone());
             let mut bam = util::open_bam_file(&bamfile);
-            extract::start(&mut bam, &chromosome, start, end, false, output_prefix.clone().to_string())?;
+            extract::start(
+                &mut bam,
+                &chromosome,
+                start,
+                end,
+                false,
+                output_prefix.clone().to_string(),
+            )?;
         }
     }
     Ok(())

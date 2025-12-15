@@ -1,20 +1,27 @@
-use log::{info, warn, debug};
-use anyhow::{Result as AnyhowResult, Context};
-use bio::io::fastq;
-use rust_htslib::bam::{self, IndexedReader, Read as BamRead, record::Aux};
-use rust_htslib::bcf::{self, index as BcfIndex, record::GenotypeAllele};
-use std::path::{PathBuf};
-use std::collections::{HashMap, BTreeMap, HashSet};
+use crate::intervals;
 use crate::methyl;
 use crate::util;
-use crate::intervals;
-use indicatif::{ProgressBar, ProgressStyle};
+use anyhow::{Context, Result as AnyhowResult};
+use bio::io::fastq;
+use log::{debug, info};
 use rayon::prelude::*;
+use rust_htslib::bam::Read as BamRead;
+use rust_htslib::bcf::{self};
+use std::path::PathBuf;
 
-
-
-pub fn start(bam_path: &String, windows: &Vec<(String, usize, usize)>,  reference_fa: &Vec<fastq::Record>, sampleid: &String, min_reads: usize, frequency_min: f64, primary_only: bool, output_prefix: &String, default_file_format: &String, methyl_threshold: f32) -> AnyhowResult<()> {
-    if default_file_format == "fasta" { 
+pub fn start(
+    bam_path: &String,
+    windows: &Vec<(String, usize, usize)>,
+    reference_fa: &Vec<fastq::Record>,
+    sampleid: &String,
+    min_reads: usize,
+    frequency_min: f64,
+    primary_only: bool,
+    output_prefix: &String,
+    default_file_format: &String,
+    methyl_threshold: f32,
+) -> AnyhowResult<()> {
+    if default_file_format == "fasta" {
         debug!("Processing {} windows in parallel", windows.len());
         let final_hap_list: Vec<_> = windows
             .par_iter()
@@ -23,32 +30,70 @@ pub fn start(bam_path: &String, windows: &Vec<(String, usize, usize)>,  referenc
                 // Create a new BAM reader for this thread
                 let mut bam = util::open_bam_file(bam_path);
                 // Process this window
-                intervals::start(&mut bam, &reference_fa, &chromosome, *start, *end, &sampleid, min_reads as usize, frequency_min, primary_only, false)
-                    .with_context(|| format!("Failed to process window {}:{}-{}", chromosome, start, end))
+                intervals::start(
+                    &mut bam,
+                    reference_fa,
+                    chromosome,
+                    *start,
+                    *end,
+                    sampleid,
+                    min_reads,
+                    frequency_min,
+                    primary_only,
+                    false,
+                )
+                .with_context(|| {
+                    format!("Failed to process window {}:{}-{}", chromosome, start, end)
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
     } else if default_file_format == "vcf" {
         let mut header = bcf::Header::new();
-        
+
         for record in reference_fa.iter() {
             let referencename = record.id().to_string();
             let referencelength = record.seq().len() as u64;
-            header.push_record(format!("##contig=<ID={},length={}>\n", referencename, referencelength).as_bytes());
+            header.push_record(
+                format!(
+                    "##contig=<ID={},length={}>\n",
+                    referencename, referencelength
+                )
+                .as_bytes(),
+            );
         }
         // header.push_record(format!("##INFO=<ID=SOMATIC,Number=0,Type=Flag,Description=\"Somatic mutation\">\n").as_bytes());
-        header.push_record(format!("##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Read Depth\">\n").as_bytes());
-        header.push_record(format!("##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n").as_bytes());
-        header.push_record(format!("##FORMAT=<ID=AD,Number=1,Type=Integer,Description=\"Alternative Allele Depth\">\n").as_bytes());
-        header.push_record(format!("##FORMAT=<ID=VAF,Number=1,Type=Float,Description=\"Variant Allele Frequency\">\n").as_bytes());
-        header.push_record(format!("##FORMAT=<ID=MOD,Number=1,Type=Float,Description=\"Modification Score\">\n").as_bytes());
+        header.push_record(
+            "##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Read Depth\">\n".to_string()
+                .as_bytes(),
+        );
+        header.push_record(
+            "##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n".to_string().as_bytes(),
+        );
+        header.push_record(
+            "##FORMAT=<ID=AD,Number=1,Type=Integer,Description=\"Alternative Allele Depth\">\n".to_string()
+            .as_bytes(),
+        );
+        header.push_record(
+            "##FORMAT=<ID=VAF,Number=1,Type=Float,Description=\"Variant Allele Frequency\">\n".to_string()
+            .as_bytes(),
+        );
+        header.push_record(
+            "##FORMAT=<ID=MOD,Number=1,Type=Float,Description=\"Modification Score\">\n".to_string()
+                .as_bytes(),
+        );
         header.push_sample(sampleid.as_bytes());
 
         let output_file = PathBuf::from(format!("{}.vcf.gz", output_prefix));
-        let mut writer = bcf::Writer::from_path(output_file.clone(), &header, false, bcf::Format::Vcf).expect("Failed to create BCF writer");
-    
+        let mut writer =
+            bcf::Writer::from_path(output_file.clone(), &header, false, bcf::Format::Vcf)
+                .expect("Failed to create BCF writer");
+
         for (i, window) in windows.iter().enumerate() {
-            let (chromosome,start, end) = window;
-            let referene_record= reference_fa.iter().find(|r| r.id().to_string() == *chromosome).unwrap();
+            let (chromosome, start, end) = window;
+            let referene_record = reference_fa
+                .iter()
+                .find(|r| r.id().to_string() == *chromosome)
+                .unwrap();
             let reference_sequence = String::from_utf8_lossy(referene_record.seq()).to_string();
             let reference_name = referene_record.id().to_string();
             let header_view = writer.header();
@@ -57,32 +102,82 @@ pub fn start(bam_path: &String, windows: &Vec<(String, usize, usize)>,  referenc
             let mut record = writer.empty_record();
             let reference_seq = reference_sequence[*start..*end].to_string();
             let mut bam = util::open_bam_file(&bam_path.clone());
-            let haplotype_info = intervals::start(&mut bam, &reference_fa, &chromosome, *start, *end, &sampleid, min_reads as usize, frequency_min, primary_only, false).unwrap();
+            let haplotype_info = intervals::start(
+                &mut bam,
+                reference_fa,
+                chromosome,
+                *start,
+                *end,
+                sampleid,
+                min_reads,
+                frequency_min,
+                primary_only,
+                false,
+            )
+            .unwrap();
             let mut record_list = Vec::new();
-            record_list.push((&reference_seq, &0.0, 0.0, 1 as usize));
+            record_list.push((&reference_seq, &0.0, 0.0, 1_usize));
             let mut coverage = 0;
             let mut haplotype_info_sorted = haplotype_info.iter().collect::<Vec<_>>();
-            haplotype_info_sorted.sort_by(|a, b| a.0.cmp(&b.0));
+            haplotype_info_sorted.sort_by(|a, b| a.0.cmp(b.0));
             for (hap, (cigar, reads, allele_frequency)) in haplotype_info_sorted.iter() {
                 coverage += reads.len();
-                let mod_score_dict = methyl::aggregate_methylation_reads(reads.clone(), methyl_threshold);
-                let average_mod_score = mod_score_dict.values().sum::<f32>() / mod_score_dict.len() as f32;
-                if **hap == reference_seq{
-                    continue
+                let mod_score_dict =
+                    methyl::aggregate_methylation_reads(reads.clone(), methyl_threshold);
+                let average_mod_score =
+                    mod_score_dict.values().sum::<f32>() / mod_score_dict.len() as f32;
+                if **hap == reference_seq {
+                    continue;
                 }
                 record_list.push((hap, allele_frequency, average_mod_score, reads.len()));
             }
             if record_list.len() <= 1 {
-                continue
+                continue;
             }
             record.set_rid(Some(reference_id as u32));
             record.set_pos(*start as i64);
             record.set_id(b".");
-            record.set_alleles(&record_list.iter().map(|v| v.0.as_bytes()).collect::<Vec<&[u8]>>()).expect("Failed to set alleles");
-            record.push_format_integer(b"DP", &[coverage as i32]).expect("Failed to set DP format field");
-            record.push_format_integer(b"AD", &record_list.iter().skip(1).map(|v| v.3 as i32).collect::<Vec<i32>>()).expect("Failed to set AD format field");
-            record.push_format_float(b"VAF", &record_list.iter().skip(1).map(|v| *v.1 as f32).collect::<Vec<f32>>()).expect("Failed to set VAF format field");
-            record.push_format_float(b"MOD", &record_list.iter().skip(1).map(|v| v.2 as f32).collect::<Vec<f32>>()).expect("Failed to set VAF format field");
+            record
+                .set_alleles(
+                    &record_list
+                        .iter()
+                        .map(|v| v.0.as_bytes())
+                        .collect::<Vec<&[u8]>>(),
+                )
+                .expect("Failed to set alleles");
+            record
+                .push_format_integer(b"DP", &[coverage as i32])
+                .expect("Failed to set DP format field");
+            record
+                .push_format_integer(
+                    b"AD",
+                    &record_list
+                        .iter()
+                        .skip(1)
+                        .map(|v| v.3 as i32)
+                        .collect::<Vec<i32>>(),
+                )
+                .expect("Failed to set AD format field");
+            record
+                .push_format_float(
+                    b"VAF",
+                    &record_list
+                        .iter()
+                        .skip(1)
+                        .map(|v| *v.1 as f32)
+                        .collect::<Vec<f32>>(),
+                )
+                .expect("Failed to set VAF format field");
+            record
+                .push_format_float(
+                    b"MOD",
+                    &record_list
+                        .iter()
+                        .skip(1)
+                        .map(|v| v.2)
+                        .collect::<Vec<f32>>(),
+                )
+                .expect("Failed to set VAF format field");
             writer.write(&record).expect("Failed to write record");
         }
     }

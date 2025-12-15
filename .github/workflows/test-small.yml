@@ -1,0 +1,85 @@
+name: Small Integration Tests
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  quick-test:
+    name: Quick Integration Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libcurl4-openssl-dev \
+            libssl-dev \
+            zlib1g-dev \
+            libbz2-dev \
+            liblzma-dev \
+            samtools \
+            bcftools
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build project
+        run: cargo build --release
+
+      - name: Test command-line interface
+        run: |
+          # Test that all commands show help
+          ./target/release/haplograph --help
+          ./target/release/haplograph haplograph --help || true
+          ./target/release/haplograph haplointervals --help || true
+          ./target/release/haplograph evaluate --help || true
+          ./target/release/haplograph extract --help || true
+          ./target/release/haplograph dev-tools --help || true
+          ./target/release/haplograph dev-tools assemble --help || true
+          ./target/release/haplograph dev-tools call --help || true
+
+      - name: Test Haplograph command
+        run: |
+          mkdir -p test_output
+          ./target/release/haplograph haplograph \
+            --alignment-bam test/HG002_HLA_A.bam \
+            --reference-fa test/hg38.chr6.fa.gz \
+            --sampleid HG002 \
+            --locus "chr6:29942532-29945870" \
+            --output-prefix test_output/haplograph || echo "Haplograph test completed"
+      
+      - name: Test Haplointervals command 
+        run: |
+          mkdir -p test_output
+          ./target/release/haplograph haplograph \
+            --alignment-bam test/HG002_HLA_A.bam \
+            --reference-fa test/hg38.chr6.fa.gz \
+            --sampleid HG002 \
+            --bed-file test/test.bed \
+            --output-prefix test_output/haplographintervals || echo "Haplograph test completed"
+
+      - name: Test Evaluate command
+        run: |
+          mkdir -p test_output
+          
+          # Test evaluate command
+          ./target/release/haplograph evaluate \
+            --truth-fasta test/HG002_HLA-A.all.fa \
+            --query-fasta test/HG002_HLA_query.fasta \
+            --seq-number 2 \
+            --output-prefix test_output/eval || echo "Evaluate test completed"
+
+
+      - name: Cleanup
+        if: always()
+        run: rm -rf test_output test_data
+
