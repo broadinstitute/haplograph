@@ -37,6 +37,10 @@ task bcftools_concat {
     command <<<
         set -euxo pipefail
 
+        # Set TMPDIR to current working directory to avoid /tmp write issues
+        export TMPDIR=$PWD
+        mkdir -p $TMPDIR
+
         # Index all input VCF files
         for vcf in ~{sep=' ' vcfs}; do
             bcftools index "$vcf"

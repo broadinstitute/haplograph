@@ -647,6 +647,10 @@ task concat_vcfs {
     command <<<
         set -euxo pipefail
 
+        # Set TMPDIR to current working directory to avoid /tmp write issues
+        export TMPDIR=$PWD
+        mkdir -p $TMPDIR
+
         for ff in ~{sep=' ' vcfs}; do bcftools index -t $ff; done
 
         bcftools concat \
