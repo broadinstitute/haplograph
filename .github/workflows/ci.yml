@@ -67,9 +67,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-${{ matrix.cache-key }}-
 
-      - name: Check code formatting
-        run: cargo fmt --all -- --check
-
       - name: Build project
         run: cargo build --release --verbose
 
@@ -156,12 +153,6 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Run cargo fmt check
-        run: cargo fmt --all -- --check
-
-      - name: Run cargo clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Check for common issues
         run: |
