@@ -9,12 +9,15 @@ Haplograph is designed for accurate haplotype or meplotype reconstruction and va
 ## Features
 
 - **Graph-based Haplotype Assembly**: Constructs sequence graphs from aligned reads
-- **Variant Calling**: Generates VCF files with phased variants
-- **Multiple Output Formats**: Supports both GFA (Graph Fragment Assembly), VCF and FASTA formats
+- **Variant Calling**: Generates VCF files with phased variants and methylation information
+- **Methylation Analysis**: Incorporates methylation signals for improved haplotype resolution
+- **Multiple Output Formats**: Supports GFA (Graph Fragment Assembly), VCF, and FASTA formats
 - **Germline Haplotype Filtering**: Focus on major haplotypes for cleaner results
 - **Read-based Phasing**: Uses read overlap information for accurate phasing
-- **Comprehensive Evaluation**: Compare results against truth sets
+- **Comprehensive Evaluation**: Compare results against truth sets with QV scoring
 - **Flexible Parameters**: Configurable window sizes, read support thresholds, and filtering options
+- **Multiple Analysis Modes**: Support for continuous regions (haplograph) and interval-based analysis (haplointervals)
+- **CI/CD Integration**: Automated testing and building with GitHub Actions
 
 ## Installation
 
@@ -40,7 +43,7 @@ cargo install --path .
 
 ## Usage
 
-Haplograph provides four main commands for different stages of haplotype analysis:
+Haplograph provides several commands for different stages of haplotype analysis:
 
 ### Quick-start
 ```bash
@@ -52,7 +55,9 @@ haplograph haplograph \
     --output-prefix output/HLA_A
 ```
 
-### 1. Haplotype Extraction
+### 1. Haplograph (Continuous Region Analysis)
+
+For analyzing continuous genomic regions (typically > 1kb):
 
 Extract haplotypes from BAM files and build sequence graphs:
 
@@ -85,24 +90,69 @@ haplograph haplograph \
 - `--reference-fa`: Reference FASTA file
 - `--sampleid`: Sample identifier
 - `--locus`: Genomic region (format: chr:start-end)
-- `--frequency-min`: Minimum allele frequency (default: 0.01)
+- `--var-frequency-min`: Minimum variant allele frequency (default: 0.01)
 - `--min-reads`: Minimum supporting reads (default: 2)
 - `--window-size`: Window size for analysis (default: 100)
 - `--primary-only`: Use only primary alignments
-- `--default-file-format`: Output format (fasta or gfa, default: gfa)
+- `--file-format`: Output format (fasta, gfa, or vcf, default: gfa)
+- `--number-of-haplotypes`: Number of haplotypes to extract (default: 2)
+- `--coverage-fold-threshold`: Heterozygous coverage fold threshold (default: 3.0)
+- `--threshold-methyl-likelihood`: Methylation likelihood threshold (default: 0.5)
+- `--detection-technology`: Sequencing technology: hifi or nanopore (default: hifi)
 
-### 2. Haplotype Assembly
+### 2. Haplointervals (Interval-based Analysis)
+
+For analyzing multiple genomic intervals from a BED file (typically < 1kb each):
+
+```bash
+haplograph haplointervals \
+    --alignment-bam input.bam \
+    --reference-fa reference.fa \
+    --sampleid SAMPLE001 \
+    --bed-file intervals.bed \
+    --output-prefix output/haplointervals
+```
+
+**Parameters:**
+- `--alignment-bam`: Input BAM file
+- `--reference-fa`: Reference FASTA file
+- `--sampleid`: Sample identifier
+- `--bed-file`: BED file containing genomic regions
+- `--var-frequency-min`: Minimum variant allele frequency (default: 0.01)
+- `--min-reads`: Minimum supporting reads (default: 2)
+- `--window-size`: Maximum window size (default: 1000)
+- `--primary-only`: Use only primary alignments
+- `--threshold-methyl-likelihood`: Methylation likelihood threshold (default: 0.5)
+- `--detection-technology`: Sequencing technology: hifi or nanopore (default: hifi)
+
+### 3. Extract Sequences
+
+Extract all sequences from a BAM file for a specific region:
+
+```bash
+haplograph extract \
+    --bamfile input.bam \
+    --locus chr6:29943661-29943700 \
+    --output-prefix output/extracted
+```
+
+**Parameters:**
+- `--bamfile`: Input BAM file
+- `--locus`: Genomic region (format: chr:start-end)
+- `--output-prefix`: Output prefix for FASTA file
+
+### 4. Haplotype Assembly (Dev Tools)
 
 Assemble haplotypes from GFA files:
 
 ```bash
 # Basic assembly
-haplograph assemble \
+haplograph dev-tools assemble \
     --graph-gfa output/HLA_A.gfa \
     --output-prefix output/HLA_A_asm
 
 # Germline-only assembly with specific haplotype count
-haplograph assemble \
+haplograph dev-tools assemble \
     --graph-gfa output/HLA_A.gfa \
     --major-haplotype-only \
     --number-of-haplotypes 2 \
@@ -112,30 +162,31 @@ haplograph assemble \
 
 **Parameters:**
 - `--graph-gfa`: Input GFA file
-- `--locus`: Genomic region
+- `--output-prefix`: Output prefix for assembled FASTA
 - `--major-haplotype-only`: Focus on major haplotypes only
 - `--number-of-haplotypes`: Number of haplotypes to extract (default: 2)
+- `--fold-threshold`: Heterozygous coverage fold threshold (default: 3.0)
 
-### 3. Variant Calling
+### 5. Variant Calling (Dev Tools)
 
 Call variants from assembled haplotypes:
 
 ```bash
 # Basic variant calling
-haplograph call \
+haplograph dev-tools call \
     --gfa-file output/HLA_A_asm.gfa \
     --sampleid SAMPLE001 \
     --reference-fa reference.fa \
-    --output-prefix output/HLA_A_variants \
-    --phase-variants
+    --output-prefix output/HLA_A_variants
 
-# With phasing
-haplograph call \
+# With specific parameters
+haplograph dev-tools call \
     --gfa-file output/HLA_A_asm.gfa \
     --sampleid SAMPLE001 \
     --reference-fa reference.fa \
-    --phase-variants \
     --maximum-haplotypes 2 \
+    --fold-threshold 3.0 \
+    --detection-technology hifi \
     --output-prefix output/HLA_A_variants \
     --verbose
 ```
@@ -144,12 +195,14 @@ haplograph call \
 - `--gfa-file`: Input GFA file from assembly
 - `--sampleid`: Sample identifier
 - `--reference-fa`: Reference FASTA file
-- `--phase-variants`: Enable variant phasing
+- `--output-prefix`: Output prefix for VCF file
 - `--maximum-haplotypes`: Maximum number of haplotypes (default: 2)
+- `--fold-threshold`: Heterozygous coverage fold threshold (default: 3.0)
+- `--detection-technology`: Sequencing technology: hifi or nanopore (default: hifi)
 
-### 4. Evaluation
+### 6. Evaluation
 
-Evaluate haplotype accuracy against truth sets:
+Evaluate haplotype accuracy against truth sets using QV (Quality Value) scoring:
 
 ```bash
 haplograph evaluate \
@@ -161,9 +214,10 @@ haplograph evaluate \
 ```
 
 **Parameters:**
-- `--truth-fasta`: Truth haplotype sequences
-- `--query-fasta`: Query haplotype sequences
+- `--truth-fasta`: Truth haplotype sequences (FASTA file)
+- `--query-fasta`: Query haplotype sequences (FASTA file)
 - `--seq-number`: Number of sequences to compare (default: 2)
+- `--output-prefix`: Output prefix for evaluation TSV file
 
 ## Complete Workflow Example
 
@@ -176,46 +230,51 @@ haplograph haplograph \
     --locus chr6:29943661-29943700 \
     --output-prefix output/HLA_A
 
-# 2. Assemble haplotypes
-haplograph assemble \
+# 2. Assemble haplotypes (optional, if using dev-tools)
+haplograph dev-tools assemble \
     --graph-gfa output/HLA_A.gfa \
     --major-haplotype-only \
     --number-of-haplotypes 2 \
     --output-prefix output/HLA_A_asm
 
-# 3. Call variants
-haplograph call \
+# 3. Call variants (optional, if using dev-tools)
+haplograph dev-tools call \
     --gfa-file output/HLA_A_asm.gfa \
     --sampleid HG002 \
     --reference-fa hg38.fa \
-    --phase-variants \
     --output-prefix output/HLA_A_variants
 
 # 4. Evaluate results (if truth available)
 haplograph evaluate \
     --truth-fasta truth_HLA_A.fasta \
     --query-fasta output/HLA_A_asm.fasta \
+    --seq-number 2 \
     --output-prefix output/evaluation
 ```
 
 ## Output Files
 
-### Haplotype Extraction
-- `{prefix}.gfa`: Sequence graph in GFA format
+### Haplograph/Haplointervals
+- `{prefix}.gfa`: Sequence graph in GFA format (default)
 - `{prefix}.fasta`: Haplotype sequences (if fasta format selected)
+- `{prefix}.vcf.gz`: Variant calls (if vcf format selected)
+- `{prefix}.vcf.gz.tbi`: Tabix index for VCF file
 
-### Assembly
+### Assembly (dev-tools)
 - `{prefix}.fasta`: Assembled haplotype sequences
 - Contains multiple haplotype sequences with support information
 
-### Variant Calling
+### Variant Calling (dev-tools)
 - `{prefix}.vcf.gz`: Compressed VCF file with called variants
 - `{prefix}.vcf.gz.tbi`: Tabix index for the VCF file
-- Includes phased variants with quality scores
+- Includes phased variants with quality scores, allele depths (AD), variant allele frequencies (VAF), and methylation scores (MOD)
+
+### Extract
+- `{prefix}.fasta`: Extracted sequences from BAM file for the specified region
 
 ### Evaluation
-- `{prefix}.tsv`: Evaluation metrics and accuracy scores
-- Detailed comparison between truth and query sequences
+- `{prefix}.tsv`: Evaluation metrics with QV (Quality Value) scores
+- Detailed comparison between truth and query sequences with optimal matching
 
 ## Project Structure
 
@@ -227,13 +286,23 @@ haplograph/
 │   ├── asm.rs              # Assembly and graph traversal
 │   ├── call.rs             # Variant calling and VCF generation
 │   ├── eval.rs             # Evaluation and comparison
+│   ├── extract.rs          # Sequence extraction from BAM
 │   ├── graph.rs            # Graph construction
-│   ├── hap.rs              # Haplotype extraction
+│   ├── hap.rs              # Haplotype extraction and VCF generation
 │   ├── intervals.rs        # Genomic interval processing
+│   ├── methyl.rs           # Methylation analysis
 │   └── util.rs             # Utility functions
+├── .github/
+│   └── workflows/          # GitHub Actions CI/CD workflows
+│       ├── ci.yml          # Continuous integration
+│       ├── test-small.yml  # Quick integration tests
+│       └── release.yml     # Release builds
 ├── wdl/                    # Workflow Definition Language files
+├── scripts/                # Utility scripts
+│   └── test-local.sh       # Local testing script
+├── test/                   # Test data and integration tests
 ├── example/                # Example data and scripts
-├── output/                 # Output directory (created during analysis)
+├── docker/                 # Dockerfiles for various tools
 └── README.md               # This file
 ```
 
@@ -252,6 +321,11 @@ haplograph/
 - **flate2**: Compression support
 - **regex**: Pattern matching
 - **csv**: CSV file processing
+- **minimap2**: Sequence alignment for evaluation
+- **itertools**: Iterator utilities
+- **intervals**: Genomic interval operations
+- **statrs**: Statistical functions
+- **adjustp**: Statistical adjustments
 
 ### Development Dependencies
 - **criterion**: Benchmarking
@@ -264,8 +338,12 @@ haplograph/
 
 **High-coverage data:**
 ```bash
-haplograph haplotype \
-    --frequency-min 0.01 \
+haplograph haplograph \
+    --alignment-bam input.bam \
+    --reference-fa reference.fa \
+    --sampleid SAMPLE001 \
+    --locus chr6:29943661-29943700 \
+    --var-frequency-min 0.01 \
     --min-reads 5 \
     --window-size 200 \
     --primary-only
@@ -273,19 +351,39 @@ haplograph haplotype \
 
 **Low-coverage data:**
 ```bash
-haplograph haplotype \
-    --frequency-min 0.05 \
+haplograph haplograph \
+    --alignment-bam input.bam \
+    --reference-fa reference.fa \
+    --sampleid SAMPLE001 \
+    --locus chr6:29943661-29943700 \
+    --var-frequency-min 0.05 \
     --min-reads 2 \
     --window-size 100
 ```
 
-**Complex regions (e.g., HLA):**
+**Complex regions with methylation (e.g., HLA):**
 ```bash
-haplograph haplotype \
-    --frequency-min 0.02 \
+haplograph haplograph \
+    --alignment-bam input.bam \
+    --reference-fa reference.fa \
+    --sampleid SAMPLE001 \
+    --locus chr6:29943661-29943700 \
+    --var-frequency-min 0.02 \
     --min-reads 2 \
     --window-size 100 \
-    --default-file-format gfa
+    --threshold-methyl-likelihood 0.5 \
+    --file-format gfa
+```
+
+**Nanopore sequencing:**
+```bash
+haplograph haplograph \
+    --alignment-bam input.bam \
+    --reference-fa reference.fa \
+    --sampleid SAMPLE001 \
+    --locus chr6:29943661-29943700 \
+    --detection-technology nanopore \
+    --threshold-methyl-likelihood 0.5
 ```
 
 ## Troubleshooting
@@ -295,19 +393,27 @@ haplograph haplotype \
 1. **Memory usage**: For large regions, consider reducing window size
 2. **No variants called**: Check read coverage and adjust frequency thresholds
 3. **Graph assembly fails**: Ensure sufficient read overlap and adjust parameters
+4. **Methylation data not found**: Ensure BAM file contains base modification tags (MM/ML)
+5. **TMPDIR write errors**: Set `TMPDIR` environment variable to a writable directory (see WDL workflows)
 
 ### Performance Tips
 
 - Use `--primary-only` for faster processing
 - Adjust `--window-size` based on region complexity
-- Use appropriate `--frequency-min` for your data type
+- Use appropriate `--var-frequency-min` for your data type
+- For interval-based analysis, use `haplointervals` instead of `haplograph`
+- Consider using WDL workflows for large-scale batch processing
 
 ## Development
 
 ### Running Tests
 ```bash
+# Unit tests
 cargo test
 cargo test -- --nocapture  # With output
+
+# Local integration tests
+./scripts/test-local.sh
 ```
 
 ### Building Documentation
@@ -317,9 +423,31 @@ cargo doc --open
 
 ### Code Quality
 ```bash
-cargo fmt
-cargo clippy
+# Format code
+cargo fmt --all
+
+# Lint code
+cargo clippy --all-targets --all-features -- -D warnings
+
+# Build release
+cargo build --release
 ```
+
+### Continuous Integration
+
+This project uses GitHub Actions for automated testing and building:
+
+- **CI Workflow**: Runs on every push/PR to main/master/develop branches
+  - Code formatting checks
+  - Linting with clippy
+  - Build verification
+  - Integration tests
+
+- **Test Workflow**: Quick integration tests for fast feedback
+
+- **Release Workflow**: Builds release binaries for Linux, macOS, and Windows
+
+See `.github/workflows/README.md` for more details.
 
 ## Citation
 
@@ -335,6 +463,17 @@ https://github.com/broadinstitute/haplograph
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
+## WDL Workflows
+
+The repository includes WDL (Workflow Definition Language) files in the `wdl/` directory for running haplograph in cloud environments (e.g., Terra, Cromwell). These workflows handle:
+
+- Batch processing of multiple samples
+- Parallel execution across intervals
+- Automatic resource management
+- Integration with other bioinformatics tools
+
+See the `wdl/` directory for available workflows.
+
 ## Support
 
-For questions and support, please open an issue on the GitHub repository or contact the maintainers.
+For questions and support, please open an issue on the [GitHub repository](https://github.com/broadinstitute/haplograph) or contact the maintainers.

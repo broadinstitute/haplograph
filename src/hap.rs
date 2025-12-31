@@ -115,8 +115,8 @@ pub fn start(
                 false,
             )
             .unwrap();
-            let mut record_list = Vec::new();
-            record_list.push((&reference_seq, &0.0, 0.0, 1_usize));
+            let mut alt_record_list = Vec::new();
+            let mut ref_record_list = Vec::new();
             let mut coverage = 0;
             let mut haplotype_info_sorted = haplotype_info.iter().collect::<Vec<_>>();
             haplotype_info_sorted.sort_by(|a, b| a.0.cmp(b.0));
@@ -127,13 +127,17 @@ pub fn start(
                 let average_mod_score =
                     mod_score_dict.values().sum::<f32>() / mod_score_dict.len() as f32;
                 if **hap == reference_seq {
+                    ref_record_list.push((hap, allele_frequency, average_mod_score, reads.len()));
                     continue;
                 }
-                record_list.push((hap, allele_frequency, average_mod_score, reads.len()));
+                alt_record_list.push((hap, allele_frequency, average_mod_score, reads.len()));
             }
-            if record_list.len() <= 1 {
+            if alt_record_list.len() <= 1 {
                 continue;
             }
+            let mut record_list = ref_record_list;
+            record_list.extend(alt_record_list); // first element is the reference record
+
             record.set_rid(Some(reference_id as u32));
             record.set_pos(*start as i64);
             record.set_id(b".");
@@ -153,7 +157,6 @@ pub fn start(
                     b"AD",
                     &record_list
                         .iter()
-                        .skip(1)
                         .map(|v| v.3 as i32)
                         .collect::<Vec<i32>>(),
                 )
@@ -163,7 +166,6 @@ pub fn start(
                     b"VAF",
                     &record_list
                         .iter()
-                        .skip(1)
                         .map(|v| *v.1 as f32)
                         .collect::<Vec<f32>>(),
                 )
@@ -173,7 +175,6 @@ pub fn start(
                     b"MOD",
                     &record_list
                         .iter()
-                        .skip(1)
                         .map(|v| v.2)
                         .collect::<Vec<f32>>(),
                 )
