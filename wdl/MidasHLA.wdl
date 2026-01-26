@@ -1,6 +1,6 @@
 version 1.0
 
-workflow MidasHLA{
+workflow MidasHLA_v1{
     meta{
         description: "a workflow for HLA association using MidasHLA"
     }
@@ -183,6 +183,7 @@ task PreprocessFiles {
             for c in columns:
                 df_allele_experiment[c] = df_allele_experiment[c].str.replace('HLA-', '', regex=False)
             df_allele_experiment_filtered = filter_inconsistent_calls(df_allele_experiment)
+            df_allele_experiment_filtered = df_allele_experiment_filtered.dropna(axis=1, how='all')
             df_allele_experiment_filtered.to_csv("%s.hla.csv" % phecode, index=True)
 
 
@@ -316,6 +317,57 @@ task RunMidasHLA {
             names(df_reordered) = c("ID", "KIR3DL3", "KIR2DS2", "KIR2DL2", "KIR2DL3", "KIR2DP1", "KIR2DL1", "KIR3DP1", "KIR2DL4", "KIR3DL1", "KIR3DS1", "KIR2DL5", "KIR2DS3", "KIR2DS5", "KIR2DS4", "KIR2DS1", "KIR3DL2")
             write.table(df_reordered, paste(kir_file, ".tsv"), sep = "\t", row.names = TRUE, col.names = TRUE, quote = FALSE)
             kir_calls <- readKirCalls(paste(kir_file, ".tsv"))
+            
+            # determine covariates (sex specific phenotypes)
+            if ("sex_at_birth" %in% names(pheno)) {
+              sex_values <- pheno$sex_at_birth[!is.na(pheno$sex_at_birth)]
+              unique_sex <- unique(sex_values)
+              if (length(unique_sex) < 2) {
+                cat("Warning: sex_at_birth has no variation (all values are:", paste(unique_sex, collapse = ", "), ")\n")
+                cat("Removing sex_at_birth from the model formula to avoid GLM errors.\n")
+                # Create a flag to exclude sex from formulas
+                exclude_sex <- TRUE
+              } else {
+                cat("sex_at_birth has variation:", paste(unique_sex, collapse = ", "), "\n")
+                exclude_sex <- FALSE
+              }
+            } else {
+              cat("Warning: sex_at_birth column not found in phenotype data.\n")
+              exclude_sex <- TRUE
+            }
+
+            if ("age" %in% names(pheno)) {
+              age_values <- pheno$age[!is.na(pheno$age)]
+              unique_age <- unique(age_values)
+              if (length(unique_age) < 2) {
+                cat("Warning: age has no variation (all values are:", paste(unique_age, collapse = ", "), ")\n")
+                cat("Removing age from the model formula to avoid GLM errors.\n")
+                # Create a flag to exclude sex from formulas
+                exclude_age <- TRUE
+              } else {
+                cat("age has variation:", paste(unique_age, collapse = ", "), "\n")
+                exclude_age <- FALSE
+              }
+            } else {
+              cat("Warning: age column not found in phenotype data.\n")
+              exclude_age <- TRUE
+            }
+
+
+            # Build covariate list (exclude sex_at_birth if no variation)
+            covariates <- c("age", "PC1", "PC2", "PC3", "PC4", "PC5", "term")
+            if (!exclude_sex && !exclude_age) {
+              covariates <- c("age", "sex_at_birth", "PC1", "PC2", "PC3", "PC4", "PC5", "term")
+            }else if (exclude_sex) {
+              covariates <- c("age", "PC1", "PC2", "PC3", "PC4", "PC5", "term")
+            }else if (exclude_age){
+              covariates <- c("sex_at_birth","PC1", "PC2", "PC3", "PC4", "PC5", "term")
+            }else {
+              covariates <- c("PC1", "PC2", "PC3", "PC4", "PC5", "term")
+            
+            }
+            print(covariates)
+
 
             # hla association
             HLA <- prepareMiDAS(
@@ -324,7 +376,7 @@ task RunMidasHLA {
             experiment = "hla_alleles"
             )
 
-            HLA_model <- glm(reformulate(c("age", "sex_at_birth", "PC1", "PC2", "PC3", "PC4", "PC5", "term"), response = phecode), 
+            HLA_model <- glm(reformulate(covariates, response = phecode), 
                             data = HLA, family = binomial())
             HLA_results <- runMiDAS(
             object = HLA_model, 
@@ -341,26 +393,41 @@ task RunMidasHLA {
 
             # hla - aa association
             # AA fine mapping
-            HLA_AA <- prepareMiDAS(
-            hla_calls = dat_HLA,
-            colData = pheno,
-            experiment = "hla_aa"
-            )
-            HLA_AA_model <- glm(reformulate(c("age", "sex_at_birth", "PC1", "PC2", "PC3", "PC4", "PC5", "term"), response = phecode), 
-                                data = HLA_AA, family = binomial())
-            HLA_AA_omnibus_results <- runMiDAS(
-            HLA_AA_model,
-            experiment = "hla_aa",
-            inheritance_model = "dominant",
-            conditional = FALSE,
-            omnibus = TRUE,
-            lower_frequency_cutoff = 0.01,
-            upper_frequency_cutoff = 0.99,
-            correction = "bonferroni"
-            )
+            HLA_AA <- tryCatch({
+              prepareMiDAS(
+                hla_calls = dat_HLA,
+                colData = pheno,
+                experiment = "hla_aa"
+              )
+            }, error = function(e) {
+              cat("Error creating HLA_AA object:", e$message, "\n")
+              return(NULL)
+            })
 
-            aa_filename = paste(phecode, ".", samplenum, ".hla_aa.csv", sep = "")
-            write.csv(HLA_AA_omnibus_results, file = aa_filename, row.names = FALSE)
+            # Only proceed if HLA_AA was successfully created
+            if (!is.null(HLA_AA) && (inherits(HLA_AA, "SummarizedExperiment") || is.data.frame(HLA_AA) || is.matrix(HLA_AA))) {
+              cat("HLA_AA object successfully created. Proceeding with analysis.\n")
+              HLA_AA_model <- glm(reformulate(covariates, response = phecode), 
+                                  data = HLA_AA, family = binomial())
+              HLA_AA_omnibus_results <- runMiDAS(
+                HLA_AA_model,
+                experiment = "hla_aa",
+                inheritance_model = "dominant",
+                conditional = FALSE,
+                omnibus = TRUE,
+                lower_frequency_cutoff = 0.01,
+                upper_frequency_cutoff = 0.99,
+                correction = "bonferroni"
+              )
+              aa_filename = paste(phecode, ".", samplenum, ".hla_aa.csv", sep = "")
+              write.csv(HLA_AA_omnibus_results, file = aa_filename, row.names = FALSE)
+            } else {
+              cat("Warning: HLA_AA object creation failed or returned invalid object. Skipping HLA-AA analysis.\n")
+              aa_filename = paste(phecode, ".", samplenum, ".hla_aa.csv", sep = "")
+              write.csv(data.frame(message = "HLA-AA analysis skipped - prepareMiDAS failed"), 
+                        file = aa_filename, row.names = FALSE)
+            }
+
 
             # KIR gene association
             midas <- prepareMiDAS(
@@ -369,7 +436,7 @@ task RunMidasHLA {
             colData = pheno,
             experiment = c("hla_NK_ligands","kir_genes", "hla_kir_interactions")
             )
-            KIR_model <- glm(reformulate(c("age", "sex_at_birth", "PC1", "PC2", "PC3", "PC4", "PC5", "term"), response = phecode), 
+            KIR_model <- glm(reformulate(covariates, response = phecode), 
                             data = midas, family = binomial())
             KIR_results <- runMiDAS(
             KIR_model,
