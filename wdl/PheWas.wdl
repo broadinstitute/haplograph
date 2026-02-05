@@ -42,7 +42,6 @@ workflow PheWAS{
     }
 }
 
-
 struct RuntimeAttr {
     Float? mem_gb
     Int? cpu_cores
@@ -158,9 +157,7 @@ task PlotResults {
 
         pip install adjustText
 
-        python - --phewas_results ~{phewas_results} \
-                --phecodex_info ~{phecodex_info} \
-                <<-'EOF'
+        python - --phewas_results ~{phewas_results}                 --phecodex_info ~{phecodex_info}                 <<-'EOF'
         import os
         import pandas as pd
         import subprocess
