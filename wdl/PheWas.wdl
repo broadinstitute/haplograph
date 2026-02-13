@@ -9,36 +9,36 @@ workflow PheWAS{
         File phenotype_file
         File meta_data_file
         File phecodex_description
-        String haplotype
 
         String memory = "8G"
         Int cpu = 2
-        String disk_size = "local-disk 50 HDD"
+        Int disk_size = 50
         Int preemptible = 1
 
     }
 
-
-    call RunPheWAS {input:
-        genotype_file = genotype_file,
-        phenotype_file = phenotype_file,
+    call PreProcessFile{input:
         meta_data_file = meta_data_file,
-        haplotype = haplotype,
-        memory = memory,
-        cpu = cpu,
-        disk = disk_size,
-        preemptible = preemptible
-    }
-
-    call PlotResults{input:
-        phewas_results = select_first(RunPheWAS.outputfiles),
-        phecodex_info = phecodex_description,
+        phecodex_info = phenotype_file,
+        genotype_info = genotype_file,
         disk_size = disk_size
     }
 
+    scatter (haplotype in PreProcessFile.haplotype_list) {
+        call RunPheWAS {input:
+            genotype_file = PreProcessFile.genotype_file,
+            phenotype_file = PreProcessFile.phenotype_file,
+            meta_data_file = PreProcessFile.metadata_file,
+            haplotype = haplotype,
+            memory = memory,
+            cpu = cpu,
+            disk_size = disk_size,
+            preemptible = preemptible
+        }        
+    }
+    
     output {
-        Array[File] PheWas_results = RunPheWAS.outputfiles
-        Array[File] figures = PlotResults.outputfiles
+        Array[File] PheWas_results = flatten(RunPheWAS.outputfiles)
     }
 }
 
@@ -52,6 +52,137 @@ struct RuntimeAttr {
     String? docker
 }
 
+task PreProcessFile {
+    input {
+        File meta_data_file
+        File phecodex_info
+        File genotype_info
+        Int disk_size
+        Int minimal_case_num = 20
+
+        RuntimeAttr? runtime_attr_override
+
+    }
+
+    command <<<
+        set -euxo pipefail
+
+        python - --phecodex ~{phecodex_info} \
+                --genotype ~{genotype_info} \
+                --metadata ~{meta_data_file} \
+                --case_num ~{minimal_case_num} \
+                <<-'EOF'
+        import os
+        import pandas as pd
+        import subprocess
+        import numpy
+        from datetime import date
+        import argparse
+
+
+        def main():
+            parser = argparse.ArgumentParser()
+
+            parser.add_argument('--phecodex',
+                                type=str)
+            parser.add_argument('--genotype',
+                                type=str)
+            parser.add_argument('--metadata',
+                                type=str)
+            parser.add_argument('--case_num',
+                    type=int)
+
+            args = parser.parse_args()
+
+            # load metadata info
+            df_meta = pd.read_csv(args.metadata, sep = ",", header=0, dtype=str)
+            print(df_meta.head())
+            
+            # load genotypes
+            df_genotype = pd.read_csv(args.genotype, index_col = 0, dtype=str)
+            df_genotype.index = df_genotype.index.astype(str)
+            print(df_genotype.head())
+
+            # load phecodex
+            filter_pheno_df = pd.read_csv(args.phecodex, header=0, index_col=0, dtype=str)
+            # replace TRUE, FALSE with 1 and 0
+            replacement_map = {'True': 1, 'False': 0, "FALSE": 0, "TRUE": 1, "NaN": numpy.nan}
+
+            # Replace the strings with numbers
+            filter_pheno_df = filter_pheno_df.replace(replacement_map)
+
+            # metadata filtering
+            df_meta = df_meta[['person_id', 'age', 'PC1', 'PC2', 'PC3', 'PC4', 'PC5', 'sex_at_birth']].drop_duplicates()
+            indexlist = set(filter_pheno_df['person_id'].astype(str).tolist()) & set(df_meta['person_id'].astype(str).tolist()) & set(df_genotype.index.astype(str).tolist())
+
+            print(len(indexlist))
+            indexlist = sorted(indexlist)
+            df_meta = df_meta.loc[df_meta['person_id'].isin(indexlist), :]
+            df_meta = df_meta.set_index("person_id")
+            filter_pheno_df = filter_pheno_df.loc[filter_pheno_df['person_id'].isin(indexlist), :]
+            filter_pheno_df = filter_pheno_df.set_index("person_id")
+            df_genotype = df_genotype.loc[indexlist, :]
+            df_genotype['person_id'] = df_genotype.index.tolist()
+
+            # filter phecodex data given selected cohort
+            col_sums = filter_pheno_df.astype(float).sum(axis = 0)
+            condition = col_sums > args.case_num
+            filter_pheno_df = filter_pheno_df.loc[:,condition]
+
+            df_pheno_new = filter_pheno_df.astype(float) > 0.5
+
+            replacement_map_sex = {'PMI: Skip': numpy.nan, 
+                   'Sex At Birth: Sex At Birth None Of These': numpy.nan, 
+                   'I prefer not to answer':numpy.nan,
+                   'Intersex' : numpy.nan
+                  }
+            df_meta = df_meta.replace(replacement_map_sex)
+
+            df_genotype.astype(float).to_csv("genotypes.csv", index = True)
+            df_pheno_new.to_csv("phenotypes.csv", index=True)
+            df_meta.to_csv("metadata.csv", index=True)
+
+            with open("haplotypelist.txt", 'w') as fp:
+                for item in df_genotype.columns.tolist():
+                    fp.writelines(item + "\n")
+
+        if __name__ == "__main__":
+            main()
+
+        EOF
+
+    >>>
+
+    output {
+        File genotype_file = "genotypes.csv"
+        File phenotype_file = "phenotypes.csv"
+        File metadata_file = "metadata.csv"
+        Array[String] haplotype_list = read_lines("haplotypelist.txt")
+        
+    }
+
+    #########################
+    RuntimeAttr default_attr = object {
+        cpu_cores:          1,
+        mem_gb:             4,
+        disk_gb:            disk_size,
+        boot_disk_gb:       25,
+        preemptible_tries:  2,
+        max_retries:        2,
+        docker:             "us.gcr.io/broad-dsp-lrma/hangsuunc/midashla:v0"
+    }
+    RuntimeAttr runtime_attr = select_first([runtime_attr_override, default_attr])
+    runtime {
+        cpu:                    select_first([runtime_attr.cpu_cores,         default_attr.cpu_cores])
+        memory:                 select_first([runtime_attr.mem_gb,            default_attr.mem_gb]) + " GiB"
+        disks: "local-disk " +  select_first([runtime_attr.disk_gb,           default_attr.disk_gb]) + " HDD"
+        bootDiskSizeGb:         select_first([runtime_attr.boot_disk_gb,      default_attr.boot_disk_gb])
+        preemptible:            select_first([runtime_attr.preemptible_tries, default_attr.preemptible_tries])
+        maxRetries:             select_first([runtime_attr.max_retries,       default_attr.max_retries])
+        docker:                 select_first([runtime_attr.docker,            default_attr.docker])
+    }
+}
+
 task RunPheWAS {
 
   input {
@@ -63,8 +194,10 @@ task RunPheWAS {
     # Runtime parameters
     String memory
     Int cpu
-    String disk
+    Int disk_size
     Int preemptible
+
+    RuntimeAttr? runtime_attr_override
   }
   command <<<
     set -euxo pipefail
@@ -76,9 +209,9 @@ task RunPheWAS {
             meta_data_file <- args[3]
             haplotype <- args[4]
 
-
+            options(repos = c(CRAN = "https://cloud.r-project.org"))
             install.packages("devtools")
-            install.packages(c("dplyr","tidyr","ggplot2","MASS","meta","ggrepel","DT"))
+            install.packages(c("dplyr","tidyr","ggplot2","MASS","meta","ggrepel","DT", "tidyverse"))
             devtools::install_github("PheWAS/PheWAS")
             
             library(tidyverse)
@@ -90,6 +223,7 @@ task RunPheWAS {
             # load genotype
             genotypes <- read_csv(genotype_file)
             colnames(genotypes)[1] <- "person_id"
+            print(genotypes)
 
             # load phenotype
             phenotypes <- read_csv(phenotype_file)
@@ -102,28 +236,31 @@ task RunPheWAS {
             print(haplotype)
             cols_to_select <- c("person_id", haplotype)
             selected_cols <- genotypes[, cols_to_select]
-            colnames(selected_cols)[1] <- 'person_id'
+            colnames(selected_cols)[1] <- "person_id"
+
             data <- inner_join(phenotypes, selected_cols, by = "person_id")
             data <- inner_join(data, metadata, by = "person_id")
+            print(data)
             results <- phewas_ext(data,
-                            phenotypes=names(phenotypes)[-1],  # All phecode columns
+                            phenotypes=names(phenotypes)[c(-1)],  # All phecode columns
                             genotypes=c(haplotype),
-                            covariates=c("sex_at_birth",'age','PC1',
-                                        'PC2','PC3', 'PC4', "PC5"), 
+                            covariates=c("sex_at_birth","age","PC1",
+                                        "PC2","PC3", "PC4", "PC5"), 
                             cores=8)
             
-            n_tests <- nrow(results[!is.na(results$p), ])
+            results <- results[!is.na(results$p), ]
             results$p_bonferroni <- p.adjust(results$p, method = "bonferroni")
 
             #List the significant results
             sig_results <- results[results$p_bonferroni<0.05,]
             num_of_sig = dim(sig_results)[1]
             print(c(haplotype,num_of_sig))
-            if (num_of_sig > 0){
-                output_file <- sprintf('%s_significant_%s_results.csv', haplotype, num_of_sig)
-                write.csv(results, file = output_file, row.names = FALSE) 
-            }
-                
+
+
+            output_file <- sprintf("%s_significant_%s_results.csv", haplotype, num_of_sig)
+            write.csv(results, file = output_file, row.names = FALSE) 
+            
+                     
         ' > run_PheWAS.R
 
     Rscript run_PheWAS.R ~{genotype_file} ~{phenotype_file} ~{meta_data_file} ~{haplotype} > phewaslog.log 2>&1
@@ -134,21 +271,37 @@ task RunPheWAS {
     File logfile = "phewaslog.log"
   }
 
-  runtime {
-    docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/midashla:v1"
-    memory: memory
-    cpu: cpu
-    disks: disk
-    preemptible: preemptible
-  }
+    #########################
+    RuntimeAttr default_attr = object {
+        cpu_cores:          1,
+        mem_gb:             4,
+        disk_gb:            disk_size,
+        boot_disk_gb:       25,
+        preemptible_tries:  2,
+        max_retries:        2,
+        docker:             "us.gcr.io/broad-dsp-lrma/hangsuunc/midashla:v1"
+    }
+    RuntimeAttr runtime_attr = select_first([runtime_attr_override, default_attr])
+    runtime {
+        cpu:                    select_first([runtime_attr.cpu_cores,         default_attr.cpu_cores])
+        memory:                 select_first([runtime_attr.mem_gb,            default_attr.mem_gb]) + " GiB"
+        disks: "local-disk " +  select_first([runtime_attr.disk_gb,           default_attr.disk_gb]) + " HDD"
+        bootDiskSizeGb:         select_first([runtime_attr.boot_disk_gb,      default_attr.boot_disk_gb])
+        preemptible:            select_first([runtime_attr.preemptible_tries, default_attr.preemptible_tries])
+        maxRetries:             select_first([runtime_attr.max_retries,       default_attr.max_retries])
+        docker:                 select_first([runtime_attr.docker,            default_attr.docker])
+    }
 
 }
+
 
 task PlotResults {
     input {
         File phewas_results
         File phecodex_info
         Int disk_size
+
+        RuntimeAttr? runtime_attr_override
 
     }
 
@@ -157,8 +310,11 @@ task PlotResults {
 
         pip install adjustText
 
-        python - --phewas_results ~{phewas_results}                 --phecodex_info ~{phecodex_info}                 <<-'EOF'
+        python - --phewas_results ~{phewas_results} \
+                --phecodex_info ~{phecodex_info} \
+                <<-'EOF'
         import os
+        import argparse
         import pandas as pd
         import subprocess
         import numpy
@@ -274,14 +430,28 @@ task PlotResults {
     >>>
 
     output {
-        Array[File] outputfiles = glob("*_results.pdf")
+        Array[File]? outputfiles = glob("*_results.pdf")
         
     }
 
+    #########################
+    RuntimeAttr default_attr = object {
+        cpu_cores:          1,
+        mem_gb:             4,
+        disk_gb:            disk_size,
+        boot_disk_gb:       25,
+        preemptible_tries:  2,
+        max_retries:        2,
+        docker:             "us.gcr.io/broad-dsp-lrma/hangsuunc/midashla:v0"
+    }
+    RuntimeAttr runtime_attr = select_first([runtime_attr_override, default_attr])
     runtime {
-        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/midashla:v0"
-        memory: "4 GB"
-        cpu: 1
-        disks: disk_size
+        cpu:                    select_first([runtime_attr.cpu_cores,         default_attr.cpu_cores])
+        memory:                 select_first([runtime_attr.mem_gb,            default_attr.mem_gb]) + " GiB"
+        disks: "local-disk " +  select_first([runtime_attr.disk_gb,           default_attr.disk_gb]) + " HDD"
+        bootDiskSizeGb:         select_first([runtime_attr.boot_disk_gb,      default_attr.boot_disk_gb])
+        preemptible:            select_first([runtime_attr.preemptible_tries, default_attr.preemptible_tries])
+        maxRetries:             select_first([runtime_attr.max_retries,       default_attr.max_retries])
+        docker:                 select_first([runtime_attr.docker,            default_attr.docker])
     }
 }
