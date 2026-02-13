@@ -155,7 +155,7 @@ enum Commands {
         #[arg(long)]
         verbose: bool,
     },
-    /// Haplotype Analysis from BAM file for a set of genomic region (usually a locus < 1kb)
+    /// Somatic-aware Haplotype Interval Analysis from BAM file for a set of genomic region defined by a bed file(usually a locus < 1kb, e.g. STRs)
     #[clap(arg_required_else_help = true)]
     Haplointervals {
         /// Input BAM file
@@ -207,9 +207,9 @@ enum Commands {
         verbose: bool,
     },
 
-    /// HaploPan Analysis from BAM file for a continuous genomic region (usually a locus > 1kb)
+    /// HaploPan Analysis leveraging pangenomes to resolve complex haplotypes (e.g. duplications, deletions, translocations, etc.)
     #[clap(arg_required_else_help = true)]
-    HaploPan {
+    Haplopan {
         /// Input Pangenome FASTA file
         #[arg(short, long)]
         pangenome_fasta: PathBuf,
@@ -223,7 +223,7 @@ enum Commands {
         output_prefix: String,
 
         /// Rolling kmer list
-        #[arg(short, long, default_value = "5, 15, 25")]
+        #[arg(short, long, default_value = "5,15,25")]
         rollingkmer_list: String,
 
         /// Verbose output
@@ -476,7 +476,7 @@ fn main() -> Result<()> {
             )?;
         }
 
-        Commands::HaploPan {
+        Commands::Haplopan {
             pangenome_fasta,
             alignment_bam,
             output_prefix,
