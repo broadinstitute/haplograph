@@ -3,6 +3,17 @@ use clap::{Parser, Subcommand};
 use log::info;
 use std::path::PathBuf;
 
+mod asm;
+mod call;
+mod eval;
+mod extract;
+mod graph;
+mod hap;
+mod intervals;
+mod methyl;
+mod util;
+mod genotype;
+
 #[derive(Debug, Subcommand)]
 enum DevToolsCommands {
     /// Assemble haplotypes from GFA file
@@ -70,15 +81,6 @@ enum DevToolsCommands {
     },
 }
 
-mod asm;
-mod call;
-mod eval;
-mod extract;
-mod graph;
-mod hap;
-mod intervals;
-mod methyl;
-mod util;
 
 #[derive(Parser)]
 #[command(name = "haplograph")]
