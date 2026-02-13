@@ -79,6 +79,7 @@ mod hap;
 mod intervals;
 mod methyl;
 mod util;
+mod genotype;
 
 #[derive(Parser)]
 #[command(name = "haplograph")]
@@ -203,6 +204,30 @@ enum Commands {
 
         /// Verbose output
         #[arg(long)]
+        verbose: bool,
+    },
+
+    /// HaploPan Analysis from BAM file for a continuous genomic region (usually a locus > 1kb)
+    #[clap(arg_required_else_help = true)]
+    HaploPan {
+        /// Input Pangenome FASTA file
+        #[arg(short, long)]
+        pangenome_fasta: PathBuf,
+
+        /// Input BAM file
+        #[arg(short, long)]
+        alignment_bam: PathBuf,
+
+        /// Output prefix
+        #[arg(short, long, default_value = "haplograph_pangenome")]
+        output_prefix: String,
+
+        /// Rolling kmer list
+        #[arg(short, long, default_value = "5, 15, 25")]
+        rollingkmer_list: String,
+
+        /// Verbose output
+        #[arg(short, long)]
         verbose: bool,
     },
 
@@ -449,6 +474,17 @@ fn main() -> Result<()> {
                 &"vcf".to_string(),
                 threshold_methyl_likelihood,
             )?;
+        }
+
+        Commands::HaploPan {
+            pangenome_fasta,
+            alignment_bam,
+            output_prefix,
+            rollingkmer_list,
+            verbose,
+        } => {
+            let rollingkmer_list_vec = rollingkmer_list.split(",").map(|x| x.parse::<usize>().unwrap()).collect();
+            genotype::start(&alignment_bam, &pangenome_fasta, &rollingkmer_list_vec, &output_prefix.to_string())?;
         }
 
         Commands::DevTools(dev_tools_cmd) => {

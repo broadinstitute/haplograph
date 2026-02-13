@@ -19,6 +19,20 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use url::Url;
 
+pub fn reverse_complement(kmer: &str) -> String {
+    kmer.chars()
+        .rev()
+        .map(|c| match c {
+            'A' => 'T',
+            'T' => 'A',
+            'C' => 'G',
+            'G' => 'C',
+            'N' => 'N',
+            _ => panic!("Unexpected character: {}", c),
+        })
+        .collect()
+}
+
 pub fn gcs_gcloud_is_installed() -> bool {
     // Check if gcloud is installed on the PATH
     // Suppress stdout and stderr to prevent them from printing to the screen
