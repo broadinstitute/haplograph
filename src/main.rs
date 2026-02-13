@@ -12,7 +12,6 @@ mod hap;
 mod intervals;
 mod methyl;
 mod util;
-mod genotype;
 
 #[derive(Debug, Subcommand)]
 enum DevToolsCommands {
