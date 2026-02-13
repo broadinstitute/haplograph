@@ -483,6 +483,22 @@ fn main() -> Result<()> {
             rollingkmer_list,
             verbose,
         } => {
+
+            // Initialize logging
+            env_logger::Builder::from_default_env()
+            .filter_level(if verbose {
+                log::LevelFilter::Debug
+            } else {
+                log::LevelFilter::Info
+            })
+            .init();
+            info!("Starting HaploPan analysis");
+            info!("Input BAM: {}", alignment_bam.display());
+            info!("Input Pangenome FASTA: {}", pangenome_fasta.display());
+            info!("Rolling kmer list: {}", rollingkmer_list);
+            info!("Output prefix: {}", output_prefix);
+            info!("Verbose: {}", verbose);
+            
             let rollingkmer_list_vec = rollingkmer_list.split(",").map(|x| x.parse::<usize>().unwrap()).collect();
             genotype::start(&alignment_bam, &pangenome_fasta, &rollingkmer_list_vec, &output_prefix.to_string())?;
         }
