@@ -25,7 +25,7 @@ Haplograph is designed for accurate haplotype and meplotype construction and var
 
 - Rust 1.70+ (install from [rustup.rs](https://rustup.rs/))
 - HTSlib development libraries
-- Standard bioinformatics tools (samtools, bcftools) for file processing
+- Standard bioinformatics tools (samtools, minimap2) for file processing
 
 ### Build from Source
 
