@@ -34,6 +34,7 @@ jobs:
       - name: Install system dependencies (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
         run: |
+          sudo sed -i 's/^deb/# deb/g' /etc/apt/sources.list.d/*microsoft*.list || true
           sudo apt-get update
           sudo apt-get install -y \
             libcurl4-openssl-dev \
@@ -89,6 +90,7 @@ jobs:
 
       - name: Install system dependencies
         run: |
+          sudo sed -i 's/^deb/# deb/g' /etc/apt/sources.list.d/*microsoft*.list || true
           sudo apt-get update
           sudo apt-get install -y \
             libcurl4-openssl-dev \

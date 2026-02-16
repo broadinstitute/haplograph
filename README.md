@@ -1,10 +1,10 @@
 # Haplograph
 
-A  bioinformatics tool for local diploid assembly and variant calling, methylation analysis from lrWGS BAM files using graph-based approaches.
+A  bioinformatics tool for local diploid assembly, methylation analysis and variant calling from lrWGS BAM files using graph-based approaches.
 
 ## Overview
 
-Haplograph is designed for accurate haplotype or meplotype reconstruction and variant calling in local genomic regions, particularly useful for complex region such as HLA/MHC analysis, and other highly polymorphic regions. The tool uses graph-based assembly to reconstruct haplotypes (methylation aware) and call variants with high accuracy.
+Haplograph is designed for accurate haplotype and meplotype construction and variant calling in local genomic regions, particularly useful for complex region such as HLA/MHC analysis, and other highly polymorphic regions. The tool uses graph-based assembly to reconstruct haplotypes (methylation aware) and call variants with high accuracy.
 
 ## Features
 

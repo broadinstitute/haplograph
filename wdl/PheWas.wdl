@@ -144,6 +144,8 @@ task PreProcessFile {
 
             with open("haplotypelist.txt", 'w') as fp:
                 for item in df_genotype.columns.tolist():
+                    if item == "person_id":
+                        continue
                     fp.writelines(item + "\n")
 
         if __name__ == "__main__":
@@ -208,11 +210,6 @@ task RunPheWAS {
             phenotype_file <- args[2]
             meta_data_file <- args[3]
             haplotype <- args[4]
-
-            options(repos = c(CRAN = "https://cloud.r-project.org"))
-            install.packages("devtools")
-            install.packages(c("dplyr","tidyr","ggplot2","MASS","meta","ggrepel","DT", "tidyverse"))
-            devtools::install_github("PheWAS/PheWAS")
             
             library(tidyverse)
             library(dplyr)
@@ -279,7 +276,7 @@ task RunPheWAS {
         boot_disk_gb:       25,
         preemptible_tries:  2,
         max_retries:        2,
-        docker:             "us.gcr.io/broad-dsp-lrma/hangsuunc/midashla:v1"
+        docker:             "us.gcr.io/broad-dsp-lrma/hangsuunc/phewas:v1"
     }
     RuntimeAttr runtime_attr = select_first([runtime_attr_override, default_attr])
     runtime {
