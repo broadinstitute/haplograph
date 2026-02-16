@@ -17,16 +17,6 @@ mod methyl;
 mod util;
 mod haplopan;
 
-mod asm;
-mod call;
-mod eval;
-mod extract;
-mod graph;
-mod hap;
-mod intervals;
-mod methyl;
-mod util;
-
 #[derive(Debug, Subcommand)]
 enum DevToolsCommands {
     /// Assemble haplotypes from GFA file
