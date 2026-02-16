@@ -35,10 +35,15 @@ pub fn reverse_complement(kmer: &str) -> String {
         .collect()
 }
 
-pub fn write_graph_path_fasta(
+pub fn write_fasta(
     all_sequences: &HashMap<String, String>,
     output_filename: &PathBuf,
 ) -> AnyhowResult<()> {
+    if let Some(parent) = output_filename.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
     let mut file = File::create(output_filename)?;
     let chars_per_line = 60;
     for (header, sequence) in all_sequences.iter() {

@@ -379,22 +379,12 @@ pub fn assign_unassigned_reads(
                     .extend(read_nodes.clone());
             }
         }
-        // if max_overlap > 0 {
-        //     haplotype_reads_new.entry(max_haplotype).or_insert(HashSet::new()).insert(read.clone());
-        //     haplotype_nodes_new.entry(max_haplotype).or_insert(HashSet::new()).extend(read_nodes.clone());
-        // }else{
-        //     for hap in haplotype_reads_new.clone().keys() {
-        //         haplotype_reads_new.entry(*hap).or_insert(HashSet::new()).insert(read.clone());
-        //         haplotype_nodes_new.entry(*hap).or_insert(HashSet::new()).extend(read_nodes.clone());
-        //     }
-        // }
     }
     (haplotype_reads_new, haplotype_nodes_new)
 }
 
 pub fn find_most_supported_path(
     node_info: &HashMap<String, NodeInfo>,
-    edge_info: &HashMap<String, Vec<String>>,
 ) -> HashMap<String, HashSet<usize>> {
     let mut node_haplotype = HashMap::new();
     let all_nodes = find_parallele_nodes(node_info);
@@ -642,7 +632,6 @@ pub fn find_full_range_haplotypes(
     node_info: &HashMap<String, NodeInfo>,
     node_haplotype: &HashMap<String, HashSet<usize>>,
     all_sequences: &HashMap<usize, Vec<(Vec<String>, String, HashSet<String>)>>,
-    hap_number: usize,
 ) -> HashMap<usize, (Vec<String>, String, HashSet<String>, usize, usize)> {
     // sort all_sequences by the spanning length and the supported_reads
     let node_list = node_info.keys().collect::<Vec<_>>();
@@ -737,16 +726,6 @@ pub fn filter_haplotype_nodes(
                         .collect::<Vec<_>>()
                         .join(", ")
                 );
-                // let mut best_node = "".to_string();
-                // let mut best_read_count = 0;
-                // for node in nodes.clone() {
-                //     let node_read_names = get_read_name_list(node_info, node.clone());
-                //     if node_read_names.len() > best_read_count {
-                //         best_node = node.clone();
-                //         best_read_count = node_read_names.len();
-                //     }
-                // }
-                // filtered_haplotype_nodes.entry(hap.clone()).or_insert(HashSet::new()).insert(best_node.clone());
             }
         }
     }
@@ -755,52 +734,58 @@ pub fn filter_haplotype_nodes(
 
 pub fn find_node_haplotype(
     node_info: &HashMap<String, NodeInfo>,
-    edge_info: &HashMap<String, Vec<String>>,
     hap_number: usize,
     het_fold_threshold: f64,
 ) -> (
     HashMap<usize, HashSet<String>>,
     HashMap<String, HashSet<usize>>,
 ) {
-    let heterozygous_nodes = identify_heterozygous_nodes(node_info, hap_number, het_fold_threshold);
-    info!("heterozygous_nodes: {:?}", heterozygous_nodes.len());
-    let filtered_heterozygous_nodes = filter_heterozygous_nodes(node_info, &heterozygous_nodes);
-    info!(
-        "filtered_heterozygous_nodes: {:?}",
-        filtered_heterozygous_nodes.len()
-    );
+    if hap_number == 1 {
+        let node_haplotype = find_most_supported_path(node_info);
+        return (HashMap::new(), node_haplotype);
+    }else if hap_number == 2 {
+        let heterozygous_nodes = identify_heterozygous_nodes(node_info, hap_number, het_fold_threshold);
+        info!("heterozygous_nodes: {:?}", heterozygous_nodes.len());
+        let filtered_heterozygous_nodes = filter_heterozygous_nodes(node_info, &heterozygous_nodes);
+        info!(
+            "filtered_heterozygous_nodes: {:?}",
+            filtered_heterozygous_nodes.len()
+        );
 
-    let haplotype_reads =
-        assign_haplotype_reads(node_info, &filtered_heterozygous_nodes, hap_number);
+        let haplotype_reads =
+            assign_haplotype_reads(node_info, &filtered_heterozygous_nodes, hap_number);
 
-    let (haplotype_reads_new, haplotype_nodes_new) =
-        assign_unassigned_reads(node_info, &haplotype_reads);
-    info!(
-        "haplotype_reads: {:?}",
-        haplotype_reads
-            .iter()
-            .map(|(hap, reads)| format!("hap: {}, reads: {}", hap, reads.len()))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-    info!(
-        "haplotype_reads_new: {:?}",
-        haplotype_reads_new
-            .iter()
-            .map(|(hap, reads)| format!("hap: {}, reads: {}", hap, reads.len()))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
+        let (haplotype_reads_new, haplotype_nodes_new) =
+            assign_unassigned_reads(node_info, &haplotype_reads);
+        info!(
+            "haplotype_reads: {:?}",
+            haplotype_reads
+                .iter()
+                .map(|(hap, reads)| format!("hap: {}, reads: {}", hap, reads.len()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        info!(
+            "haplotype_reads_new: {:?}",
+            haplotype_reads_new
+                .iter()
+                .map(|(hap, reads)| format!("hap: {}, reads: {}", hap, reads.len()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
 
-    if haplotype_reads_new.is_empty() {
-        let node_haplotype = find_most_supported_path(node_info, edge_info);
-        (haplotype_reads_new, node_haplotype)
-    } else {
-        let filtered_haplotype_nodes =
-            filter_haplotype_nodes(node_info, &haplotype_nodes_new, &haplotype_reads_new);
-        let node_haplotype = assign_haplotype_to_nodes(&filtered_haplotype_nodes);
-        // println!("node_haplotype: {:?}", node_haplotype);
-        (haplotype_reads_new, node_haplotype)
+        if haplotype_reads_new.is_empty() {
+            let node_haplotype = find_most_supported_path(node_info);
+            return (haplotype_reads_new, node_haplotype)
+        } else {
+            let filtered_haplotype_nodes =
+                filter_haplotype_nodes(node_info, &haplotype_nodes_new, &haplotype_reads_new);
+            let node_haplotype = assign_haplotype_to_nodes(&filtered_haplotype_nodes);
+            // println!("node_haplotype: {:?}", node_haplotype);
+        return (haplotype_reads_new, node_haplotype)
+    }}else{
+        warn!("Unsupported hap_number: {}", hap_number);
+        (HashMap::new(), HashMap::new())
     }
 }
 
@@ -986,7 +971,7 @@ pub fn start(
     );
 
     let (haplotype_reads, node_haplotype) =
-        find_node_haplotype(&node_info, &edge_info, haplotype_number, het_fold_threshold);
+        find_node_haplotype(&node_info, haplotype_number, het_fold_threshold);
     let all_paths = enumerate_all_paths_with_haplotype(
         &node_info,
         &edge_info,
@@ -997,7 +982,7 @@ pub fn start(
     let allseq = construct_sequences_from_haplotype_path(&node_info, &all_paths);
     // println!("allseq: {:?}", allseq.iter().map(|(index, pathlist)| format!("index: {}, path num: {}", index, pathlist.len())).collect::<Vec<_>>().join("\n"));
     let primary_haplotypes =
-        find_full_range_haplotypes(&node_info, &node_haplotype, &allseq, haplotype_number);
+        find_full_range_haplotypes(&node_info, &node_haplotype, &allseq);
     info!("All sequences constructed: {}", primary_haplotypes.len());
     // call methylation
     call_methylation(&node_info, primary_haplotypes.clone(), output_prefix);

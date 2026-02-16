@@ -2,6 +2,20 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use log::info;
 use std::path::PathBuf;
+use bio::io::fasta::Reader as FastaReader;
+use std::collections::HashMap;
+
+
+mod asm;
+mod call;
+mod eval;
+mod extract;
+mod graph;
+mod hap;
+mod intervals;
+mod methyl;
+mod util;
+mod haplopan;
 
 #[derive(Debug, Subcommand)]
 enum DevToolsCommands {
@@ -70,16 +84,7 @@ enum DevToolsCommands {
     },
 }
 
-mod asm;
-mod call;
-mod eval;
-mod extract;
-mod graph;
-mod hap;
-mod intervals;
-mod methyl;
-mod util;
-mod genotype;
+
 
 #[derive(Parser)]
 #[command(name = "haplograph")]
@@ -223,8 +228,20 @@ enum Commands {
         output_prefix: String,
 
         /// Rolling kmer list
-        #[arg(short, long, default_value = "5,15,25")]
+        #[arg(short, long, default_value = "31")]
         rollingkmer_list: String,
+
+        /// Sample ID
+        #[arg(short, long)]
+        sample_id: String,
+
+        /// Sequencing technology, accepted hifi, nanopore, sr
+        #[arg(short, long, default_value = "hifi")]
+        data_technology: String,
+        //window size
+        #[arg(short, long, default_value_t = 100)]
+        window_size: usize,
+
 
         /// Verbose output
         #[arg(short, long)]
@@ -254,7 +271,7 @@ enum Commands {
         #[arg(short, long)]
         verbose: bool,
     },
-    /// extract all the seqeunces from the bam file
+    /// extract all the seqeunces in an intervalfrom the bam file
     #[clap(arg_required_else_help = true)]
     Extract {
         /// Input Bam file
@@ -349,34 +366,19 @@ fn main() -> Result<()> {
                 let end_pos = std::cmp::min(i + window_size, end);
                 windows.push((chromosome.clone(), i, end_pos));
             }
-            if file_format == "gfa" {
-                graph::start(
-                    &alignment_bam,
-                    &windows,
-                    &reference_chromosome_seqs,
-                    &sampleid,
-                    min_reads as usize,
-                    threshold_methyl_likelihood,
-                    var_frequency_min,
-                    primary_only,
-                    &output_prefix,
-                    number_of_haplotypes,
-                )?;
-            } else {
-                hap::start(
-                    &alignment_bam,
-                    &windows,
-                    &reference_chromosome_seqs,
-                    &sampleid,
-                    min_reads as usize,
-                    var_frequency_min,
-                    primary_only,
-                    &output_prefix,
-                    &file_format,
-                    threshold_methyl_likelihood,
-                )?;
-            }
-
+            
+            graph::start(
+                &alignment_bam,
+                &windows,
+                &reference_chromosome_seqs,
+                &sampleid,
+                min_reads as usize,
+                threshold_methyl_likelihood,
+                var_frequency_min,
+                primary_only,
+                &output_prefix
+            )?;
+            
             let output_p = PathBuf::from(&output_prefix);
             let graph_gfa = output_p.with_extension("gfa");
             asm::start(
@@ -481,6 +483,11 @@ fn main() -> Result<()> {
             alignment_bam,
             output_prefix,
             rollingkmer_list,
+            sample_id,
+            data_technology,
+            //window size
+            window_size,
+
             verbose,
         } => {
 
@@ -498,9 +505,55 @@ fn main() -> Result<()> {
             info!("Rolling kmer list: {}", rollingkmer_list);
             info!("Output prefix: {}", output_prefix);
             info!("Verbose: {}", verbose);
-            
+
             let rollingkmer_list_vec = rollingkmer_list.split(",").map(|x| x.parse::<usize>().unwrap()).collect();
-            genotype::start(&alignment_bam, &pangenome_fasta, &rollingkmer_list_vec, &output_prefix.to_string())?;
+            haplopan::start(&alignment_bam, &pangenome_fasta, &rollingkmer_list_vec, &output_prefix.to_string(), &data_technology.to_string(), &sample_id)?;
+
+            let tmp_bam_path = PathBuf::from(format!("{}.tmp.sorted.bam", output_prefix));
+            let tmp_fasta_path = PathBuf::from(format!("{}.tmp.ref.fasta", output_prefix));
+
+            let reference_seqs = util::get_all_ref_seq(&tmp_fasta_path.display().to_string());
+            
+            // // Extract read sequences from BAM file using utility function
+            let mut final_fasta_seq = HashMap::new();
+            for record in reference_seqs.iter(){
+                let mut windows = Vec::new();
+                let start = 0;
+                let end = record.seq().len();
+                let chromosome = record.id().to_string();
+                for i in (start..end).step_by(window_size) {
+                    let end_pos = std::cmp::min(i + window_size, end);
+                    windows.push((chromosome.clone(), i, end_pos));                 
+                }
+                graph::start(
+                    &tmp_bam_path.display().to_string(),
+                    &windows,
+                    &reference_seqs,
+                    &sample_id,
+                    1,
+                    0.5,
+                    0.0,
+                    false,
+                    &format!("{}_{}_tmp", output_prefix, chromosome)
+                )?;
+                let output_p = PathBuf::from(&format!("{}_{}_tmp", output_prefix, chromosome));
+                let graph_gfa = output_p.with_extension("gfa");
+                asm::start(
+                    &graph_gfa,
+                    true,
+                    1,
+                    &output_p,
+                    3.0,
+                )?;
+                let fasta_reader = FastaReader::from_file(format!("{}.fasta", &output_p.display().to_string()))?;
+                for record in fasta_reader.records() {
+                    let record = record.expect("Failed to read FASTA record");
+                    final_fasta_seq.insert(record.id().to_string(), String::from_utf8_lossy(record.seq()).to_string());
+                }
+            }
+            util::write_fasta(&final_fasta_seq, &PathBuf::from(format!("{}.final.fasta", output_prefix)))?;
+            // remove the tmp files
+            // std::fs::remove_file(&tmp_fasta_path)?;
         }
 
         Commands::DevTools(dev_tools_cmd) => {

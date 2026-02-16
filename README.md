@@ -54,8 +54,37 @@ haplograph haplograph \
     --locus chr6:29943661-29943700 \
     --output-prefix output/HLA_A
 ```
+### 3. HaploPan (Pangenome-guided Analysis)
 
-### 1. Haplograph (Continuous Region Analysis)
+HaploPan leverages a pangenome FASTA to resolve complex haplotypes (e.g., duplications, deletions, and translocations) and then realigns reads to the best matching pangenome alleles before running local assembly.
+
+```bash
+haplograph haplopan \
+    --pangenome-fasta pangenome.fa \
+    --alignment-bam input.bam \
+    --sample-id SAMPLE001 \
+    --rollingkmer-list 31,51,71 \
+    --data-technology hifi \
+    --window-size 100 \
+    --output-prefix output/HLA_DRB1
+```
+
+**Parameters:**
+- `--pangenome-fasta`: Pangenome FASTA with allele sequences
+- `--alignment-bam`: Input BAM file
+- `--sample-id`: Sample identifier
+- `--rollingkmer-list`: Comma-separated k-mer sizes (default: 31)
+- `--data-technology`: Sequencing technology: hifi, nanopore, or sr (default: hifi)
+- `--window-size`: Window size for downstream graph/assembly (default: 100)
+- `--output-prefix`: Output prefix for intermediate and final files
+
+**Outputs:**
+- `{prefix}.tmp.ref.fasta`: Best-matching pangenome allele sequences
+- `{prefix}.tmp.bam` / `{prefix}.tmp.sorted.bam`: Realigned reads against the best alleles
+- `{prefix}.final.fasta`: Final assembled haplotype sequences
+
+
+### 2. Haplograph (Bam Continuous Region Analysis)
 
 For analyzing continuous genomic regions (typically > 1kb):
 
@@ -100,7 +129,7 @@ haplograph haplograph \
 - `--threshold-methyl-likelihood`: Methylation likelihood threshold (default: 0.5)
 - `--detection-technology`: Sequencing technology: hifi or nanopore (default: hifi)
 
-### 2. Haplointervals (Interval-based Analysis)
+### 1. Haplointervals (Interval-based Analysis)
 
 For analyzing multiple genomic intervals from a BED file (typically < 1kb each):
 
@@ -125,7 +154,8 @@ haplograph haplointervals \
 - `--threshold-methyl-likelihood`: Methylation likelihood threshold (default: 0.5)
 - `--detection-technology`: Sequencing technology: hifi or nanopore (default: hifi)
 
-### 3. Extract Sequences
+
+### Helper Functions 1. Extract Sequences
 
 Extract all sequences from a BAM file for a specific region:
 
@@ -141,7 +171,27 @@ haplograph extract \
 - `--locus`: Genomic region (format: chr:start-end)
 - `--output-prefix`: Output prefix for FASTA file
 
-### 4. Haplotype Assembly (Dev Tools)
+### 6. Helper Functions 1. Evaluate Sequences, repurposed for genotyping
+
+Evaluate haplotype accuracy against truth sets using QV (Quality Value) scoring:
+
+```bash
+haplograph evaluate \
+    --truth-fasta truth_haplotypes.fasta \
+    --query-fasta output/HLA_A_asm.fasta \
+    --seq-number 2 \
+    --output-prefix output/evaluation \
+    --verbose
+```
+
+**Parameters:**
+- `--truth-fasta`: Truth haplotype sequences (FASTA file)
+- `--query-fasta`: Query haplotype sequences (FASTA file)
+- `--seq-number`: Number of sequences to compare (default: 2)
+- `--output-prefix`: Output prefix for evaluation TSV file
+
+
+### 4. Haplotype Assembly (Dev Tools, implemented in Haplopan/ Haplograph / HaploInterval)
 
 Assemble haplotypes from GFA files:
 
@@ -167,7 +217,7 @@ haplograph dev-tools assemble \
 - `--number-of-haplotypes`: Number of haplotypes to extract (default: 2)
 - `--fold-threshold`: Heterozygous coverage fold threshold (default: 3.0)
 
-### 5. Variant Calling (Dev Tools)
+### 5. Variant Calling (Dev Tools, implemented in Haplopan/ Haplograph / HaploInterval)
 
 Call variants from assembled haplotypes:
 
@@ -200,24 +250,6 @@ haplograph dev-tools call \
 - `--fold-threshold`: Heterozygous coverage fold threshold (default: 3.0)
 - `--detection-technology`: Sequencing technology: hifi or nanopore (default: hifi)
 
-### 6. Evaluation
-
-Evaluate haplotype accuracy against truth sets using QV (Quality Value) scoring:
-
-```bash
-haplograph evaluate \
-    --truth-fasta truth_haplotypes.fasta \
-    --query-fasta output/HLA_A_asm.fasta \
-    --seq-number 2 \
-    --output-prefix output/evaluation \
-    --verbose
-```
-
-**Parameters:**
-- `--truth-fasta`: Truth haplotype sequences (FASTA file)
-- `--query-fasta`: Query haplotype sequences (FASTA file)
-- `--seq-number`: Number of sequences to compare (default: 2)
-- `--output-prefix`: Output prefix for evaluation TSV file
 
 ## Complete Workflow Example
 
