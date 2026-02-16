@@ -56,7 +56,7 @@ haplograph haplograph \
 ```
 ### 3. HaploPan (Pangenome-guided Analysis)
 
-HaploPan leverages a pangenome FASTA to resolve complex haplotypes (e.g., duplications, deletions, and translocations) and then realigns reads to the best matching pangenome alleles before running local assembly.
+HaploPan leverages a pangenome FASTA to resolve complex haplotypes (e.g., duplications, deletions, and translocations) and then realigns reads to the best matching pangenome paths before running local assembly.
 
 ```bash
 haplograph haplopan \
