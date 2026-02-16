@@ -15,7 +15,7 @@ ndarray = "0.16.1"
 flate2 = "1.0.30"
 serde_json = "1.0.120"
 serde = "1.0.204"
-rust-htslib = { version = "0.47.0", features = ["curl", "gcs"] }
+rust-htslib = { version = "0.51.0", features = ["curl", "gcs"] }
 rayon = "1.7"
 csv = "1.2" 
 regex = "1.9.5"
@@ -26,11 +26,12 @@ env_logger = "0.10"
 indicatif = "0.17"
 url = "=2.5.4"
 intervals = "2.1.0"
-minimap2 = "0.1.28"
+minimap2 = "0.1.30+minimap2.2.30"
 itertools = "0.14.0"
 rand = "0.9.2"
 statrs = "0.18.0"
 adjustp = "0.1.6"
+nalgebra = "0.34.1"
 
 [dev-dependencies]
 criterion = "0.5"

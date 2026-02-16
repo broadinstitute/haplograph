@@ -31,9 +31,7 @@ pub struct EdgeInfo {
 pub fn get_node_edge_info(
     windows: &Vec<(String, usize, usize)>,
     final_hap_list: &Vec<HashMap<String, (String, HashMap<String, HashMap<usize, f32>>, f64)>>,
-    min_reads: usize,
-    frequency_min: f64,
-    haplotype_number: usize,
+    min_reads: usize
 ) -> (
     HashMap<String, NodeInfo>,
     HashMap<(String, String), EdgeInfo>,
@@ -198,7 +196,6 @@ pub fn start(
     frequency_min: f64,
     primary_only: bool,
     output_prefix: &String,
-    haplotype_number: usize,
 ) -> AnyhowResult<()> {
     // Parallelize window processing - each thread gets its own BAM reader
     info!("Processing {} windows in parallel", windows.len());
@@ -229,8 +226,6 @@ pub fn start(
         windows,
         &final_hap_list,
         1_usize,
-        frequency_min,
-        haplotype_number,
     );
 
     let gfa_output = PathBuf::from(format!("{}.gfa", output_prefix));

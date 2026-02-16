@@ -18,6 +18,52 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use url::Url;
+use std::path::PathBuf;
+use std::io::Write;
+
+pub fn reverse_complement(kmer: &str) -> String {
+    kmer.chars()
+        .rev()
+        .map(|c| match c {
+            'A' => 'T',
+            'T' => 'A',
+            'C' => 'G',
+            'G' => 'C',
+            'N' => 'N',
+            _ => panic!("Unexpected character: {}", c),
+        })
+        .collect()
+}
+
+pub fn write_fasta(
+    all_sequences: &HashMap<String, String>,
+    output_filename: &PathBuf,
+) -> AnyhowResult<()> {
+    if let Some(parent) = output_filename.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let mut file = File::create(output_filename)?;
+    let chars_per_line = 60;
+    for (header, sequence) in all_sequences.iter() {
+       writeln!(file, ">{}", header)?;
+        // write the sequence in fasta format
+        let seq_len = sequence.len();
+        let full_lines = seq_len / chars_per_line;
+        for i in 0..full_lines {
+            let start = i * chars_per_line;
+            let end = start + chars_per_line;
+            writeln!(file, "{}", &sequence[start..end])?;
+        }
+        // Write any remaining characters that didn't make up a full line
+        if seq_len % chars_per_line != 0 {
+            writeln!(file, "{}", &sequence[full_lines * chars_per_line..])?;
+        }
+    }
+    Ok(())
+}
+
 
 pub fn gcs_gcloud_is_installed() -> bool {
     // Check if gcloud is installed on the PATH
