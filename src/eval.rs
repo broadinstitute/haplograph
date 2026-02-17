@@ -3,12 +3,17 @@ use anyhow::Result as AnyhowResult;
 use bio::io::fasta::Reader as FastaReader;
 use bio::io::fasta::Record;
 use itertools::Itertools;
-use log::info;
+use log::{info, debug};
 use minimap2::Aligner;
+use rayon::prelude::*;
 use rust_htslib::bam::Read as BamRead;
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader};
+use flate2::read::GzDecoder;
+
 
 pub fn find_alignment_intervals(interval_list: Vec<&str>) -> AnyhowResult<(usize, usize)> {
     //
@@ -23,36 +28,47 @@ pub fn find_alignment_intervals(interval_list: Vec<&str>) -> AnyhowResult<(usize
     Ok((left_bound, right_bound))
 }
 
-pub fn select_seqs(fasta: &PathBuf, haplotype_number: usize) -> AnyhowResult<Vec<Record>> {
-    let fasta_records = FastaReader::from_file(fasta)?;
-    // let header_list = &fasta_records.records().map(|x| x.unwrap().id().to_string()).collect::<Vec<_>>();
+pub fn load_pangenome_description(
+    pangenome_path: &PathBuf,
+) -> AnyhowResult<HashMap<String, String>> {
+    // Parallelize window processing - each thread gets its own BAM reader
+    info!("Open Pangenome File: {}", pangenome_path.display());
+    // Open FASTA file (supports both regular and gzipped files)
+    let file = File::open(pangenome_path).expect("Failed to open FASTA file");
+    let reader: Box<dyn BufRead> = if pangenome_path.ends_with(".gz") {
+        let gz_decoder = GzDecoder::new(file);
+        Box::new(BufReader::new(gz_decoder))
+    } else {
+        Box::new(BufReader::new(file))
+    };
 
-    // find the longest n haplotypes in the fasta file
-    let mut seqs_len_vec = Vec::new();
-    for record in fasta_records.records() {
-        let record_ = record.unwrap();
-        let record_id = record_.id().to_string();
-        let region = record_id.split("\t").collect::<Vec<_>>()[0];
-        let region_ = region.split(".").collect::<Vec<_>>()[0];
-        let region__ = region_.split(":").collect::<Vec<_>>()[1];
-        let region___ = region__.split("-").collect::<Vec<_>>();
-        let left_bound = region___[0].parse::<usize>().unwrap();
-        let right_bound = region___[1].parse::<usize>().unwrap();
+    let fasta_reader = FastaReader::new(reader);
+    let records: Vec<_> = fasta_reader
+        .records()
+        .map(|result| result.expect("Failed to read FASTA record"))
+        .collect();
 
-        seqs_len_vec.push((record_.clone(), right_bound - left_bound));
+    let results: Vec<_> = records
+        .par_iter()
+        .map(|record| {
+            let seq_id = record.id().to_string();
+            let seq_description = record.desc().unwrap_or("").to_string();
+            let allele_id = seq_description.split(' ').next().unwrap_or("").to_string();
+            (seq_id, allele_id)
+        })
+        .collect();
+
+    let mut seq_info = HashMap::new();
+    for (seq_id, allele_id) in results {
+        // info!("Processing sequence: {} (allele: {})", seq_id, allele_id);
+        seq_info.insert(seq_id.clone(), allele_id);
     }
-    //sort seqs_len_vec by the length of the sequence
-    seqs_len_vec.sort_by(|a, b| b.1.cmp(&a.1));
-    let seqs_len_vec = seqs_len_vec
-        .iter()
-        .take(haplotype_number)
-        .collect::<Vec<_>>();
-    let seqs_selected = seqs_len_vec.iter().map(|x| x.0.clone()).collect::<Vec<_>>();
 
-    Ok(seqs_selected)
+    info!("Pangenome Extraction Completed");
+    Ok(seq_info)
 }
 
-pub fn calculate_qv_score(truth_seqs: Record, query_seqs: Record) -> AnyhowResult<f64> {
+pub fn calculate_qv_score(truth_seqs: Record, query_seqs: Record) -> AnyhowResult<(f64, f64, f64)> {
     let truth_seq = truth_seqs.seq();
     let query_seq = query_seqs.seq();
     let aligner = Aligner::builder()
@@ -62,7 +78,7 @@ pub fn calculate_qv_score(truth_seqs: Record, query_seqs: Record) -> AnyhowResul
         .expect("Unable to build index");
     let hits = aligner.map(query_seq, true, true, None, None, Some(b"Query Name"));
     if hits.clone().unwrap().len() != 1 {
-        return Ok(-1.0);
+        return Ok((-1.0, -1.0, -1.0));
     }
     let editdistance = hits.clone().unwrap()[0]
         .clone()
@@ -78,7 +94,7 @@ pub fn calculate_qv_score(truth_seqs: Record, query_seqs: Record) -> AnyhowResul
     // let qv_score2 = -10 as f64* (editdistance.max(0.5) / block_length as f64).log10();
     // println!("version1: {:?}, version2: {}", qv_score1, qv_score2);
 
-    Ok(qv_score1)
+    Ok((editdistance, alignment_length,qv_score1))
 }
 
 pub fn start(
@@ -86,6 +102,7 @@ pub fn start(
     query_fasta: &PathBuf,
     haplotype_number: usize,
     output_prefix: &PathBuf,
+    as_genotyper: bool,
 ) -> AnyhowResult<Vec<f64>> {
     let fasta_records = FastaReader::from_file(truth_fasta)?;
     let truth_seqs = fasta_records
@@ -111,14 +128,18 @@ pub fn start(
         return Ok(optimal_qv_scores);
     }
 
-    let mut qv_scores_perm = Vec::new();
-    for (i, t_seq) in truth_seqs.iter().enumerate() {
-        for (j, q_seq) in query_seqs.iter().enumerate() {
-            let qv_score = calculate_qv_score(t_seq.clone(), q_seq.clone()).unwrap();
-            println!("{} {} qv_score: {}", i, j, qv_score.clone());
-            qv_scores_perm.push((i, j, qv_score));
-        }
-    }
+    let qv_scores_perm: Vec<(usize, usize, f64, f64, f64)> = truth_seqs
+        .par_iter()
+        .enumerate()
+        .flat_map_iter(|(i, t_seq)| {
+            query_seqs.iter().enumerate().map(move |(j, q_seq)| {
+                let (editdistance, alignment_length, qv_score) =
+                    calculate_qv_score(t_seq.clone(), q_seq.clone()).unwrap();
+                    debug!("{} {} qv_score: {} editdistance: {} alignment_length: {}", i, j, qv_score.clone(), editdistance, alignment_length);
+                (i, j, qv_score, editdistance, alignment_length)
+            })
+        })
+        .collect();
 
     for perm in qv_scores_perm.iter().permutations(hap_num) {
         let truth_seq_index = perm.iter().map(|x| x.0).collect::<Vec<_>>();
@@ -143,14 +164,23 @@ pub fn start(
     info!("optimal_qv_scores: {:?}", optimal_qv_scores);
 
     let mut optimal_sequence_pairs = Vec::new();
-    for (i, j, score) in optimal_perm.iter() {
-        optimal_sequence_pairs.push((truth_seqs[*i].clone(), query_seqs[*j].clone(), *score));
+    for (i, j, score, editdistance, alignment_length) in optimal_perm.iter() {
+        optimal_sequence_pairs.push((truth_seqs[*i].clone(), query_seqs[*j].clone(), *score, *editdistance, *alignment_length));
     }
 
     // write the evaluation results to a file
     let mut file = File::create(output_prefix)?;
-    for (i, j, score) in optimal_sequence_pairs.iter() {
-        writeln!(file, "{} {} {}", j.id(), j.id(), score)?;
+    if as_genotyper {
+        let seq_info = load_pangenome_description(truth_fasta)?;
+        for (i, j, score, editdistance, alignment_length) in optimal_sequence_pairs.iter() {
+            let truth_seq_id = i.id().to_string();
+            let truth_seq_allele = seq_info.get(&truth_seq_id).or(None).unwrap_or(&"Unknown".to_string()).clone();
+            writeln!(file, "{} {} {} {} {} {}", i.id(), truth_seq_allele, j.id(), score, editdistance, alignment_length)?;
+        }
+    } else {
+        for (i, j, score, editdistance, alignment_length) in optimal_sequence_pairs.iter() {
+            writeln!(file, "{} {} {} {} {}", i.id(), j.id(), score, editdistance, alignment_length)?;
+        }
     }
 
     Ok(optimal_qv_scores)

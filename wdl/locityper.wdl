@@ -165,6 +165,117 @@ task save_to_cloud {
 }
 
 
+task GenerateDB {
+    input {
+        File reference
+        File reference_index
+        File counts_jf
+        String locus_name
+        String locus_coordinates
+        File alleles_fa
+    }
+
+    Int disk_size = 10
+    String output_tar = locus_name + "db.tar.gz"
+
+    command <<<
+        set -euxo pipefail
+
+        gunzip -c ~{reference} > reference.fa
+        samtools faidx reference.fa
+
+        locityper add -d ~{locus_name}.db \
+            -r reference.fa \
+            -j ~{counts_jf} \
+            -l ~{locus_name} ~{locus_coordinates} ~{alleles_fa}
+
+        find ~{locus_name}.db -type f -exec ls -lah {} \;
+        
+        echo "compressing DB"
+        tar -czf ~{output_tar} ~{locus_name}.db
+        echo "done compressing DB"
+    >>>
+
+    output {
+        File db_tar = output_tar
+    }
+
+    runtime {
+        memory: "8 GB"
+        cpu: "1"
+        disks: "local-disk " + disk_size + " HDD"
+        preemptible: 3
+        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/lr-locityper:latest"
+    }
+}
+
+
+task LocityperPreprocessAndGenotype {
+    input {
+        File input_fq
+        File counts_file
+        File reference
+        File reference_index
+        File db_targz
+        String sample_id
+        Array[String] locus_names
+
+        Int locityper_n_cpu
+        Int locityper_mem_gb
+
+        String docker = "eichlerlab/locityper:0.19.1"
+    }
+
+    Int disk_size = 1 + 1*length(locus_names) + 2*ceil(size(select_all([input_fq, counts_file, reference, reference_index, db_targz]), "GiB"))
+    String output_tar = sample_id + ".locityper.tar.gz"
+
+    command <<<
+        set -euxo pipefail
+        
+        df -h
+
+        gunzip -c ~{reference} > reference.fa
+        samtools faidx reference.fa
+
+        nthreads=$(nproc)
+        echo "using ${nthreads} threads"
+
+        mkdir -p locityper_prepoc
+        locityper preproc -i ~{input_fq} \
+            -j ~{counts_file} \
+            -@ ${nthreads} \
+            --technology hifi \
+            -r reference.fa \
+            -o locityper_prepoc
+
+        mkdir -p db
+        tar --strip-components 1 -C db -xvzf ~{db_targz}
+
+        mkdir -p out_dir
+        locityper genotype -i ~{input_fq} \
+            -d db \
+            -p locityper_prepoc \
+            -@ ${nthreads} \
+            --debug 2 \
+            --subset-loci ~{sep=" " locus_names} \
+            -o out_dir
+
+        tar -czf ~{output_tar} out_dir
+    >>>
+
+    runtime {
+        memory: "~{locityper_mem_gb} GB"
+        cpu: locityper_n_cpu
+        disks: "local-disk ~{disk_size} HDD"
+        preemptible: 0
+        docker: docker
+    }
+
+    output {
+        File genotype_tar = output_tar
+    }
+}
+
 
 task Locityper_genotyping {
 
@@ -180,12 +291,8 @@ task Locityper_genotyping {
         Int threads = 8
     }
 
-
     command <<<
         set -eo pipefail
-
-        locityper target -d db -r ~{reference_fa} -j ~{count_file} \
-            -l ~{gene_name} ~{locus} ~{alleles_fasta}
 
         mkdir -p bg/~{prefix}
 
@@ -202,6 +309,7 @@ task Locityper_genotyping {
                            -d db \
                            -p bg/~{prefix} \
                            -@ ~{threads} \
+                           --subset-loci ~{gene_name} \
                            -o analysis/~{prefix}
 
         /usr/local/locityper/extra/into_csv.py \

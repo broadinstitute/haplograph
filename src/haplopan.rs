@@ -9,7 +9,6 @@ use flate2::read::GzDecoder;
 use std::collections::{HashMap, HashSet};
 use crate::util;
 use rust_htslib::bam::Read as BamRead;
-use minimap2::Aligner;
 use rust_htslib::bam::record::{Cigar, CigarString};
 use ndarray::Array2;
 use nalgebra::DMatrix;
