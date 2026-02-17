@@ -267,6 +267,10 @@ enum Commands {
         #[arg(short, long, default_value = "haplograph_eval")]
         output_prefix: PathBuf,
 
+        /// Repurpose as genotyper, default to false
+        #[arg(short, long, default_value = "false")]
+        as_genotyper: bool,
+
         /// Verbose output
         #[arg(short, long)]
         verbose: bool,
@@ -285,6 +289,14 @@ enum Commands {
         /// Output prefix
         #[arg(short, long, default_value = "haplograph_extract")]
         output_prefix: String,
+
+        /// if use pileup to extract reads
+        #[arg(short, long, default_value = "false")]
+        pileup: bool,
+
+        /// Sample ID
+        #[arg(short, long)]
+        sampleid: String,
 
         /// Verbose output
         #[arg(short, long)]
@@ -619,6 +631,7 @@ fn main() -> Result<()> {
             query_fasta,
             seq_number,
             output_prefix,
+            as_genotyper,
             verbose,
         } => {
             // Initialize logging
@@ -629,12 +642,14 @@ fn main() -> Result<()> {
                     log::LevelFilter::Info
                 })
                 .init();
-            eval::start(&truth_fasta, &query_fasta, seq_number, &output_prefix)?;
+            eval::start(&truth_fasta, &query_fasta, seq_number, &output_prefix, as_genotyper)?;
         }
         Commands::Extract {
             bamfile,
             locus,
             output_prefix,
+            pileup,
+            sampleid,
             verbose,
         } => {
             // Initialize logging
@@ -654,6 +669,8 @@ fn main() -> Result<()> {
                 end,
                 false,
                 output_prefix.clone().to_string(),
+                sampleid.clone(),
+                pileup,
             )?;
         }
     }
