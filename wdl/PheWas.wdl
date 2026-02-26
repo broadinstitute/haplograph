@@ -5,10 +5,13 @@ workflow PheWAS{
         description: "a workflow for haplotype PheWAS association"
     }
     input{
-        File genotype_file
+        File? genotype_file
         File phenotype_file
         File meta_data_file
+        File? genotype_json
         File phecodex_description
+        Int allele_resolution
+        Boolean additive_mode
 
         String memory = "8G"
         Int cpu = 2
@@ -17,19 +20,31 @@ workflow PheWAS{
 
     }
 
-    call PreProcessFile{input:
-        meta_data_file = meta_data_file,
-        phecodex_info = phenotype_file,
-        genotype_info = genotype_file,
-        disk_size = disk_size
+    if (defined(genotype_json)) {
+        call PreProcessFileFromJSON{input:
+            meta_data_file = meta_data_file,
+            phecodex_info = phenotype_file,
+            genotype_json = select_first([genotype_json,genotype_file]),
+            allele_resolution = allele_resolution,
+            disk_size = disk_size
+        }
+    }
+    if (defined(genotype_file)) {
+        call PreProcessFile{input:
+            meta_data_file = meta_data_file,
+            phecodex_info = phenotype_file,
+            genotype_info = select_first([genotype_json,genotype_file]),
+            disk_size = disk_size
+        }
     }
 
-    scatter (haplotype in PreProcessFile.haplotype_list) {
+    scatter (haplotype in select_first([PreProcessFileFromJSON.haplotype_list,PreProcessFile.haplotype_list])) {
         call RunPheWAS {input:
-            genotype_file = PreProcessFile.genotype_file,
-            phenotype_file = PreProcessFile.phenotype_file,
-            meta_data_file = PreProcessFile.metadata_file,
+            genotype_file =select_first([PreProcessFileFromJSON.genotype_file,PreProcessFile.genotype_file]),
+            phenotype_file =select_first([PreProcessFileFromJSON.phenotype_file,PreProcessFile.phenotype_file]),
+            meta_data_file = select_first([PreProcessFileFromJSON.metadata_file,PreProcessFile.metadata_file]),
             haplotype = haplotype,
+            additive_genotype = additive_mode,
             memory = memory,
             cpu = cpu,
             disk_size = disk_size,
@@ -51,6 +66,189 @@ struct RuntimeAttr {
     Int? max_retries
     String? docker
 }
+
+task PreProcessFileFromJSON {
+    input {
+        File meta_data_file
+        File phecodex_info
+        File genotype_json
+        Int allele_resolution
+        Int disk_size
+        Int minimal_case_num = 20
+        Float minimal_af = 0.0001
+
+        RuntimeAttr? runtime_attr_override
+
+    }
+
+    command <<<
+        set -euxo pipefail
+
+        python - --phecodex ~{phecodex_info} \
+                --genotype ~{genotype_json} \
+                --metadata ~{meta_data_file} \
+                --case_num ~{minimal_case_num} \
+                --threshold ~{minimal_af} \
+                --resolution ~{allele_resolution} \
+                <<-'EOF'
+        import os
+        import pandas as pd
+        import subprocess
+        import numpy
+        from datetime import date
+        import argparse
+        import json
+
+
+        def main():
+            parser = argparse.ArgumentParser()
+
+            parser.add_argument('--phecodex',
+                                type=str)
+            parser.add_argument('--genotype',
+                                type=str)
+            parser.add_argument('--metadata',
+                                type=str)
+            parser.add_argument('--case_num',
+                    type=int)
+            parser.add_argument('--threshold',
+                    type=float)
+            parser.add_argument('--resolution',
+                    type=int)
+
+            args = parser.parse_args()
+
+            # load metadata info
+            df_meta = pd.read_csv(args.metadata, sep = ",", header=0, dtype=str)
+            print(df_meta.head())
+            
+            # load genotypes
+
+            threshold = args.threshold
+            with open(args.genotype, "r") as fp:
+                D = json.load(fp)
+
+            Info = {}
+            resolution = args.resolution
+            pid_set = set()
+            for haplotype, l in D.items():
+                if haplotype.startswith("KIR"):
+                    if resolution == 0:
+                        genelist = []
+                        for h in haplotype.split(","):
+                            genelist.append(h.split("*")[0])
+                    elif resolution == 1:
+                        genelist = []
+                        for h in haplotype.split(","):
+                            genebody = h.split("*")[0]
+                            allele = h.split("*")[1][:3]
+                            genelist.append(genebody + "*" + allele)                  
+                    elif resolution == 2:
+                        genelist = []
+                        for h in haplotype.split(","):
+                            genebody = h.split("*")[0]
+                            allele = h.split("*")[1][:5]
+                            genelist.append(genebody + "*" + allele)   
+                    else:
+                        genelist = haplotype.split(",")              
+                else:
+                    genelist = [":".join(h.split(":")[:resolution]) for h in haplotype.split(",")]
+                hap = ",".join(genelist)
+                Info[hap] = Info.get(hap, {})
+                for hapid in l:
+                    pid = hapid.split("_")[0]
+                    pid_set.add(pid)
+                    Info[hap][pid] = Info[hap].get(pid, 0) + 1
+            df_genotype_all = pd.DataFrame(Info).fillna(0)
+            df_genotype_all.index = df_genotype_all.index.astype(str)
+
+            df_freq = df_genotype_all.sum(axis = 0) / (df_genotype_all.shape[0] * 2)
+            df_genotype = df_genotype_all.loc[:, df_freq > threshold]
+            df_genotype.index = df_genotype.index.astype(str)
+            print(df_genotype.head())
+
+            # load phecodex
+            filter_pheno_df = pd.read_csv(args.phecodex, header=0, index_col=0, dtype=str)
+            # replace TRUE, FALSE with 1 and 0
+            replacement_map = {'True': 1, 'False': 0, "FALSE": 0, "TRUE": 1, "NaN": numpy.nan}
+
+            # Replace the strings with numbers
+            filter_pheno_df = filter_pheno_df.replace(replacement_map)
+
+            # metadata filtering
+            df_meta = df_meta[['person_id', 'age', 'PC1', 'PC2', 'PC3', 'PC4', 'PC5', 'sex_at_birth']].drop_duplicates()
+            indexlist = set(filter_pheno_df['person_id'].astype(str).tolist()) & set(df_meta['person_id'].astype(str).tolist()) & set(df_genotype.index.astype(str).tolist())
+
+            print(len(indexlist))
+            indexlist = sorted(indexlist)
+            df_meta = df_meta.loc[df_meta['person_id'].isin(indexlist), :]
+            df_meta = df_meta.set_index("person_id")
+            filter_pheno_df = filter_pheno_df.loc[filter_pheno_df['person_id'].isin(indexlist), :]
+            filter_pheno_df = filter_pheno_df.set_index("person_id")
+            df_genotype = df_genotype.loc[indexlist, :]
+            df_genotype['person_id'] = df_genotype.index.tolist()
+
+            # filter phecodex data given selected cohort
+            col_sums = filter_pheno_df.astype(float).sum(axis = 0)
+            condition = col_sums > args.case_num
+            filter_pheno_df = filter_pheno_df.loc[:,condition]
+
+            df_pheno_new = filter_pheno_df.astype(float) > 0.5
+
+            replacement_map_sex = {'PMI: Skip': numpy.nan, 
+                   'Sex At Birth: Sex At Birth None Of These': numpy.nan, 
+                   'I prefer not to answer':numpy.nan,
+                   'Intersex' : numpy.nan
+                  }
+            df_meta = df_meta.replace(replacement_map_sex)
+
+            df_genotype.astype(float).to_csv("genotypes.csv", index = True)
+            df_pheno_new.to_csv("phenotypes.csv", index=True)
+            df_meta.to_csv("metadata.csv", index=True)
+
+            with open("haplotypelist.txt", 'w') as fp:
+                for item in df_genotype.columns.tolist():
+                    if item == "person_id":
+                        continue
+                    fp.writelines(item + "\n")
+
+        if __name__ == "__main__":
+            main()
+
+        EOF
+
+    >>>
+
+    output {
+        File genotype_file = "genotypes.csv"
+        File phenotype_file = "phenotypes.csv"
+        File metadata_file = "metadata.csv"
+        Array[String] haplotype_list = read_lines("haplotypelist.txt")
+        
+    }
+
+    #########################
+    RuntimeAttr default_attr = object {
+        cpu_cores:          1,
+        mem_gb:             4,
+        disk_gb:            disk_size,
+        boot_disk_gb:       25,
+        preemptible_tries:  2,
+        max_retries:        2,
+        docker:             "us.gcr.io/broad-dsp-lrma/hangsuunc/midashla:v0"
+    }
+    RuntimeAttr runtime_attr = select_first([runtime_attr_override, default_attr])
+    runtime {
+        cpu:                    select_first([runtime_attr.cpu_cores,         default_attr.cpu_cores])
+        memory:                 select_first([runtime_attr.mem_gb,            default_attr.mem_gb]) + " GiB"
+        disks: "local-disk " +  select_first([runtime_attr.disk_gb,           default_attr.disk_gb]) + " HDD"
+        bootDiskSizeGb:         select_first([runtime_attr.boot_disk_gb,      default_attr.boot_disk_gb])
+        preemptible:            select_first([runtime_attr.preemptible_tries, default_attr.preemptible_tries])
+        maxRetries:             select_first([runtime_attr.max_retries,       default_attr.max_retries])
+        docker:                 select_first([runtime_attr.docker,            default_attr.docker])
+    }
+}
+
 
 task PreProcessFile {
     input {
@@ -192,6 +390,7 @@ task RunPheWAS {
     File phenotype_file
     File meta_data_file
     String haplotype
+    Boolean additive_genotype
 
     # Runtime parameters
     String memory
@@ -210,6 +409,7 @@ task RunPheWAS {
             phenotype_file <- args[2]
             meta_data_file <- args[3]
             haplotype <- args[4]
+            additive_mode <- args[5]
             
             library(tidyverse)
             library(dplyr)
@@ -243,6 +443,7 @@ task RunPheWAS {
                             genotypes=c(haplotype),
                             covariates=c("sex_at_birth","age","PC1",
                                         "PC2","PC3", "PC4", "PC5"), 
+                            additive.genotypes = additive_mode, 
                             cores=8)
             
             results <- results[!is.na(results$p), ]
@@ -254,13 +455,15 @@ task RunPheWAS {
             print(c(haplotype,num_of_sig))
 
 
-            output_file <- sprintf("%s_significant_%s_results.csv", haplotype, num_of_sig)
+            haplotype_clean <- gsub("KIR", "", haplotype)
+            haplotype_clean_ <- gsub("HLA", "", haplotype_clean)
+            output_file <- sprintf("phewas_significant_%s_results.csv", num_of_sig)
             write.csv(results, file = output_file, row.names = FALSE) 
             
                      
         ' > run_PheWAS.R
 
-    Rscript run_PheWAS.R ~{genotype_file} ~{phenotype_file} ~{meta_data_file} ~{haplotype} > phewaslog.log 2>&1
+    Rscript run_PheWAS.R ~{genotype_file} ~{phenotype_file} ~{meta_data_file} ~{haplotype} ~{additive_genotype} > phewaslog.log 2>&1
     >>>
 
   output {
