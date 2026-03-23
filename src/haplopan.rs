@@ -192,10 +192,15 @@ fn calculate_matrix(
     Ok((matrix, mrow_index, reference_index))
 } 
 
+/// `coverage_norm_factor`: if > 0, divide each matrix column by this value before cosine
+/// normalization; if <= 0, use raw counts. Columns are always L2-normalized so that
+/// dot products are cosine similarities in [-1, 1] (non-negative k-mer counts => [0, 1]).
+/// Pair score is the mean cosine: (cos(i,sample) + cos(j,sample)) / 2.
 fn calculate_best_pair(
-    x: &Array2<f64>,          // features x entities
+    x: &Array2<f64>, // features x entities
     entities: &[String],
     sample_id: &String,
+    coverage_norm_factor: f64,
 ) -> (String, String, f64) {
     let n = entities.len();
     let t_idx = entities.iter().position(|s| s == &sample_id.clone()).expect("test not found");
@@ -206,19 +211,26 @@ fn calculate_best_pair(
         .expect("Array2 must be contiguous to convert to nalgebra");
     let vn = DMatrix::from_row_slice(rows, cols, x_slice);
 
-    // normalize columns in-place
-    let column_norms: Vec<f64> = vn.column_iter()
-        .map(|column| column.norm())
-        .collect();
+    // Optional depth scaling, then L2-normalize each column so dot products = cosine similarity.
     let mut vn_clone = vn.clone();
-    for j in 0..cols {
-        let norm = if column_norms[j] == 0.0 { 1.0 } else { column_norms[j] };
-        vn_clone.column_mut(j).scale_mut(1.0 / norm);
+    if coverage_norm_factor > 0.0 {
+        let inv = 1.0 / coverage_norm_factor;
+        for j in 0..cols {
+            vn_clone.column_mut(j).scale_mut(inv);
+        }
+    }else{
+        for j in 0..cols {
+            let norm = vn_clone.column(j).norm();
+            if norm > 0.0 {
+                vn_clone.column_mut(j).scale_mut(1.0 / norm);
+            }
+        }
     }
 
+
     let t_vec = vn_clone.column(t_idx).into_owned();
-    let t_sim = vn_clone.transpose() * &t_vec; // (n,)
-    let s = vn_clone.transpose() * &vn_clone; // (n,n)
+    let t_sim = vn_clone.transpose() * &t_vec;
+    let s = vn_clone.transpose() * &vn_clone;
 
     let (best_score, best_pair) = (0..n)
         .into_par_iter()
@@ -230,10 +242,15 @@ fn calculate_best_pair(
                 if j == t_idx {
                     continue;
                 }
-                let score = (t_sim[i] + t_sim[j]) / (2.0 + 2.0 * s[(i, j)]).sqrt();
-                if score > local_best_score {
-                    local_best_score = score;
+                let vector_sum = vn_clone.column(i) + vn_clone.column(j);
+                let cosine_similarity = vector_sum.dot(&t_vec) / (vector_sum.norm() * t_vec.norm());
+                if cosine_similarity > local_best_score {
+                    local_best_score = cosine_similarity;
                     local_best_pair = (i, j);
+                    println!(
+                        "score (mean cos to sample): {}, ref_i: {}, ref_j: {}, i: {}, j: {}, cos(i,sample): {}, cos(j,sample): {}, cos(i,j): {}",
+                        cosine_similarity, &entities[i], &entities[j], i, j, t_sim[i], t_sim[j], s[(i, j)]
+                    );
                 }
             }
             (local_best_score, local_best_pair)
@@ -406,6 +423,7 @@ pub fn start(
     output_prefix: &String,
     data_technology: &String,
     sample_id: &String,
+    coverage_norm_factor: f64,
 ) -> Result<(String, String, f64)> {
     info!("Loading Pangenome File: {}", pangenome_path.display());
     let (pangenome_kmer_dict, seq_info) = load_pangenome(pangenome_path, rollingkmer_list)?;
@@ -415,7 +433,12 @@ pub fn start(
     let (matrix, mrow_index, reference_index) = calculate_matrix(&read_kmer_dict, &pangenome_kmer_dict, &sample_id)?;
 
     info!("Calculating Best Path");
-    let best_path = calculate_best_pair(&matrix, &reference_index, sample_id);
+    let best_path = calculate_best_pair(
+        &matrix,
+        &reference_index,
+        sample_id,
+        coverage_norm_factor,
+    );
     info!("Best Path Calculated: {:?}, {}, {}", seq_info[&best_path.0], seq_info[&best_path.1], best_path.2);
     let mut final_sequences_dict = HashMap::new();
     let fasta_reader = FastaReader::from_file(&pangenome_path.display().to_string())?;

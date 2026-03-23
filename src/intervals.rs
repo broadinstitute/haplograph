@@ -66,6 +66,9 @@ pub fn extract_haplotypes_coordinates_from_bam(
                 if primary_only && (is_secondary || is_supplementary) {
                     continue;
                 }
+                if record.seq().len()<2 {
+                    continue;
+                }
 
                 if !read_sequence_dict.contains_key(&qname) {
                     read_sequence_dict.insert(qname.clone(), read_seq);
@@ -132,7 +135,6 @@ pub fn extract_haplotypes_coordinates_from_bam(
                     }
                     bam::pileup::Indel::None => {
                         // For matches/mismatches, add the base
-
                         if let Some(qpos) = alignment.qpos() {
                             let a = record.seq()[qpos];
                             let q = record.qual()[qpos];

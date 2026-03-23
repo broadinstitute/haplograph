@@ -264,8 +264,8 @@ task get_truth_haplotypes_from_annotation {
                     char_length = 60
                     line_number = len(t_seq) // char_length
 
-                    for i in range(line_number):
-                        f.write(t_seq[i*char_length:(i+1)*char_length] + "\n")
+                    for j in range(line_number):
+                        f.write(t_seq[i*char_length:(j+1)*char_length] + "\n")
                     f.write(t_seq[line_number*char_length:] + "\n")
 
 
