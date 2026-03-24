@@ -192,12 +192,9 @@ fn calculate_matrix(
     Ok((matrix, mrow_index, reference_index))
 } 
 
-/// `coverage_norm_factor`: if > 0, divide each matrix column by this value before cosine
-/// normalization; if <= 0, use raw counts. Columns are always L2-normalized so that
-/// dot products are cosine similarities in [-1, 1] (non-negative k-mer counts => [0, 1]).
-/// Pair score is the mean cosine: (cos(i,sample) + cos(j,sample)) / 2.
+
 fn calculate_best_pair(
-    x: &Array2<f64>, // features x entities
+    x: &Array2<f64>,          // features x entities
     entities: &[String],
     sample_id: &String,
     coverage_norm_factor: f64,
@@ -211,26 +208,19 @@ fn calculate_best_pair(
         .expect("Array2 must be contiguous to convert to nalgebra");
     let vn = DMatrix::from_row_slice(rows, cols, x_slice);
 
-    // Optional depth scaling, then L2-normalize each column so dot products = cosine similarity.
+    // normalize columns in-place
+    let column_norms: Vec<f64> = vn.column_iter()
+        .map(|column| column.norm())
+        .collect();
     let mut vn_clone = vn.clone();
-    if coverage_norm_factor > 0.0 {
-        let inv = 1.0 / coverage_norm_factor;
-        for j in 0..cols {
-            vn_clone.column_mut(j).scale_mut(inv);
-        }
-    }else{
-        for j in 0..cols {
-            let norm = vn_clone.column(j).norm();
-            if norm > 0.0 {
-                vn_clone.column_mut(j).scale_mut(1.0 / norm);
-            }
-        }
+    for j in 0..cols {
+        let norm = if column_norms[j] == 0.0 { 1.0 } else { column_norms[j] };
+        vn_clone.column_mut(j).scale_mut(1.0 / norm);
     }
 
-
     let t_vec = vn_clone.column(t_idx).into_owned();
-    let t_sim = vn_clone.transpose() * &t_vec;
-    let s = vn_clone.transpose() * &vn_clone;
+    let t_sim = vn_clone.transpose() * &t_vec; // (n,)
+    let s = vn_clone.transpose() * &vn_clone; // (n,n)
 
     let (best_score, best_pair) = (0..n)
         .into_par_iter()
@@ -242,15 +232,10 @@ fn calculate_best_pair(
                 if j == t_idx {
                     continue;
                 }
-                let vector_sum = vn_clone.column(i) + vn_clone.column(j);
-                let cosine_similarity = vector_sum.dot(&t_vec) / (vector_sum.norm() * t_vec.norm());
-                if cosine_similarity > local_best_score {
-                    local_best_score = cosine_similarity;
+                let score = (t_sim[i] + t_sim[j]) / (2.0 + 2.0 * s[(i, j)]).sqrt();
+                if score > local_best_score {
+                    local_best_score = score;
                     local_best_pair = (i, j);
-                    println!(
-                        "score (mean cos to sample): {}, ref_i: {}, ref_j: {}, i: {}, j: {}, cos(i,sample): {}, cos(j,sample): {}, cos(i,j): {}",
-                        cosine_similarity, &entities[i], &entities[j], i, j, t_sim[i], t_sim[j], s[(i, j)]
-                    );
                 }
             }
             (local_best_score, local_best_pair)
@@ -268,6 +253,7 @@ fn calculate_best_pair(
         best_distance,
     )
 }
+
 
 fn realign_minimap2(
     ref_fa: &PathBuf,
