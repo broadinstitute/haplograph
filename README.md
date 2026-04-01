@@ -54,7 +54,7 @@ haplograph haplograph \
     --locus chr6:29943661-29943700 \
     --output-prefix output/HLA_A
 ```
-### 3. HaploPan (Pangenome-guided Analysis)
+### 3. HaploPan (Pangenome-guided Analysis, under construction)
 
 HaploPan leverages a pangenome FASTA to resolve complex haplotypes (e.g., duplications, deletions, and translocations) and then realigns reads to the best matching pangenome paths before running local assembly.
 
