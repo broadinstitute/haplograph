@@ -176,7 +176,20 @@ task PreProcessFileFromJSON {
             filter_pheno_df = filter_pheno_df.replace(replacement_map)
 
             # metadata filtering
-            df_meta = df_meta[['person_id', 'age', 'PC1', 'PC2', 'PC3', 'PC4', 'PC5', 'sex_at_birth']].drop_duplicates()
+            # Clean covariate - sex encoding
+            df_meta["sex"] = df_meta["sex_at_birth"].map({"Male": 1, "Female": 0})
+            df_meta = df_meta[df_meta["sex"].isin([0, 1])]
+            # Age covariates
+            df_meta["age"] = df_meta["age"].astype(float)
+            df_meta["age2"] = df_meta["age"] ** 2
+            df_meta["age_sex"] = df_meta["age"] * df_meta["sex"]
+            df_meta["age2_sex"] = df_meta["age2"] * df_meta["sex"]
+
+            cols = (
+                ["person_id", "sex", "age", "age2", "age_sex", "age2_sex", "ancestry_pred"] + [f"PC{i}" for i in range(1, 17)]
+            )
+
+            df_meta = df_meta[cols].drop_duplicates()
             indexlist = set(filter_pheno_df['person_id'].astype(str).tolist()) & set(df_meta['person_id'].astype(str).tolist()) & set(df_genotype.index.astype(str).tolist())
 
             print(len(indexlist))
@@ -310,7 +323,20 @@ task PreProcessFile {
             filter_pheno_df = filter_pheno_df.replace(replacement_map)
 
             # metadata filtering
-            df_meta = df_meta[['person_id', 'age', 'PC1', 'PC2', 'PC3', 'PC4', 'PC5', 'sex_at_birth']].drop_duplicates()
+            # Clean covariate - sex encoding
+            df_meta["sex"] = df_meta["sex_at_birth"].map({"Male": 1, "Female": 0})
+            df_meta = df_meta[df_meta["sex"].isin([0, 1])]
+            # Age covariates
+            df_meta["age"] = df_meta["age"].astype(float)
+            df_meta["age2"] = df_meta["age"] ** 2
+            df_meta["age_sex"] = df_meta["age"] * df_meta["sex"]
+            df_meta["age2_sex"] = df_meta["age2"] * df_meta["sex"]
+
+            cols = (
+                ["person_id", "sex", "age", "age2", "age_sex", "age2_sex", "ancestry_pred"] + [f"PC{i}" for i in range(1, 17)]
+            )
+
+            df_meta = df_meta[cols].drop_duplicates()
             indexlist = set(filter_pheno_df['person_id'].astype(str).tolist()) & set(df_meta['person_id'].astype(str).tolist()) & set(df_genotype.index.astype(str).tolist())
 
             print(len(indexlist))
@@ -441,8 +467,9 @@ task RunPheWAS {
             results <- phewas_ext(data,
                             phenotypes=names(phenotypes)[c(-1)],  # All phecode columns
                             genotypes=c(haplotype),
-                            covariates=c("sex_at_birth","age","PC1",
-                                        "PC2","PC3", "PC4", "PC5"), 
+                            method = "logistf",
+                            covariates=c("sex","age", "age2", "age_sex", "age2_sex", "PC1",
+                                        "PC2","PC3", "PC4", "PC5", "PC6", "PC7", "PC8", "PC9", "PC10", "PC11", "PC12", "PC13" , "PC14", "PC15", "PC16"), 
                             additive.genotypes = additive_mode, 
                             cores=8)
             

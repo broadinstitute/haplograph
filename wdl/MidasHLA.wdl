@@ -487,38 +487,29 @@ task RunMidasHLA {
             sorted_HLA_results["gene"] = sapply(sorted_HLA_results$allele, function(a) strsplit(a, "*", fixed = TRUE)[[1]][1])
             sorted_HLA_results <- sorted_HLA_results %>% group_by(gene) %>% mutate(position = row_number()) %>% ungroup() # Optional: ungroup the data after the operation
 
+            # Build x-axis offsets from gene order in the table.
+            gene_order <- unique(sorted_HLA_results$gene)
+            gene_offsets <- data.frame(
+                gene = gene_order,
+                offset = (seq_along(gene_order) - 1) * 50
+            )
+
             plot_data <- sorted_HLA_results %>%
+            left_join(gene_offsets, by = "gene") %>%
             mutate(
                 # Calculate -log10 P-value
                 logP = -log10(p.value),
                 # Create a continuous X-axis for multiple genes
                 # (This ensures HLA-B plots to the right of HLA-A, not on top of it)
-                bp_cum = position + 
-                case_when(gene == "A" ~ 0,
-                            gene == "B" ~ 50,
-                            gene == "C" ~ 100,
-                            gene == "DPA1" ~ 150,
-                            gene == "DPA2" ~ 200,
-                            gene == "DPB1" ~ 250,
-                            gene == "DPB2" ~ 300,
-                            gene == "DQA1" ~ 350,
-                            gene == "DQA2" ~ 400,
-                            gene == "DQB1" ~ 450,
-                            gene == "DQB2" ~ 500,
-                            gene == "DRA" ~ 550,
-                            gene == "DRB1" ~ 600,
-                            gene == "DRB3" ~ 650,
-                            gene == "DRB4" ~ 700,
-                            gene == "DRB5" ~ 750, 
-                            gene == "DPB2" ~ 800, 
-                            gene == "DQB1" ~ 850),
+                bp_cum = position + offset,
                 label = ifelse(logP > 2, as.character(allele), "")
             )
             
             # Calculate center positions for x-axis labels
             axis_set <- plot_data %>% 
-                group_by(gene) %>% 
-                summarize(center = mean(bp_cum))
+                group_by(gene, offset) %>% 
+                summarize(center = mean(bp_cum), .groups = "drop") %>%
+                arrange(offset)
 
             # 3. Generate the Plot
             manhattan_plot_obj <- ggplot(plot_data, aes(x = bp_cum, y = logP, color = gene)) +
