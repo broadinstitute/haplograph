@@ -106,7 +106,7 @@ pub fn start(
         }
         // let read_name = String::from_utf8_lossy(&r.qname()).to_string();
         if !read_coordinates.contains_key(read_name) {
-            warn!("Read name not found in read coordinates: {:?}", read_name);
+            // warn!("Read name not found in read coordinates: {:?}", read_name);
             continue;
         }
         let (read_start, read_end) = *read_coordinates.get(read_name).unwrap();

@@ -102,7 +102,7 @@ pub fn start(
             let mut record = writer.empty_record();
             let reference_seq = reference_sequence[*start..*end].to_string();
             let mut bam = util::open_bam_file(&bam_path.clone());
-            let haplotype_info = intervals::start(
+            let (haplotype_info, _,_, _) = intervals::start(
                 &mut bam,
                 reference_fa,
                 chromosome,
