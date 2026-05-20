@@ -393,6 +393,7 @@ fn main() -> Result<()> {
             
             let output_p = PathBuf::from(&output_prefix);
             let graph_gfa = output_p.with_extension("gfa");
+            
             asm::start(
                 &graph_gfa,
                 true,

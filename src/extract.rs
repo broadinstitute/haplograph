@@ -50,25 +50,55 @@ pub(crate) fn query_boundary_offset_from_cigar(
     }
 }
 
+/// Map a locus to query slice bounds `[query_start, query_end)`.
+///
+/// Locus coordinates follow BED / htslib convention: `[locus_start, locus_end_excl)` on the
+/// reference (start inclusive, end exclusive). Same convention as `bam.fetch` and pileup
+/// checks in `intervals.rs`.
+///
+/// When the locus extends past the alignment (breakpoints / partial overlap), coordinates
+/// are clamped to the read's aligned reference footprint instead of returning `None`.
+pub(crate) fn alignment_query_interval_bounds(
+    cigar: &[Cigar],
+    ref_start: u64,
+    ref_end_excl: u64,
+    locus_start: u64,
+    locus_end_excl: u64,
+) -> Option<(usize, usize)> {
+    if locus_start >= locus_end_excl {
+        return None;
+    }
+    // No overlap between locus and this alignment interval.
+    if locus_end_excl <= ref_start || locus_start >= ref_end_excl {
+        return None;
+    }
+
+    let overlap_start = locus_start.max(ref_start);
+    let overlap_end_excl = locus_end_excl.min(ref_end_excl);
+
+    let query_start = query_boundary_offset_from_cigar(cigar, ref_start, overlap_start)?;
+    let query_end = query_boundary_offset_from_cigar(cigar, ref_start, overlap_end_excl)?;
+
+    if query_end <= query_start {
+        return None;
+    }
+
+    Some((query_start, query_end))
+}
+
 pub(crate) fn record_interval_query_bounds(
     record: &BamRecord,
     start: u64,
     end: u64,
 ) -> Option<(usize, usize)> {
-    if start > end {
-        return None;
-    }
-
-    let ref_start = record.pos() as u64;
-    let ref_end = record.cigar().end_pos() as u64;
-    if start < ref_start || end > ref_end {
-        return None;
-    }
-
-    let cigar = record.cigar().iter().copied().collect::<Vec<_>>();
-    let query_start = query_boundary_offset_from_cigar(&cigar, ref_start, start)?;
-    let query_end = query_boundary_offset_from_cigar(&cigar, ref_start, end)?;
-    Some((query_start, query_end))
+    let cigar: Vec<Cigar> = record.cigar().iter().copied().collect();
+    alignment_query_interval_bounds(
+        &cigar,
+        record.pos() as u64,
+        record.cigar().end_pos() as u64,
+        start,
+        end,
+    )
 }
 
 pub fn normalized_read_slice_bounds(
@@ -315,7 +345,10 @@ pub fn start(
 
 #[cfg(test)]
 mod tests {
-    use super::{normalized_read_slice_bounds, query_boundary_offset_from_cigar};
+    use super::{
+        alignment_query_interval_bounds, normalized_read_slice_bounds,
+        query_boundary_offset_from_cigar,
+    };
     use rust_htslib::bam::record::Cigar;
 
     #[test]
@@ -373,5 +406,44 @@ mod tests {
         let start = query_boundary_offset_from_cigar(&cigar, 100, 300).unwrap();
         let end = query_boundary_offset_from_cigar(&cigar, 100, 380).unwrap();
         assert_eq!((start, end), (50, 80));
+    }
+
+    #[test]
+    fn locus_end_past_alignment_clamps_to_alignment_end() {
+        let cigar = vec![Cigar::Match(100)];
+        let ref_start = 1000;
+        let ref_end_excl = 1100;
+        let bounds = alignment_query_interval_bounds(&cigar, ref_start, ref_end_excl, 1050, 1200)
+            .unwrap();
+        assert_eq!(bounds, (50, 100));
+    }
+
+    #[test]
+    fn locus_start_before_alignment_clamps_to_alignment_start() {
+        let cigar = vec![Cigar::Match(100)];
+        let ref_start = 1000;
+        let ref_end_excl = 1100;
+        // Locus [900, 1051) overlaps alignment at [1000, 1051) -> 51 query bases [0, 51)
+        let bounds = alignment_query_interval_bounds(&cigar, ref_start, ref_end_excl, 900, 1051)
+            .unwrap();
+        assert_eq!(bounds, (0, 51));
+    }
+
+    #[test]
+    fn locus_fully_inside_alignment_uses_half_open_end() {
+        let cigar = vec![Cigar::Match(100)];
+        let ref_start = 1000;
+        let ref_end_excl = 1100;
+        // Locus [1010, 1020) -> 10 bases, not 11
+        let bounds = alignment_query_interval_bounds(&cigar, ref_start, ref_end_excl, 1010, 1020)
+            .unwrap();
+        assert_eq!(bounds, (10, 20));
+    }
+
+    #[test]
+    fn locus_with_no_overlap_returns_none() {
+        let cigar = vec![Cigar::Match(100)];
+        let bounds = alignment_query_interval_bounds(&cigar, 1000, 1100, 2000, 2100);
+        assert!(bounds.is_none());
     }
 }

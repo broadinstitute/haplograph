@@ -162,9 +162,9 @@ task haplograph {
     }
 
     runtime {
-        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograph:v3"
-        memory: "16 GB"
-        cpu: 4
+        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograph:dev"
+        memory: "4 GB"
+        cpu: 1
         disks: "local-disk 100 SSD"
     }
 }
@@ -192,9 +192,9 @@ task haplograph_eval {
     }
 
     runtime {
-        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograph:v2"
-        memory: "16 GB"
-        cpu: 4
+        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograph:dev"
+        memory: "4 GB"
+        cpu: 1
         disks: "local-disk 100 SSD"
     }
 }
@@ -214,15 +214,25 @@ task get_truth_haplotypes {
         set -euxo pipefail
 
         /haplograph/target/release/haplograph extract -b ~{truth_hap1_bam} \
+                                                -l ~{locus} \
                                                 -o ~{prefix}.truth1 \
-                                                -l ~{locus} 
+                                                -s "~{prefix}_hap1"
 
         /haplograph/target/release/haplograph extract -b ~{truth_hap2_bam} \
+                                                -l ~{locus} \
                                                 -o ~{prefix}.truth2 \
-                                                -l ~{locus}
+                                                -s "~{prefix}_hap2"
 
-        cat ~{prefix}.truth1.fasta ~{prefix}.truth2.fasta > ~{prefix}.truth.fasta
-        
+        truth_files=()
+        [[ -f ~{prefix}.truth1.fasta ]] && truth_files+=(~{prefix}.truth1.fasta)
+        [[ -f ~{prefix}.truth2.fasta ]] && truth_files+=(~{prefix}.truth2.fasta)
+
+        if [[ ${#truth_files[@]} -gt 0 ]]; then
+            cat "${truth_files[@]}" > ~{prefix}.truth.fasta
+        else
+            touch ~{prefix}.truth.fasta
+        fi
+
     >>>
 
     output {
@@ -231,7 +241,7 @@ task get_truth_haplotypes {
     }
 
     runtime {
-        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograph:v2"
+        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograph:dev"
         memory: "4 GB"
         cpu: 1
         disks: "local-disk 100 SSD"
