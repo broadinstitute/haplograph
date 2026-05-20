@@ -28,10 +28,20 @@ pub struct EdgeInfo {
     pub overlapping_reads: String,
 }
 
+fn node_window_start(node_id: &str) -> usize {
+    let hap_name = node_id.split('.').nth(1).unwrap_or_default().to_string();
+    util::split_locus(hap_name).1
+}
+
 pub fn get_node_edge_info(
     windows: &Vec<(String, usize, usize)>,
-    final_hap_list: &Vec<(HashMap<String, (String, HashMap<String, HashMap<usize, f32>>, f64)>, HashMap<String, (u64, u64)>, HashMap<String, Vec<u8>>, HashMap<String, String>)>,
-    min_reads: usize
+    final_hap_list: &Vec<(
+        HashMap<String, (String, HashMap<String, HashMap<usize, f32>>, f64)>,
+        HashMap<String, (u64, u64)>,
+        HashMap<String, Vec<u8>>,
+        HashMap<String, String>,
+    )>,
+    min_reads: usize,
 ) -> (
     HashMap<String, NodeInfo>,
     HashMap<(String, String), EdgeInfo>,
@@ -41,7 +51,12 @@ pub fn get_node_edge_info(
     let mut coordinate_list = Vec::new();
 
     for (index, window) in windows.iter().enumerate() {
-        let (final_hap_list_index, coordinate_list_index, _read_sequence_dict_index, _read_strand_dict_index) = final_hap_list[index].clone();
+        let (
+            final_hap_list_index,
+            coordinate_list_index,
+            _read_sequence_dict_index,
+            _read_strand_dict_index,
+        ) = final_hap_list[index].clone();
         for (i, (final_haplotype_seq, (cigar, read_dict, allele_frequency))) in
             final_hap_list_index.iter().enumerate()
         {
@@ -127,7 +142,8 @@ pub fn get_node_edge_info(
     }
     let mut connectivity: HashMap<(String, String), HashSet<String>> = HashMap::new();
     for (read_id, mut nodes_on_read) in per_read_coordinates.into_iter() {
-        nodes_on_read.sort_by_key(|(_, start, end)| (*start, *end));
+        nodes_on_read
+            .sort_by_key(|(node_id, start, end)| (*start, *end, node_window_start(node_id)));
         for pair in nodes_on_read.windows(2) {
             let (node_id, _start, end) = &pair[0];
             let (next_node_id, next_start, _next_end) = &pair[1];
@@ -135,35 +151,56 @@ pub fn get_node_edge_info(
                 continue;
             }
             if let Some(gap) = next_start.checked_sub(*end) {
-                println!("gap: {}", gap);
-                if gap < 2 {
-                    connectivity
-                        .entry((node_id.clone(), next_node_id.clone()))
-                        .or_default()
-                        .insert(read_id.clone());
+                if gap > 10{
+                    continue;
                 }
+               
+                connectivity
+                    .entry((node_id.clone(), next_node_id.clone()))
+                    .or_default()
+                    .insert(read_id.clone());
+                
             }
         }
     }
-    println!("connectivity: {:?}", connectivity);
+    // println!("connectivity: {:?}", connectivity);
 
     for ((node_id, next_node_id), read_name_set) in connectivity.iter() {
-        let node_reads = node_info.get(node_id).unwrap().methyl_info.keys().collect::<HashSet<_>>();
-        let next_node_reads = node_info.get(next_node_id).unwrap().methyl_info.keys().collect::<HashSet<_>>();
-        let overlap_reads = node_reads.intersection(&next_node_reads).cloned().collect::<Vec<_>>();
-        let union_reads = node_reads.union(&next_node_reads).cloned().collect::<Vec<_>>();
+        let node_reads = node_info
+            .get(node_id)
+            .unwrap()
+            .methyl_info
+            .keys()
+            .collect::<HashSet<_>>();
+        let next_node_reads = node_info
+            .get(next_node_id)
+            .unwrap()
+            .methyl_info
+            .keys()
+            .collect::<HashSet<_>>();
+        let overlap_reads = node_reads
+            .intersection(&next_node_reads)
+            .cloned()
+            .collect::<Vec<_>>();
+        let union_reads = node_reads
+            .union(&next_node_reads)
+            .cloned()
+            .collect::<Vec<_>>();
         let overlap_ratio = overlap_reads.len() as f64 / union_reads.len() as f64;
         if read_name_set.len() >= min_reads {
-            edge_info.insert((node_id.clone(), next_node_id.clone()), EdgeInfo {
-                src: node_id.clone(),
-                dst: next_node_id.clone(),
-                overlap_ratio: overlap_ratio,
-                overlapping_reads: overlap_reads
-                    .iter()
-                    .map(|read_id| read_id.as_str())
-                    .collect::<Vec<_>>()
-                    .join(","),
-            });
+            edge_info.insert(
+                (node_id.clone(), next_node_id.clone()),
+                EdgeInfo {
+                    src: node_id.clone(),
+                    dst: next_node_id.clone(),
+                    overlap_ratio: overlap_ratio,
+                    overlapping_reads: overlap_reads
+                        .iter()
+                        .map(|read_id| read_id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                },
+            );
         }
     }
     (node_info, edge_info)
@@ -200,7 +237,11 @@ pub fn write_gfa_output(
             .map(|(pos, score)| format!("{}:{}", pos, score))
             .collect::<Vec<_>>()
             .join(",");
-        let average_mod_score = mod_score_dict.values().sum::<f32>() / mod_score_dict.len() as f32;
+        let average_mod_score = if mod_score_dict.is_empty() {
+            0.0
+        } else {
+            mod_score_dict.values().sum::<f32>() / mod_score_dict.len() as f32
+        };
         // println!("mod_score_dict: {:?}", mod_score_dict);
 
         let mut node_info_clone = BTreeMap::new();
@@ -208,7 +249,10 @@ pub fn write_gfa_output(
         // node_info_clone.insert("seq".to_string(), haplotype_seq);
         node_info_clone.insert("cigar".to_string(), haplotype_cigar.to_string());
         node_info_clone.insert("support_reads".to_string(), read_num.to_string());
-        node_info_clone.insert("allele_frequency".to_string(), format!("{:.4}", allele_frequency));
+        node_info_clone.insert(
+            "allele_frequency".to_string(),
+            format!("{:.4}", allele_frequency),
+        );
         node_info_clone.insert("read_names".to_string(), read_names.to_string());
         node_info_clone.insert("mod_score_dict".to_string(), mod_score_dict_string);
         // node_info_clone.insert("read_names".to_string(), read_names);
@@ -276,11 +320,7 @@ pub fn start(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    let (node_info, edge_info) = get_node_edge_info(
-        windows,
-        &final_hap_list,
-        1_usize,
-    );
+    let (node_info, edge_info) = get_node_edge_info(windows, &final_hap_list, 1_usize);
     println!("node_info: {:?}", node_info.len());
     println!("edge_info: {:?}", edge_info.len());
     let gfa_output = PathBuf::from(format!("{}.gfa", output_prefix));

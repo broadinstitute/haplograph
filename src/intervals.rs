@@ -1,6 +1,6 @@
+use crate::extract;
 use crate::methyl;
 use crate::util;
-use crate::extract;
 use anyhow::{Context, Result as AnyhowResult};
 use bio::io::fastq;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -12,7 +12,13 @@ use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
 
-pub fn generate_read_name(read_name: &String, chr: &str, start: u64, end: u64, sampleid: &String) -> String {
+pub fn generate_read_name(
+    read_name: &String,
+    chr: &str,
+    start: u64,
+    end: u64,
+    sampleid: &String,
+) -> String {
     format!("{read_name}|{chr}:{start}-{end}|{sampleid}")
 }
 
@@ -31,11 +37,10 @@ pub fn extract_haplotypes_coordinates_from_bam(
 )> {
     let rg_sm_map = util::get_rg_to_sm_mapping(bam);
     let mut bmap: HashMap<String, (String, Vec<u8>)> = HashMap::new();
-    let mut read_spans: HashMap<String, (u64, u64)> = HashMap::new(); // Track read alignment spans
     let mut read_coordinates: HashMap<String, (u64, u64)> = HashMap::new(); // Track read coordinates
-    let _ = bam.fetch((chr.as_bytes(), start, end));
     let mut read_sequence_dict: HashMap<String, String> = HashMap::new();
     let mut bam_records: HashMap<String, Record> = HashMap::new();
+    let mut eligible_reads: HashMap<String, (String, usize, usize)> = HashMap::new();
     // Create progress bar
     let pb = ProgressBar::new_spinner();
     pb.set_style(
@@ -43,53 +48,64 @@ pub fn extract_haplotypes_coordinates_from_bam(
             .template("{spinner:.green} [{elapsed_precise}] {msg}")
             .unwrap(),
     );
+    pb.set_message("Scanning alignments...");
+
+    let _ = bam.fetch((chr.as_bytes(), start, end));
+    let mut seen_reads = HashSet::new();
+    for record_result in bam.records() {
+        let record = record_result?;
+        let qname = String::from_utf8_lossy(record.qname()).into_owned();
+        if seen_reads.contains(&qname) {
+            continue;
+        }
+        seen_reads.insert(qname.clone());
+
+        let is_secondary = record.is_secondary();
+        let is_supplementary = record.is_supplementary();
+        if primary_only && (is_secondary || is_supplementary) {
+            continue;
+        }
+
+        let Some((query_start, query_end)) =
+            extract::record_interval_query_bounds(&record, start, end)
+        else {
+            continue;
+        };
+
+        let sm = match util::get_sm_name_from_rg(&record, &rg_sm_map) {
+            Ok(a) => a,
+            Err(_) => String::from("unknown"),
+        };
+        let locus_key = format!("{}:{}-{}", chr, start, end);
+        let seq_name = format!("{qname}|{locus_key}|{sm}");
+        eligible_reads.insert(qname.clone(), (seq_name, query_start, query_end));
+        read_sequence_dict.insert(
+            qname.clone(),
+            String::from_utf8_lossy(&record.seq().as_bytes()).into_owned(),
+        );
+        bam_records.insert(qname, record.clone());
+    }
+
+    let _ = bam.fetch((chr.as_bytes(), start, end));
     pb.set_message("Processing pileup...");
-    // let mut insertion_positions = HashMap::new();
     for p in bam.pileup() {
         let pileup = p?;
         pb.set_message(format!("Processing position {}", pileup.pos()));
         let mut readnames = HashSet::new();
         if start <= (pileup.pos() as u64) && (pileup.pos() as u64) < end {
-            for (i, alignment) in pileup.alignments().enumerate() {
+            for alignment in pileup.alignments() {
                 let record = alignment.record();
                 let qname = String::from_utf8_lossy(record.qname()).into_owned();
-                let read_seq = String::from_utf8_lossy(&record.seq().as_bytes()).into_owned();
                 // skip the alignment from the same read
                 if readnames.contains(&qname) {
                     continue;
                 }
                 readnames.insert(qname.clone());
-                bam_records.insert(qname.clone(), record.clone());
-
-                let sm = match util::get_sm_name_from_rg(&record, &rg_sm_map) {
-                    Ok(a) => a,
-                    Err(_) => String::from("unknown"),
+                let Some((seq_name, _query_start, _query_end)) = eligible_reads.get(&qname) else {
+                    continue;
                 };
 
-                let is_secondary = record.is_secondary();
-                let is_supplementary = record.is_supplementary();
-                if primary_only && (is_secondary || is_supplementary) {
-                    continue;
-                }
-
-                if !read_sequence_dict.contains_key(&qname) {
-                    read_sequence_dict.insert(qname.clone(), read_seq);
-                }
-
-                let locus_key = format!("{}:{}-{}", chr, start, end);
-                let seq_name = format!("{qname}|{locus_key}|{sm}");
-
-                // Track alignment span for this read
-                let reference_start = record.pos() as u64;
-                assert!(record.cigar().pos() == reference_start as i64);
-                let reference_end = record.cigar().end_pos() as u64;
-                let read_span = read_spans
-                    .entry(qname.clone())
-                    .or_insert((u64::MAX, u64::MIN));
-                read_span.0 = read_span.0.min(reference_start);
-                read_span.1 = read_span.1.max(reference_end);
-
-                if !bmap.contains_key(&seq_name) {
+                if !bmap.contains_key(seq_name) {
                     bmap.insert(seq_name.clone(), (String::new(), Vec::new()));
                 }
 
@@ -106,14 +122,8 @@ pub fn extract_haplotypes_coordinates_from_bam(
                                 let valid_q = q.min(40);
 
                                 // Track coordinates in the reconstructed sequence
-                                let read_start = read_coordinates
-                                    .entry(qname.clone())
-                                    .or_insert((u64::MAX, u64::MIN));
-                                read_start.0 = read_start.0.min(pos as u64);
-                                read_start.1 = read_start.1.max(pos as u64);
-
-                                bmap.get_mut(&seq_name).unwrap().0.push(a as char);
-                                bmap.get_mut(&seq_name).unwrap().1.push(valid_q + 33);
+                                bmap.get_mut(seq_name).unwrap().0.push(a as char);
+                                bmap.get_mut(seq_name).unwrap().1.push(valid_q + 33);
                             }
                         }
                     }
@@ -124,15 +134,8 @@ pub fn extract_haplotypes_coordinates_from_bam(
                             let q = record.qual()[qpos];
                             let valid_q = q.min(40);
 
-                            // Track coordinates in the reconstructed sequence
-                            let read_start = read_coordinates
-                                .entry(qname.clone())
-                                .or_insert((u64::MAX, u64::MIN));
-                            read_start.0 = read_start.0.min(qpos as u64);
-                            read_start.1 = read_start.1.max(qpos as u64);
-
-                            bmap.get_mut(&seq_name).unwrap().0.push(a as char);
-                            bmap.get_mut(&seq_name).unwrap().1.push(valid_q + 33);
+                            bmap.get_mut(seq_name).unwrap().0.push(a as char);
+                            bmap.get_mut(seq_name).unwrap().1.push(valid_q + 33);
                         }
                     }
                     bam::pileup::Indel::None => {
@@ -143,15 +146,8 @@ pub fn extract_haplotypes_coordinates_from_bam(
                             let q = record.qual()[qpos];
                             let valid_q = q.min(40);
 
-                            // Track coordinates in the reconstructed sequence
-                            let read_start = read_coordinates
-                                .entry(qname.clone())
-                                .or_insert((u64::MAX, u64::MIN));
-                            read_start.0 = read_start.0.min(qpos as u64);
-                            read_start.1 = read_start.1.max(qpos as u64);
-
-                            bmap.get_mut(&seq_name).unwrap().0.push(a as char);
-                            bmap.get_mut(&seq_name).unwrap().1.push(valid_q + 33);
+                            bmap.get_mut(seq_name).unwrap().0.push(a as char);
+                            bmap.get_mut(seq_name).unwrap().1.push(valid_q + 33);
                         }
                     }
                 }
@@ -161,28 +157,18 @@ pub fn extract_haplotypes_coordinates_from_bam(
 
     pb.finish_with_message("Pileup processing completed");
 
-    // Filter reads that don't span the full locus (at least 80% of the region)
-    let filtered_bmap: HashMap<String, (String, Vec<u8>)> = bmap
-        .clone()
-        .into_iter()
-        .filter(|(seq_name, _)| {
-            // Extract read name from sequence name
-            if let Some(read_name) = seq_name.split('|').next() {
-                if let Some((read_start, read_end)) = read_spans.get(read_name) {
-                    *read_start <= start && *read_end >= end - 1
-                } else {
-                    false
-                }
-            } else {
-                false
-            }
-        })
-        .collect();
+    for (read_name, (_seq_name, query_start, query_end)) in eligible_reads.iter() {
+        read_coordinates.insert(read_name.clone(), (*query_start as u64, *query_end as u64));
+    }
 
-    let records: Vec<fastq::Record> = filtered_bmap
+    let records: Vec<fastq::Record> = eligible_reads
         .iter()
-        .map(|sq| {
-            fastq::Record::with_attrs(sq.0.as_str(), None, sq.1 .0.as_bytes(), sq.1 .1.as_slice())
+        .map(|(_read_name, (seq_name, _query_start, _query_end))| {
+            let (seq, qual) = bmap
+                .get(seq_name)
+                .cloned()
+                .unwrap_or_else(|| (String::new(), Vec::new()));
+            fastq::Record::with_attrs(seq_name.as_str(), None, seq.as_bytes(), qual.as_slice())
         })
         .collect();
 
@@ -286,7 +272,6 @@ pub fn write_fasta_output(
     for (sequence, (cigar, read_names, allele_frequency)) in final_hap {
         // Use the first read name as the sequence ID, or create a hash-based ID
         let sequence_id = if !read_names.is_empty() {
-            
             serde_json::to_string(&read_names).expect("Failed to serialize to JSON")
         } else {
             "unknown".to_string()
@@ -379,21 +364,28 @@ pub fn start(
     frequency_min: f64,
     primary_only: bool,
     write_output: bool,
-) -> AnyhowResult<(HashMap<String, (String, HashMap<String, HashMap<usize, f32>>, f64)>, HashMap<String, (u64, u64)>, HashMap<String, Vec<u8>>, HashMap<String, String>)> {
-    let (read_coordinates, read_quality_dict,read_sequence_dict, read_strand_dict, bam_records_dict) =
-        extract::extract_haplotypes_coordinates_from_bam(
-            bam,
-            chromosome,
-            start as u64,
-            end as u64,
-            sampleid,
-            primary_only,
-        )
-        .unwrap();
-    let unique_local_sequences = read_sequence_dict
-        .values()
-        .collect::<HashSet<_>>()
-        .len();
+) -> AnyhowResult<(
+    HashMap<String, (String, HashMap<String, HashMap<usize, f32>>, f64)>,
+    HashMap<String, (u64, u64)>,
+    HashMap<String, Vec<u8>>,
+    HashMap<String, String>,
+)> {
+    let (
+        read_coordinates,
+        read_quality_dict,
+        read_sequence_dict,
+        read_strand_dict,
+        bam_records_dict,
+    ) = extract::extract_haplotypes_coordinates_from_bam(
+        bam,
+        chromosome,
+        start as u64,
+        end as u64,
+        sampleid,
+        primary_only,
+    )
+    .unwrap();
+    let unique_local_sequences = read_sequence_dict.values().collect::<HashSet<_>>().len();
     debug!(
         "Window {}:{}-{} extracted reads: {}, unique local sequences: {}",
         chromosome,
@@ -434,5 +426,10 @@ pub fn start(
         write_fasta_output(final_hap.clone(), &final_hap_output)?;
     }
 
-    Ok((final_hap, read_coordinates, read_sequence_dict, read_strand_dict))
+    Ok((
+        final_hap,
+        read_coordinates,
+        read_sequence_dict,
+        read_strand_dict,
+    ))
 }

@@ -631,12 +631,8 @@ pub fn enumerate_all_paths_with_haplotype(
     }
 
     for src in source_nodes.clone() {
-        let mut haplotype_intersection_src = node_haplotype
-            .get(&src)
-            .unwrap_or(&HashSet::new())
-            .intersection(&haplotype_index)
-            .cloned()
-            .collect::<HashSet<_>>();
+        let mut haplotype_intersection_src =
+            constrain_haplotype_index(&haplotype_index, node_haplotype.get(&src));
         if !haplotype_intersection_src.is_empty() {
             let mut path = Vec::new();
             path.push(src.clone());
@@ -652,6 +648,19 @@ pub fn enumerate_all_paths_with_haplotype(
     }
 
     Ok(all_paths)
+}
+
+fn constrain_haplotype_index(
+    haplotype_index: &HashSet<usize>,
+    node_haplotype: Option<&HashSet<usize>>,
+) -> HashSet<usize> {
+    match node_haplotype {
+        Some(node_haplotypes) => haplotype_index
+            .intersection(node_haplotypes)
+            .cloned()
+            .collect::<HashSet<_>>(),
+        None => haplotype_index.clone(),
+    }
 }
 
 // /// Recursive DFS to find all paths from a starting node
@@ -676,15 +685,8 @@ fn dfs_traverse_with_haplotype_constrains(
 
     let next_nodes = edge_info.get(current_node).unwrap();
     for next_node in next_nodes {
-        let haplotypes_next = if node_haplotype.contains_key(next_node) {
-            node_haplotype.get(&next_node.clone()).unwrap()
-        } else {
-            &HashSet::new()
-        };
-        let mut haplotype_intersection_clone = haplotype_index
-            .intersection(haplotypes_next)
-            .cloned()
-            .collect::<HashSet<_>>();
+        let mut haplotype_intersection_clone =
+            constrain_haplotype_index(haplotype_index, node_haplotype.get(next_node));
         current_path.push(next_node.clone());
         dfs_traverse_with_haplotype_constrains(
             next_node,
@@ -1068,6 +1070,45 @@ mod tests {
         assert_eq!(
             filtered.get(&1).unwrap(),
             &HashSet::from(["graph.chr1:10-20.b".to_string()])
+        );
+    }
+
+    #[test]
+    fn path_enumeration_keeps_unlabeled_intermediate_nodes() {
+        let edge_info = HashMap::from([
+            ("n0".to_string(), vec!["n1".to_string()]),
+            ("n1".to_string(), vec!["n2".to_string()]),
+        ]);
+        let node_haplotype = HashMap::from([
+            ("n0".to_string(), HashSet::from([0])),
+            ("n2".to_string(), HashSet::from([0])),
+        ]);
+
+        let all_paths =
+            enumerate_all_paths_with_haplotype(&HashMap::new(), &edge_info, &node_haplotype, 1)
+                .unwrap();
+
+        assert_eq!(
+            all_paths,
+            vec![(
+                vec!["n0".to_string(), "n1".to_string(), "n2".to_string()],
+                HashSet::from([0])
+            )]
+        );
+    }
+
+    #[test]
+    fn path_enumeration_keeps_unlabeled_source_nodes() {
+        let edge_info = HashMap::from([("n0".to_string(), vec!["n1".to_string()])]);
+        let node_haplotype = HashMap::from([("n1".to_string(), HashSet::from([0]))]);
+
+        let all_paths =
+            enumerate_all_paths_with_haplotype(&HashMap::new(), &edge_info, &node_haplotype, 1)
+                .unwrap();
+
+        assert_eq!(
+            all_paths,
+            vec![(vec!["n0".to_string(), "n1".to_string()], HashSet::from([0]))]
         );
     }
 }

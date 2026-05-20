@@ -1,79 +1,74 @@
 use crate::intervals;
+use crate::util;
 use anyhow::{Context, Result as AnyhowResult};
-use rust_htslib::bam::{self, IndexedReader, Read as BamRead, pileup::Pileup, Record as BamRecord};
-use std::fs::File;
-use std::io::Write;
-use std::path::PathBuf;
-use std::collections::HashMap;
-use std::collections::HashSet;
 use indicatif::ProgressBar;
 use indicatif::ProgressStyle;
 use log::info;
-use crate::util;
+use rust_htslib::bam::{record::Cigar, IndexedReader, Read as BamRead, Record as BamRecord};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::fs::File;
+use std::io::Write;
+use std::path::PathBuf;
 
+pub(crate) fn query_boundary_offset_from_cigar(
+    cigar: &[Cigar],
+    ref_start: u64,
+    target_ref: u64,
+) -> Option<usize> {
+    let mut ref_pos = ref_start;
+    let mut query_pos = 0_usize;
 
-pub fn get_read_start_end(pileup: &mut Pileup, primary_only: bool) -> AnyhowResult<(HashMap<String, u64>, HashMap<String, Vec<u8>>, HashMap<String, Vec<u8>>, HashMap<String, String>, HashMap<String, BamRecord>)> {
-    let mut read_coordinates: HashMap<String, u64> = HashMap::new();
-    let mut read_sequence_dict: HashMap<String, Vec<u8>> = HashMap::new();
-    let mut readnames = HashSet::new();
-    let mut read_quality_dict: HashMap<String, Vec<u8>> = HashMap::new();
-    let mut read_strand_dict: HashMap<String, String> = HashMap::new();
-    let mut bam_records_dict: HashMap<String, BamRecord> = HashMap::new();
-    for (i, alignment) in pileup.alignments().enumerate() {
-        let record = alignment.record();
-
-        let qname = String::from_utf8_lossy(record.qname()).into_owned() ;
-        bam_records_dict.insert(qname.clone(), record.clone());
-        let read_seq = record.seq().clone().as_bytes();
-        // skip the alignment from the same read
-        if readnames.contains(&qname) {
-            continue;
-        }
-        readnames.insert(qname.clone());
-
-        let strand = record.strand().to_string();
-        if !read_strand_dict.contains_key(&qname) {
-            read_strand_dict.insert(qname.clone(), strand);
-        }
-
-        let is_secondary = record.is_secondary();
-        let is_supplementary = record.is_supplementary();
-        if primary_only && (is_secondary || is_supplementary) {
-            continue;
-        }
-
-        if !read_sequence_dict.contains_key(&qname) {
-            read_sequence_dict.insert(qname.clone(), read_seq);
-        }
-        if !read_quality_dict.contains_key(&qname) {
-            read_quality_dict.insert(qname.clone(), record.qual().to_vec());
-        }
-        
-        // Handle different alignment types
-        match alignment.indel() {
-            bam::pileup::Indel::Ins(len) => {
-                
-                // For insertions, add one reference base followed by the insertion bases
-                if let Some(pos1) = alignment.qpos() {
-                    read_coordinates.insert(qname.clone(), pos1 as u64);
+    for op in cigar {
+        match *op {
+            Cigar::Match(len) | Cigar::Equal(len) | Cigar::Diff(len) => {
+                let len = len as u64;
+                if target_ref >= ref_pos && target_ref <= ref_pos + len {
+                    return Some(query_pos + (target_ref - ref_pos) as usize);
                 }
+                ref_pos += len;
+                query_pos += len as usize;
             }
-            bam::pileup::Indel::Del(_) => {
-                // For deletions, add the first base of the deletion
-                if let Some(qpos) = alignment.qpos() {
-                    read_coordinates.insert(qname.clone(), qpos as u64);
-                }                       
-            }
-            bam::pileup::Indel::None => {
-                // For matches/mismatches, add the base
-                if let Some(qpos) = alignment.qpos() {
-                    read_coordinates.insert(qname.clone(), qpos as u64);
+            Cigar::Del(len) | Cigar::RefSkip(len) => {
+                let len = len as u64;
+                if target_ref >= ref_pos && target_ref <= ref_pos + len {
+                    return Some(query_pos);
                 }
-            
+                ref_pos += len;
             }
+            Cigar::Ins(len) | Cigar::SoftClip(len) => {
+                query_pos += len as usize;
+            }
+            Cigar::HardClip(_) | Cigar::Pad(_) => {}
         }
     }
-    Ok((read_coordinates, read_sequence_dict, read_quality_dict, read_strand_dict, bam_records_dict))
+
+    if target_ref == ref_pos {
+        Some(query_pos)
+    } else {
+        None
+    }
+}
+
+pub(crate) fn record_interval_query_bounds(
+    record: &BamRecord,
+    start: u64,
+    end: u64,
+) -> Option<(usize, usize)> {
+    if start > end {
+        return None;
+    }
+
+    let ref_start = record.pos() as u64;
+    let ref_end = record.cigar().end_pos() as u64;
+    if start < ref_start || end > ref_end {
+        return None;
+    }
+
+    let cigar = record.cigar().iter().copied().collect::<Vec<_>>();
+    let query_start = query_boundary_offset_from_cigar(&cigar, ref_start, start)?;
+    let query_end = query_boundary_offset_from_cigar(&cigar, ref_start, end)?;
+    Some((query_start, query_end))
 }
 
 pub fn normalized_read_slice_bounds(
@@ -90,12 +85,11 @@ pub fn normalized_read_slice_bounds(
             read_len.saturating_sub(read_start.min(read_end)),
         )
     };
-    if pos_end <= pos_start || pos_end > read_len {
+    if pos_end < pos_start || pos_end > read_len {
         return None;
     }
     Some((pos_start, pos_end))
 }
-
 
 // extract haplotypes from bam file
 pub fn extract_haplotypes_from_bam(
@@ -106,67 +100,63 @@ pub fn extract_haplotypes_from_bam(
     sampleid: &String,
     primary_only: bool,
 ) -> AnyhowResult<HashMap<String, String>> {
-    let mut read_start: HashMap<String, u64> = HashMap::new();
-    let mut read_end: HashMap<String, u64> = HashMap::new();
-    let mut read_sequence_dict: HashMap<String, Vec<u8>> = HashMap::new();
-    let mut read_quality_dict: HashMap<String, Vec<u8>> = HashMap::new();
-    let mut read_strand_dict: HashMap<String, String> = HashMap::new();
-    // Create progress bar
     let pb = ProgressBar::new_spinner();
     pb.set_style(
         ProgressStyle::default_spinner()
             .template("{spinner:.green} [{elapsed_precise}] {msg}")
-            .unwrap()
+            .unwrap(),
     );
-    pb.set_message("Processing pileup...");
+    // pb.set_message("Processing alignments...");
 
-    let _ = bam.fetch((chr.as_bytes(), start-5, end+5));
+    let _ = bam.fetch((chr.as_bytes(), start, end));
 
-    for p in bam.pileup() {
-        let mut pileup = p?;
-        if pileup.pos() as u64 == start {
-            let (read_s, read_sequence_s_d, read_quality_s_d, read_strand_s_d, _) = get_read_start_end(&mut pileup, primary_only)?;
-            read_start.extend(read_s);
-            read_sequence_dict.extend(read_sequence_s_d);
-            read_quality_dict.extend(read_quality_s_d);
-            read_strand_dict.extend(read_strand_s_d);
-        }
-        if pileup.pos() as u64 == end {
-            let (read_e, read_sequence_e_d, read_quality_e_d, read_strand_e_d, _) = get_read_start_end(&mut pileup, primary_only)?;
-            read_end.extend(read_e);
-            read_sequence_dict.extend(read_sequence_e_d);
-            read_quality_dict.extend(read_quality_e_d);
-            read_strand_dict.extend(read_strand_e_d);
-        }
-    }
     let mut filtered_sequence_dict = HashMap::new();
-    for (read_name, seq) in read_sequence_dict.iter() {
-        if read_start.contains_key(read_name) && read_end.contains_key(read_name) {
-            let read_start = *read_start.get(read_name).unwrap() as usize;
-            let read_end = *read_end.get(read_name).unwrap() as usize;
-            let read_seq = seq.clone();
-            let read_strand = read_strand_dict.get(read_name).unwrap();
-            let read_len = read_seq.len();
-            let Some((pos_start, pos_end)) =
-                normalized_read_slice_bounds(read_start, read_end, read_len, read_strand)
-            else {
-                continue;
-            };
+    let mut seen_reads = HashSet::new();
+    for record_result in bam.records() {
+        let record = record_result?;
+        let read_name = String::from_utf8_lossy(record.qname()).into_owned();
+        if seen_reads.contains(&read_name) {
+            continue;
+        }
+        seen_reads.insert(read_name.clone());
 
-            let read_seq_sub = String::from_utf8_lossy(&read_seq[pos_start..pos_end]).to_string();
-            let read_seq_final = if read_strand == "+" {
-                read_seq_sub
-            } else {
-                util::reverse_complement(&read_seq_sub)
-            };
+        if primary_only && (record.is_secondary() || record.is_supplementary()) {
+            continue;
+        }
 
-            let record_id = format!("{read_name}|{chr}:{start}-{end}|{sampleid}");
-            filtered_sequence_dict.insert(record_id.clone(), read_seq_final);
+        let Some((read_start, read_end)) = record_interval_query_bounds(&record, start, end) else {
+            continue;
+        };
+
+        let read_seq = record.seq().as_bytes();
+        let read_strand = record.strand().to_string();
+        let read_len = read_seq.len();
+        let Some((pos_start, pos_end)) =
+            normalized_read_slice_bounds(read_start, read_end, read_len, &read_strand)
+        else {
+            continue;
+        };
+
+        let read_seq_sub = String::from_utf8_lossy(&read_seq[pos_start..pos_end]).to_string();
+        let read_seq_final = if read_strand == "+" {
+            read_seq_sub
+        } else {
+            util::reverse_complement(&read_seq_sub)
+        };
+
+        let record_id = format!("{read_name}|{chr}:{start}-{end}|{sampleid}");
+        filtered_sequence_dict.insert(record_id, read_seq_final);
+        if filtered_sequence_dict.len() % 100 == 0 {
+            pb.set_message(format!("Collected {} reads", filtered_sequence_dict.len()));
         }
     }
 
-    info!("Extracted {} reads from region", filtered_sequence_dict.len());
-   
+    pb.finish_with_message("Alignment processing completed");
+    info!(
+        "Extracted {} reads from region",
+        filtered_sequence_dict.len()
+    );
+
     Ok(filtered_sequence_dict)
 }
 
@@ -178,84 +168,81 @@ pub fn extract_haplotypes_coordinates_from_bam(
     end: u64,
     sampleid: &String,
     primary_only: bool,
-) -> AnyhowResult<(HashMap<String, (u64, u64)>, HashMap<String, Vec<u8>>, HashMap<String, Vec<u8>>, HashMap<String, String>, HashMap<String, BamRecord>)> {
-    let mut read_start: HashMap<String, u64> = HashMap::new();
-    let mut read_end: HashMap<String, u64> = HashMap::new();
-    let mut read_sequence_dict: HashMap<String, Vec<u8>> = HashMap::new();
-    let mut read_quality_dict: HashMap<String, Vec<u8>> = HashMap::new();
-    let mut read_strand_dict: HashMap<String, String> = HashMap::new();
-    let mut bam_records_dict: HashMap<String, BamRecord> = HashMap::new();
-    // Create progress bar
+) -> AnyhowResult<(
+    HashMap<String, (u64, u64)>,
+    HashMap<String, Vec<u8>>,
+    HashMap<String, Vec<u8>>,
+    HashMap<String, String>,
+    HashMap<String, BamRecord>,
+)> {
     let pb = ProgressBar::new_spinner();
     pb.set_style(
         ProgressStyle::default_spinner()
             .template("{spinner:.green} [{elapsed_precise}] {msg}")
-            .unwrap()
+            .unwrap(),
     );
-    pb.set_message("Processing pileup...");
+    // pb.set_message("Processing alignments...");
 
     let _ = bam.fetch((chr.as_bytes(), start, end));
-
-    for p in bam.pileup() {
-        let mut pileup = p?;
-        if pileup.pos() as u64 == start {
-            let (read_s, read_sequence_s_d, read_quality_s_d, read_strand_s_d, bam_records_s_d) = get_read_start_end(&mut pileup, primary_only)?;
-            read_start.extend(read_s);
-            read_sequence_dict.extend(read_sequence_s_d);
-            read_quality_dict.extend(read_quality_s_d);
-            read_strand_dict.extend(read_strand_s_d);
-            bam_records_dict.extend(bam_records_s_d);
-        }
-        if pileup.pos() as u64 == end {
-            let (read_e, read_sequence_e_d, read_quality_e_d, read_strand_e_d, bam_records_e_d) = get_read_start_end(&mut pileup, primary_only)?;
-            read_end.extend(read_e);
-            read_sequence_dict.extend(read_sequence_e_d);
-            read_quality_dict.extend(read_quality_e_d);
-            read_strand_dict.extend(read_strand_e_d);
-            bam_records_dict.extend(bam_records_e_d);
-        }
-    }
-    
     let mut read_coordinates_formatted = HashMap::new();
     let mut read_sequence_dict_formatted = HashMap::new();
     let mut read_quality_dict_formatted = HashMap::new();
     let mut read_strand_dict_formatted = HashMap::new();
     let mut bam_records_dict_formatted = HashMap::new();
-    for (read_name, seq) in read_sequence_dict.iter() {
-        if read_start.contains_key(read_name) && read_end.contains_key(read_name) {
-            let read_start = *read_start.get(read_name).unwrap() as usize;
-            let read_end = *read_end.get(read_name).unwrap() as usize;
-            let read_seq = seq.clone();
-            let read_strand = read_strand_dict.get(read_name).unwrap();
-            let read_len = read_seq.len();
-            let Some((pos_start, pos_end)) =
-                normalized_read_slice_bounds(read_start, read_end, read_len, read_strand)
-            else {
-                continue;
-            };
+    let mut seen_reads = HashSet::new();
+    for record_result in bam.records() {
+        let record = record_result?;
+        let read_name = String::from_utf8_lossy(record.qname()).into_owned();
+        if seen_reads.contains(&read_name) {
+            continue;
+        }
+        seen_reads.insert(read_name.clone());
 
-            let read_seq_sub = String::from_utf8_lossy(&read_seq[pos_start..pos_end]).to_string();
-            let read_seq_final = if read_strand == "+" {
-                read_seq_sub
-            } else {
-                util::reverse_complement(&read_seq_sub)
-            };
+        if primary_only && (record.is_secondary() || record.is_supplementary()) {
+            continue;
+        }
 
-            let record_id = intervals::generate_read_name(read_name, chr, start, end, sampleid);
-            read_coordinates_formatted.insert(record_id.clone(), (read_start as u64, read_end as u64));
-            read_sequence_dict_formatted.insert(record_id.clone(), read_seq_final.into_bytes());
-            if let Some(read_qual) = read_quality_dict.get(read_name) {
-                read_quality_dict_formatted.insert(record_id.clone(), read_qual.clone());
-            }
-            read_strand_dict_formatted.insert(record_id.clone(), read_strand.clone());
-            if let Some(record) = bam_records_dict.get(read_name) {
-                bam_records_dict_formatted.insert(record_id.clone(), record.clone());
-            }
+        let Some((read_start, read_end)) = record_interval_query_bounds(&record, start, end) else {
+            continue;
+        };
+
+        let read_seq = record.seq().as_bytes();
+        let read_strand = record.strand().to_string();
+        let read_len = read_seq.len();
+        let Some((pos_start, pos_end)) =
+            normalized_read_slice_bounds(read_start, read_end, read_len, &read_strand)
+        else {
+            continue;
+        };
+
+        let read_seq_sub = String::from_utf8_lossy(&read_seq[pos_start..pos_end]).to_string();
+        let read_seq_final = if read_strand == "+" {
+            read_seq_sub
+        } else {
+            util::reverse_complement(&read_seq_sub)
+        };
+
+        let record_id = intervals::generate_read_name(&read_name, chr, start, end, sampleid);
+        read_coordinates_formatted.insert(record_id.clone(), (read_start as u64, read_end as u64));
+        read_sequence_dict_formatted.insert(record_id.clone(), read_seq_final.into_bytes());
+        read_quality_dict_formatted.insert(record_id.clone(), record.qual().to_vec());
+        read_strand_dict_formatted.insert(record_id.clone(), read_strand);
+        bam_records_dict_formatted.insert(record_id, record.clone());
+
+        if read_coordinates_formatted.len() % 100 == 0 {
+            pb.set_message(format!(
+                "Collected {} reads",
+                read_coordinates_formatted.len()
+            ));
         }
     }
 
-    info!("Extracted {} reads from region", read_coordinates_formatted.len());
-   
+    pb.finish_with_message("Alignment processing completed");
+    info!(
+        "Extracted {} reads from region",
+        read_coordinates_formatted.len()
+    );
+
     Ok((
         read_coordinates_formatted,
         read_quality_dict_formatted,
@@ -265,7 +252,6 @@ pub fn extract_haplotypes_coordinates_from_bam(
     ))
 }
 
-
 pub fn start(
     bam: &mut IndexedReader,
     chromosome: &str,
@@ -274,18 +260,18 @@ pub fn start(
     primary_only: bool,
     output_path: String,
     sampleid: String,
-    pileup:bool,
+    pileup: bool,
 ) -> AnyhowResult<()> {
-    if pileup{
+    if pileup {
         let (reads, read_coordinates, read_sequence_dictionary, bam_records) =
-        intervals::extract_haplotypes_coordinates_from_bam(
-            bam,
-            chromosome,
-            start as u64,
-            end as u64,
-            primary_only,
-        )
-        .unwrap();
+            intervals::extract_haplotypes_coordinates_from_bam(
+                bam,
+                chromosome,
+                start as u64,
+                end as u64,
+                primary_only,
+            )
+            .unwrap();
         let outputfile = PathBuf::from(format!("{}.fasta", output_path));
         let mut file = File::create(outputfile)
             .with_context(|| format!("Failed to create output file: {}.fasta", output_path))?;
@@ -307,29 +293,30 @@ pub fn start(
                 writeln!(file, "{}", &r_seq[full_lines * chars_per_line..])?;
             }
         }
-    }else {
+    } else {
         let reads = extract_haplotypes_from_bam(
             bam,
             &chromosome,
             start as u64,
             end as u64,
             &sampleid,
-            primary_only, 
-        ).unwrap();
+            primary_only,
+        )
+        .unwrap();
 
         let output_p = PathBuf::from(format!("{}.fasta", output_path));
-        if ! reads.is_empty(){
+        if !reads.is_empty() {
             let _ = util::write_fasta(&reads, &output_p);
-        }  
+        }
     }
-
 
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::normalized_read_slice_bounds;
+    use super::{normalized_read_slice_bounds, query_boundary_offset_from_cigar};
+    use rust_htslib::bam::record::Cigar;
 
     #[test]
     fn forward_strand_bounds_are_ordered() {
@@ -346,9 +333,9 @@ mod tests {
     }
 
     #[test]
-    fn reverse_strand_equal_coordinates_returns_none() {
-        let bounds = normalized_read_slice_bounds(42, 42, 100, "-");
-        assert!(bounds.is_none());
+    fn reverse_strand_equal_coordinates_preserve_empty_deleted_window() {
+        let bounds = normalized_read_slice_bounds(42, 42, 100, "-").unwrap();
+        assert_eq!(bounds, (58, 58));
     }
 
     #[test]
@@ -361,11 +348,30 @@ mod tests {
                     if let Some((start, end)) =
                         normalized_read_slice_bounds(read_start, read_end, read_len, strand)
                     {
-                        assert!(end > start, "strand={strand}, start={start}, end={end}");
-                        assert!(end <= read_len, "strand={strand}, end={end}, len={read_len}");
+                        assert!(end >= start, "strand={strand}, start={start}, end={end}");
+                        assert!(
+                            end <= read_len,
+                            "strand={strand}, end={end}, len={read_len}"
+                        );
                     }
                 }
             }
         }
+    }
+
+    #[test]
+    fn cigar_boundary_inside_deletion_returns_same_query_offset() {
+        let cigar = vec![Cigar::Match(50), Cigar::Del(200), Cigar::Match(50)];
+        let start = query_boundary_offset_from_cigar(&cigar, 100, 200).unwrap();
+        let end = query_boundary_offset_from_cigar(&cigar, 100, 300).unwrap();
+        assert_eq!((start, end), (50, 50));
+    }
+
+    #[test]
+    fn cigar_boundary_after_deletion_resumes_query_progress() {
+        let cigar = vec![Cigar::Match(50), Cigar::Del(200), Cigar::Match(50)];
+        let start = query_boundary_offset_from_cigar(&cigar, 100, 300).unwrap();
+        let end = query_boundary_offset_from_cigar(&cigar, 100, 380).unwrap();
+        assert_eq!((start, end), (50, 80));
     }
 }
