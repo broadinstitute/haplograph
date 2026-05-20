@@ -21,6 +21,12 @@ pub struct Variant {
     pub haplotype_index: Option<Vec<usize>>,
 }
 
+fn normalize_haplotype_indices(mut haplotype_indices: Vec<usize>) -> Vec<usize> {
+    haplotype_indices.sort_unstable();
+    haplotype_indices.dedup();
+    haplotype_indices
+}
+
 pub fn get_variants_from_cigar(
     cigar: &str,
     ref_name: &str,
@@ -169,20 +175,18 @@ pub fn get_variants_from_cigar(
                         ref_seq.get(ref_pos - 1..ref_pos),
                         alt_seq.get(alt_pos - 1..alt_pos),
                     ) {
-                        if r != a
-                            && (operations[oper_index - 1].1.clone().to_string() != "X")
-                            {
-                                println!(
-                                    "{} {} {} {} {} {} {:?}",
-                                    ref_pos,
-                                    alt_pos,
-                                    r,
-                                    a,
-                                    ref_allele,
-                                    alt_allele,
-                                    operations[oper_index - 1]
-                                );
-                            }
+                        if r != a && (operations[oper_index - 1].1.clone().to_string() != "X") {
+                            println!(
+                                "{} {} {} {} {} {} {:?}",
+                                ref_pos,
+                                alt_pos,
+                                r,
+                                a,
+                                ref_allele,
+                                alt_allele,
+                                operations[oper_index - 1]
+                            );
+                        }
                     }
                 }
 
@@ -235,7 +239,8 @@ fn collapse_identical_records(variants: Vec<Variant>) -> Vec<Variant> {
                 haplotype_index
                     .clone()
                     .unwrap()
-                    .iter().copied()
+                    .iter()
+                    .copied()
                     .collect::<HashSet<_>>(),
             );
     }
@@ -251,7 +256,8 @@ fn collapse_identical_records(variants: Vec<Variant>) -> Vec<Variant> {
             .get(key)
             .unwrap()
             .clone()
-            .iter().copied()
+            .iter()
+            .copied()
             .collect::<Vec<_>>();
         collapsed_variants.push(Variant {
             chromosome,
@@ -261,7 +267,7 @@ fn collapse_identical_records(variants: Vec<Variant>) -> Vec<Variant> {
             variant_type,
             allele_count: *allele_count,
             node_id: "".to_string(),
-            haplotype_index: Some(haplotype_index),
+            haplotype_index: Some(normalize_haplotype_indices(haplotype_index)),
         });
     }
     collapsed_variants
@@ -313,21 +319,28 @@ fn write_vcf(
     }
 
     header.push_record(
-        "##INFO=<ID=SOMATIC,Number=0,Type=Flag,Description=\"Somatic mutation\">\n".to_string()
+        "##INFO=<ID=SOMATIC,Number=0,Type=Flag,Description=\"Somatic mutation\">\n"
+            .to_string()
             .as_bytes(),
     );
     header.push_record(
-        "##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Read Depth\">\n".to_string().as_bytes(),
+        "##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Read Depth\">\n"
+            .to_string()
+            .as_bytes(),
     );
     header.push_record(
-        "##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n".to_string().as_bytes(),
+        "##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n"
+            .to_string()
+            .as_bytes(),
     );
     header.push_record(
-        "##FORMAT=<ID=AD,Number=1,Type=Integer,Description=\"Alternative Allele Depth\">\n".to_string()
-        .as_bytes(),
+        "##FORMAT=<ID=AD,Number=1,Type=Integer,Description=\"Alternative Allele Depth\">\n"
+            .to_string()
+            .as_bytes(),
     );
     header.push_record(
-        "##FORMAT=<ID=VAF,Number=1,Type=Float,Description=\"Variant Allele Frequency\">\n".to_string()
+        "##FORMAT=<ID=VAF,Number=1,Type=Float,Description=\"Variant Allele Frequency\">\n"
+            .to_string()
             .as_bytes(),
     );
     header.push_sample(sample_id.as_bytes());
@@ -545,7 +558,7 @@ pub fn Phase_germline_variants(
             variant_type,
             allele_count,
             node_id: node_id_list.join(","),
-            haplotype_index: Some(haplotype_index),
+            haplotype_index: Some(normalize_haplotype_indices(haplotype_index)),
         });
     }
     Ok(phased_variants)
@@ -617,7 +630,7 @@ pub fn get_variants_from_path(
     reference_seqs: &fastq::Record,
 ) -> (Vec<Variant>, Vec<Variant>) {
     let (_haplotype_reads, node_haplotype) =
-        asm::find_node_haplotype(node_info,  haplotype_number, het_fold_threshold);
+        asm::find_node_haplotype(node_info, haplotype_number, het_fold_threshold);
     // Use the same path enumeration as assemble to ensure paths follow graph edges
     let all_paths = asm::enumerate_all_paths_with_haplotype(
         node_info,
@@ -643,11 +656,8 @@ pub fn get_variants_from_path(
     );
 
     // Select the best path for each haplotype (same as assemble function)
-    let primary_haplotypes = asm::find_full_range_haplotypes(
-        node_info,
-        &node_haplotype,
-        &all_sequences,
-    );
+    let primary_haplotypes =
+        asm::find_full_range_haplotypes(node_info, &node_haplotype, &all_sequences);
 
     // Collect all phased nodes from the paths
     let mut phased_nodes = HashSet::new();
@@ -741,13 +751,13 @@ pub fn get_variants_from_path(
     for (key, variants) in variant_dict.iter() {
         let mut phased_variant = variants[0].clone();
         let haplotype_index = variant_phase.get(key).unwrap();
-        phased_variant.haplotype_index = Some(
+        phased_variant.haplotype_index = Some(normalize_haplotype_indices(
             haplotype_index
                 .clone()
                 .iter()
                 .map(|x| *x + 1)
                 .collect::<Vec<_>>(),
-        ); // haplotype index starts from 1
+        )); // haplotype index starts from 1
         phased_variant.allele_count = variants.iter().map(|v| v.allele_count).sum();
         phased_variants.push(phased_variant);
     }
@@ -878,7 +888,8 @@ pub fn start(
     let coverage = find_coverage_from_gfa(graph_filename);
     let chromosome = node_info
         .keys()
-        .collect::<Vec<_>>().first()
+        .collect::<Vec<_>>()
+        .first()
         .unwrap()
         .split(".")
         .collect::<Vec<_>>()[1]
