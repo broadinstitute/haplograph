@@ -331,6 +331,23 @@ fn maximum_overlap_matching(
     matched_nodes
 }
 
+fn supported_haplotypes_for_node(
+    haplotype_read_sets: &[(usize, HashSet<String>)],
+    node_reads: &HashSet<String>,
+) -> Vec<usize> {
+    let mut supported_haplotypes = haplotype_read_sets
+        .iter()
+        .filter_map(|(haplotype, haplotype_reads)| {
+            haplotype_reads
+                .intersection(node_reads)
+                .next()
+                .map(|_| *haplotype)
+        })
+        .collect::<Vec<_>>();
+    supported_haplotypes.sort_unstable();
+    supported_haplotypes
+}
+
 pub fn assign_haplotype_reads(
     node_info: &HashMap<String, NodeInfo>,
     heterozygous_nodes: &HashMap<String, HashSet<String>>,
@@ -881,6 +898,24 @@ pub fn filter_haplotype_nodes(
             .collect::<Vec<_>>();
         node_read_sets.sort_by(|a, b| a.1.len().cmp(&b.1.len()).then(a.0.cmp(&b.0)));
 
+        if node_read_sets.len() == 1 {
+            let (node_id, node_reads) = &node_read_sets[0];
+            let supported_haplotypes =
+                supported_haplotypes_for_node(&haplotype_read_sets, node_reads);
+            if !supported_haplotypes.is_empty() {
+                // Shared deletion-only windows often collapse to a single node.
+                // Keep that node on every supported haplotype rather than forcing
+                // a one-to-one assignment that would drop one haplotype path.
+                for haplotype in supported_haplotypes {
+                    filtered_haplotype_nodes
+                        .entry(haplotype)
+                        .or_insert(HashSet::new())
+                        .insert(node_id.clone());
+                }
+                continue;
+            }
+        }
+
         let matched_nodes = maximum_overlap_matching(&haplotype_read_sets, &node_read_sets);
         if matched_nodes.is_empty() {
             warn!(
@@ -1071,6 +1106,29 @@ mod tests {
             filtered.get(&1).unwrap(),
             &HashSet::from(["graph.chr1:10-20.b".to_string()])
         );
+    }
+
+    #[test]
+    fn filter_haplotype_nodes_keeps_shared_singleton_node_on_multiple_haplotypes() {
+        let mut node_info = HashMap::new();
+        node_info.insert(
+            "graph.chr1:20-30.shared".to_string(),
+            test_node(&["a", "b", "u", "v"]),
+        );
+
+        let haplotype_nodes = HashMap::from([
+            (0, HashSet::from(["graph.chr1:20-30.shared".to_string()])),
+            (1, HashSet::from(["graph.chr1:20-30.shared".to_string()])),
+        ]);
+        let haplotype_reads = HashMap::from([
+            (0, HashSet::from(["a", "b", "c"].map(String::from))),
+            (1, HashSet::from(["u", "v", "w"].map(String::from))),
+        ]);
+
+        let filtered = filter_haplotype_nodes(&node_info, &haplotype_nodes, &haplotype_reads);
+        let expected = HashSet::from(["graph.chr1:20-30.shared".to_string()]);
+        assert_eq!(filtered.get(&0).unwrap(), &expected);
+        assert_eq!(filtered.get(&1).unwrap(), &expected);
     }
 
     #[test]
