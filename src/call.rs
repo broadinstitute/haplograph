@@ -513,7 +513,7 @@ pub fn Phase_germline_variants(
 ) -> AnyhowResult<Vec<Variant>> {
     let (node_info, edge_info) = asm::load_graph(graph_filename).unwrap();
     let (haplotype_reads, node_haplotype) =
-        asm::find_node_haplotype(&node_info, haplotype_number, het_fold_threshold);
+        asm::find_node_haplotype(&node_info, haplotype_number);
 
     let mut collapsed_variants = HashMap::new();
     for variant in Variants.iter() {
@@ -626,11 +626,10 @@ pub fn get_variants_from_path(
     node_info: &HashMap<String, asm::NodeInfo>,
     edge_info: &HashMap<String, Vec<String>>,
     haplotype_number: usize,
-    het_fold_threshold: f64,
     reference_seqs: &fastq::Record,
 ) -> (Vec<Variant>, Vec<Variant>) {
     let (_haplotype_reads, node_haplotype) =
-        asm::find_node_haplotype(node_info, haplotype_number, het_fold_threshold);
+        asm::find_node_haplotype(node_info, haplotype_number);
     // Use the same path enumeration as assemble to ensure paths follow graph edges
     let all_paths = asm::enumerate_all_paths_with_haplotype(
         node_info,
@@ -877,7 +876,6 @@ pub fn start(
     sampleid: &String,
     output_prefix: &String,
     haplotype_number: usize,
-    het_fold_threshold: f64,
     sequencing_technology: &String,
 ) -> AnyhowResult<()> {
     let (node_info, edge_info) = asm::load_graph(graph_filename).unwrap();
@@ -906,7 +904,6 @@ pub fn start(
         &node_info,
         &edge_info,
         haplotype_number,
-        het_fold_threshold,
         &ref_chromosome_seqs,
     );
     let all_variants = [phased_variants.clone(), somatic_variants.clone()].concat();
@@ -968,9 +965,13 @@ pub fn start(
 
     //filter somatic variants
     let (matrix, var_list, read_list) = construct_var_read_matrix(&node_info, reference_seqs)?;
-    let filtered_var_name = util::permutation_test(&matrix, 0.001, 100, var_list.clone());
+    // println!("var_list: {:?}", var_list.len());
+    // println!("read_list: {:?}", read_list.len());
+
+    let filtered_var_name = util::permutation_test(&matrix, 0.1, 100, var_list.clone());
     let mut filtered_somatic_variants = Vec::new();
     for var in s_variants.iter() {
+        // println!("var: {:?}, {:?}, {:?}, {:?}, {:?}", var.chromosome.clone(), var.pos, var.ref_allele.clone(), var.alt_allele.clone(), var.variant_type.clone());
         if sequencing_technology == "hifi" {
             if var.variant_type == "SNP" {
                 filtered_somatic_variants.push(var.clone());

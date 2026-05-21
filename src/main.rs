@@ -38,10 +38,6 @@ enum DevToolsCommands {
         #[arg(short, long, default_value_t = 2)]
         number_of_haplotypes: usize,
 
-        /// heterozygous coverage fold threshold, > 3.0 is not heterozygous, the smaller the more strict
-        #[arg(short, long, default_value_t = 3.0)]
-        fold_threshold: f64,
-
         /// Verbose output
         #[arg(short, long)]
         verbose: bool,
@@ -143,10 +139,6 @@ enum Commands {
         /// Haplotype number
         #[arg(short, long, default_value_t = 2)]
         number_of_haplotypes: usize,
-
-        /// heterozygous coverage fold threshold, > 3.0 is not heterozygous,  the smaller the more strict
-        #[arg(short, long, default_value_t = 3.0)]
-        coverage_fold_threshold: f64,
 
         /// methylation likelihood threshold, default to 0.5
         #[arg(short, long, default_value_t = 0.5)]
@@ -334,8 +326,6 @@ fn main() -> Result<()> {
             file_format,
             // haplotype number
             number_of_haplotypes,
-            // heterozygous coverage fold threshold, > 3.0 is not heterozygous,  the smaller the more strict
-            coverage_fold_threshold,
             // methylation likelihood threshold, default to 0.5
             threshold_methyl_likelihood,
             // Sequencing technology, accepted hifi, nanopore
@@ -398,8 +388,7 @@ fn main() -> Result<()> {
                 &graph_gfa,
                 true,
                 number_of_haplotypes,
-                &output_p,
-                coverage_fold_threshold,
+                &output_p
             )?;
             call::start(
                 &graph_gfa,
@@ -407,7 +396,6 @@ fn main() -> Result<()> {
                 &sampleid,
                 &output_prefix,
                 number_of_haplotypes,
-                coverage_fold_threshold,
                 &detection_technology,
             )?;
         }
@@ -556,7 +544,6 @@ fn main() -> Result<()> {
                     true,
                     1,
                     &output_p,
-                    3.0,
                 )?;
                 let fasta_reader = FastaReader::from_file(format!("{}.fasta", &output_p.display().to_string()))?;
                 for record in fasta_reader.records() {
@@ -576,7 +563,6 @@ fn main() -> Result<()> {
                     output_prefix,
                     major_haplotype_only,
                     number_of_haplotypes,
-                    fold_threshold,
                     verbose,
                 } => {
                     // Initialize logging
@@ -592,7 +578,6 @@ fn main() -> Result<()> {
                         major_haplotype_only,
                         number_of_haplotypes,
                         &output_prefix,
-                        fold_threshold,
                     )?;
                 }
                 DevToolsCommands::Call {
@@ -621,7 +606,6 @@ fn main() -> Result<()> {
                         &sampleid,
                         &output_prefix,
                         maximum_haplotypes,
-                        fold_threshold,
                         &detection_technology,
                     )?;
                 }
