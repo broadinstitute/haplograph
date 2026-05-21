@@ -411,7 +411,7 @@ pub fn combine_cigar(cigar: &str) -> String {
     out
 }
 
-fn jaccard_distance(vector1: &[bool], vector2: &[bool]) -> f64 {
+pub fn jaccard_distance(vector1: &[bool], vector2: &[bool]) -> f64 {
     assert_eq!(
         vector1.len(),
         vector2.len(),
@@ -515,7 +515,7 @@ fn calculate_observation_statistics(
 }
 
 /// Calculate p-value using z-score approach
-fn calculate_p_value(statistics: &[f64], observation: f64) -> f64 {
+pub fn calculate_p_value(statistics: &[f64], observation: f64) -> f64 {
     let n = statistics.len() as f64;
 
     // Calculate mean

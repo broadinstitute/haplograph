@@ -12,6 +12,13 @@ use std::io::Write;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::path::PathBuf;
+use rayon::prelude::*;
+use ndarray::s;
+use rand::seq::SliceRandom;
+use rand::thread_rng;
+use ndarray::Array1;
+use adjustp::{adjust, Procedure};
+use log::debug;
 
 #[derive(Debug, Clone)]
 pub struct NodeInfo {
@@ -132,38 +139,122 @@ pub fn find_parallele_nodes(
     all_nodes
 }
 
-pub fn identify_heterozygous_nodes(
-    node_info: &HashMap<String, NodeInfo>,
-    hap_number: usize,
-    het_fold_threshold: f64,
-) -> HashMap<String, HashSet<String>> {
-    let mut heterozygous_nodes: HashMap<String, HashSet<String>> = HashMap::new();
-    let all_nodes = find_parallele_nodes(node_info);
-    let mut interval_list = all_nodes.keys().collect::<Vec<_>>();
-    interval_list.sort_by(|a, b| {
-        util::split_locus(a.to_string())
-            .1
-            .cmp(&util::split_locus(b.to_string()).1)
-    }); // ascending order a < b
-    for interval_name in interval_list.iter() {
-        let node_vec = all_nodes.get(interval_name.clone()).unwrap();
-        if node_vec.len() < 2 {
-            continue;
+pub fn het_permutation_test(
+    matrix: &Array2<f64>,
+    p_value_threshold: f64,
+    permutation_round: usize,
+    node_list: Vec<String>,
+) -> Vec<HashSet<String>> {
+    // let bar = ProgressBar::new(node_list.len() as u64);
+    // let statistics = get_null_distribution(&node_list, matrix, permutation_round);
+    let summary_statistics = (0..permutation_round)
+    .into_par_iter()
+    .flat_map(|_| {
+        let mut local_stats = Vec::new();
+        for (i, node_name) in node_list.iter().enumerate() {
+            let vector = matrix.slice(s![i, ..]).to_vec();
+            // Create a shuffled copy of the vector
+            let mut shuffled_data = vector.clone();
+            shuffled_data.shuffle(&mut thread_rng());
+            let shuffled = Array1::from(shuffled_data);
+            let binary_vector: Vec<bool> = shuffled.iter().map(|&x| x > 0.5).collect();
+            for j in 0..node_list.len() {
+                if i == j {
+                    continue;
+                }
+                let other_vector = matrix.slice(s![j, ..]).to_vec();
+                let binary_other: Vec<bool> = other_vector.iter().map(|&x| x > 0.5).collect();
+                let coor = (1.0 - util::jaccard_distance(&binary_vector, &binary_other)).abs();
+                local_stats.push(coor);
+            }
         }
-        let node_list = node_vec.iter().map(|node| node.clone()).collect::<Vec<_>>();
+        
+        Some(local_stats)
+    }).collect::<Vec<_>>().into_iter().flatten().collect::<Vec<_>>();
 
-        let matrix = construct_heterozygous_nodes_matrix(node_info, node_list.clone());
-        let node_list_filtered = util::permutation_test(&matrix, 0.1, 50, node_list.clone());
-
-        if node_list_filtered.len() == hap_number {
-            heterozygous_nodes
-                .entry(interval_name.to_string().clone())
-                .or_default()
-                .extend(node_list_filtered.iter().map(|node| node.clone()));
+    let mut raw_p_values = Vec::new();
+    let mut test_index = Vec::new();
+    // Replace par_iter().enumerate() with this pattern
+    for i in 0..node_list.len() {
+        let node_name = &node_list[i];
+        let binary_vector: Vec<bool> = matrix.slice(s![i, ..]).to_vec().iter().map(|&x| x > 0.5).collect();
+        for j in 0..node_list.len() {
+            let node_name_other = &node_list[j];
+            if i == j {
+                continue;
+            }
+            let other_vector = matrix.slice(s![j, ..]).to_vec();
+            let binary_other: Vec<bool> = other_vector.iter().map(|&x| x > 0.5).collect();
+            let observation = (1.0 - util::jaccard_distance(&binary_vector, &binary_other)).abs();
+            let p_value = util::calculate_p_value(&summary_statistics, observation);
+            raw_p_values.push(p_value);
+            test_index.push((node_name.clone(), node_name_other.clone()));
         }
     }
+
+    // Adjust p-values; collect node pairs with significant read-profile similarity.
+    let mut similar_pairs: Vec<(String, String)> = Vec::new();
+    if !raw_p_values.is_empty() {
+        let qvalues = adjust(&raw_p_values, Procedure::BenjaminiHochberg);
+        for (qi, q_value) in qvalues.iter().enumerate() {
+            let (node_a, node_b) = &test_index[qi];
+            if q_value <= &p_value_threshold {
+                similar_pairs.push((node_a.clone(), node_b.clone()));
+                debug!(
+                    "similar pair: {:?} vs {:?}, q_value: {:?}",
+                    node_a, node_b, q_value
+                );
+            }
+        }
+    }
+    if similar_pairs.is_empty() {
+        return node_list.iter().map(|node| HashSet::from([node.clone()])).collect();
+    }
+    // Merge similar pairs into connected groups (shared nodes go into the same set).
+    let mut similar_nodes: Vec<HashSet<String>> = Vec::new();
+    for (node_a, node_b) in similar_pairs {
+        let mut merged = false;
+        for set in similar_nodes.iter_mut() {
+            if set.contains(&node_a) || set.contains(&node_b) {
+                set.insert(node_a.clone());
+                set.insert(node_b.clone());
+                merged = true;
+                break;
+            }
+        }
+        if !merged {
+            let mut new_set = HashSet::new();
+            new_set.insert(node_a);
+            new_set.insert(node_b);
+            similar_nodes.push(new_set);
+        }
+    }
+    similar_nodes
+}
+fn identify_heterozygous_nodes(
+    node_info: &HashMap<String, NodeInfo>,
+) ->HashMap<String, HashSet<String>> {
+    let mut interval_dict:HashMap<String, Vec<String>> = HashMap::new();
+    for (node, node_info) in node_info.iter() {
+        let interval_name = node.split(".").collect::<Vec<_>>()[1];
+        interval_dict.entry(interval_name.to_string().clone()).or_default().push(node.clone());
+    }
+    let mut heterozygous_nodes:HashMap<String, HashSet<String>> = HashMap::new();
+    for interval_name in interval_dict.keys() {
+        let nodes = interval_dict.get(interval_name).unwrap();
+        let matrix = construct_heterozygous_nodes_matrix(node_info, nodes.clone());
+        let similar_nodes = het_permutation_test(&matrix, 0.1, 50, nodes.clone());
+
+        for  set in similar_nodes.iter() {
+            // find the most supported node in the set
+            let most_supported_node = set.iter().max_by_key(|node| node_info.get(*node).unwrap().support_reads).unwrap();
+            heterozygous_nodes.entry(interval_name.clone()).or_default().insert(most_supported_node.clone());
+        }
+    }
+
     heterozygous_nodes
 }
+
 
 fn hungarian_minimum_assignment(cost: &[Vec<i64>]) -> Vec<usize> {
     let size = cost.len();
@@ -1057,8 +1148,9 @@ pub fn find_node_haplotype(
         warn!("Unsupported hap_number: {}", hap_number);
         return (HashMap::new(), HashMap::new());
     }
+    
 
-    let heterozygous_nodes = identify_heterozygous_nodes(node_info, hap_number, het_fold_threshold);
+    let heterozygous_nodes = identify_heterozygous_nodes(node_info);
     info!("heterozygous_nodes: {:?}", heterozygous_nodes.len());
     let filtered_heterozygous_nodes = filter_heterozygous_nodes(node_info, &heterozygous_nodes);
     info!(
