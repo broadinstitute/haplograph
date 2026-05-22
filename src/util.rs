@@ -566,16 +566,17 @@ pub fn permutation_test(
 
     // adjust pvalues, create excluded_index list
     let mut excluded_index = Vec::new();
-    // println!("raw_p_values: {:?}", raw_p_values);
+    
     if !raw_p_values.is_empty() {
-        let qvalues = adjust(&raw_p_values, Procedure::BenjaminiHochberg);
-        for (qi, q_value) in qvalues.iter().enumerate() {
-            let test_index_value = &test_index[qi];
-            if q_value > &p_value_threshold {
+        // let qvalues = adjust(&raw_p_values, Procedure::BenjaminiHochberg);
+        for (pi, p_value) in raw_p_values.iter().enumerate() {
+            let test_index_value = &test_index[pi];
+            // println!("test_index_value: {:?}, q_values: {:?}", test_index_value, p_value);
+            if p_value > &p_value_threshold {
                 excluded_index.push(test_index_value);
                 debug!(
                     "excluded_index: {:?}, q_value: {:?}",
-                    test_index_value, q_value
+                    test_index_value, p_value
                 );
             }
         }

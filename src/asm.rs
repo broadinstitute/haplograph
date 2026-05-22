@@ -131,6 +131,7 @@ pub fn find_parallele_nodes(
 
 fn identify_heterozygous_nodes(
     node_info: &HashMap<String, NodeInfo>,
+    hap_number: usize,
 ) ->HashMap<String, HashSet<String>> {
     let mut interval_dict:HashMap<String, Vec<String>> = HashMap::new();
     for (node, node_info) in node_info.iter() {
@@ -143,7 +144,11 @@ fn identify_heterozygous_nodes(
         if nodes.len() < 2 {
             continue;
         }
-        heterozygous_nodes.entry(interval_name.clone()).or_default().extend(nodes.iter().map(|node| node.clone()));
+        // select the top hapnum nodes by the number of support reads
+        let mut nodes_with_support_reads = nodes.iter().map(|node| (node.clone(), node_info.get(node).unwrap().support_reads)).collect::<Vec<_>>();
+        nodes_with_support_reads.sort_by(|a, b| b.1.cmp(&a.1));
+        let top_nodes = nodes_with_support_reads.iter().take(hap_number).map(|(node, _)| node.clone()).collect::<Vec<_>>();
+        heterozygous_nodes.entry(interval_name.clone()).or_default().extend(top_nodes);
     }
 
     heterozygous_nodes
@@ -633,9 +638,9 @@ pub fn find_full_range_haplotypes(
                 end - start,
             ));
         }
-        //first compare the 4th element, then the 3th element
+        // first compare the 4th element, then the 3th element
         // full_sequences.sort_by(|a, b| b.3.cmp(&a.3).then(b.4.cmp(&a.4)));
-        full_sequences.sort_by(|a, b| b.2.len().cmp(&a.2.len()).then(b.3.cmp(&a.3)));
+        full_sequences.sort_by(|a, b| b.4.cmp(&a.4).then(b.3.cmp(&a.3)));
         best_paths.insert(*hap_index, full_sequences[0].clone());
     }
     best_paths
@@ -715,7 +720,7 @@ pub fn find_node_haplotype(
         let node_haplotype = find_most_supported_path(node_info);
         return (HashMap::new(), node_haplotype);
     }else if hap_number == 2 {
-        let heterozygous_nodes = identify_heterozygous_nodes(node_info);
+        let heterozygous_nodes = identify_heterozygous_nodes(node_info, hap_number);
         info!("heterozygous_nodes: {:?}", heterozygous_nodes.len());
         let filtered_heterozygous_nodes = filter_heterozygous_nodes(node_info, &heterozygous_nodes);
         info!(
@@ -913,13 +918,11 @@ pub fn call_methylation(
             .unwrap()
             .0;
             let position_mapping = mapping_to_reference_coordinates(&cigar, ref_start);
-            // println!("position_mapping: {:?}", position_mapping);
             let node_seq = node_info.get(node).unwrap().seq.clone();
             let node_coverage = node_info.get(node).unwrap().support_reads;
             for (pos, score) in methyl_info.into_iter() {
                 let asm_pos = pos + spos;
                 let ref_pos = *position_mapping.get(&pos).unwrap_or(&0);
-                // println!("ref_pos: {}, asm_pos: {}, score: {}", ref_pos, asm_pos, score);
                 methyl_info_dict.insert((ref_pos, asm_pos), (score, node_coverage));
             }
             spos += node_seq.len();
@@ -950,7 +953,6 @@ pub fn start(
     )
     .expect("Failed to enumerate all paths");
     let allseq = construct_sequences_from_haplotype_path(&node_info, &all_paths);
-    // println!("allseq: {:?}", allseq.iter().map(|(index, pathlist)| format!("index: {}, path num: {}", index, pathlist.len())).collect::<Vec<_>>().join("\n"));
     let primary_haplotypes =
         find_full_range_haplotypes(&node_info, &node_haplotype, &allseq);
     info!("All sequences constructed: {}", primary_haplotypes.len());

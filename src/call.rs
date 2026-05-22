@@ -968,7 +968,7 @@ pub fn start(
     // println!("var_list: {:?}", var_list.len());
     // println!("read_list: {:?}", read_list.len());
 
-    let filtered_var_name = util::permutation_test(&matrix, 0.1, 100, var_list.clone());
+    let filtered_var_name = util::permutation_test(&matrix, 0.05, 100, var_list.clone());
     let mut filtered_somatic_variants = Vec::new();
     for var in s_variants.iter() {
         // println!("var: {:?}, {:?}, {:?}, {:?}, {:?}", var.chromosome.clone(), var.pos, var.ref_allele.clone(), var.alt_allele.clone(), var.variant_type.clone());
