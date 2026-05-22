@@ -171,6 +171,7 @@ pub fn start(
     // write the evaluation results to a file
     let mut file = File::create(output_prefix)?;
     if as_genotyper {
+        writeln!(file, "{} {} {} {} {} {}", "Truth_id", "Truth_allele", "Query_id", "QV_score", "Edit_distance", "Alignment_length")?;
         let seq_info = load_pangenome_description(truth_fasta)?;
         for (i, j, score, editdistance, alignment_length) in optimal_sequence_pairs.iter() {
             let truth_seq_id = i.id().to_string();
@@ -178,6 +179,7 @@ pub fn start(
             writeln!(file, "{} {} {} {} {} {}", i.id(), truth_seq_allele, j.id(), score, editdistance, alignment_length)?;
         }
     } else {
+        writeln!(file, "{} {} {} {} {}", "Truth_id", "Query_id", "QV_score", "Edit_distance", "Alignment_length")?;
         for (i, j, score, editdistance, alignment_length) in optimal_sequence_pairs.iter() {
             writeln!(file, "{} {} {} {} {}", i.id(), j.id(), score, editdistance, alignment_length)?;
         }

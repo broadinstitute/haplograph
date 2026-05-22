@@ -134,6 +134,7 @@ task haplograph {
         Int fold_threshold
         Float min_freq
         String extra_arg = ""
+        RuntimeAttr? runtime_attr_override
     }
 
     command <<<
@@ -147,7 +148,6 @@ task haplograph {
                                                         -m ~{minimal_supported_reads} \
                                                         -w ~{windowsize} \
                                                         -f gfa \
-                                                        -c ~{fold_threshold}
                                                         ~{extra_arg}
         
         ls -l .
@@ -161,11 +161,25 @@ task haplograph {
         Array[File] methyl_bed = glob("*.bed")
     }
 
+    #########################
+    RuntimeAttr default_attr = object {
+        cpu_cores:          1,
+        mem_gb:             10,
+        disk_gb:            50,
+        boot_disk_gb:       10,
+        preemptible_tries:  2,
+        max_retries:        1,
+        docker:             "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograph:dev"
+    }
+    RuntimeAttr runtime_attr = select_first([runtime_attr_override, default_attr])
     runtime {
-        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograph:dev"
-        memory: "4 GB"
-        cpu: 1
-        disks: "local-disk 100 SSD"
+        cpu:                    select_first([runtime_attr.cpu_cores,         default_attr.cpu_cores])
+        memory:                 select_first([runtime_attr.mem_gb,            default_attr.mem_gb]) + " GiB"
+        disks: "local-disk " +  select_first([runtime_attr.disk_gb,           default_attr.disk_gb]) + " HDD"
+        bootDiskSizeGb:         select_first([runtime_attr.boot_disk_gb,      default_attr.boot_disk_gb])
+        preemptible:            select_first([runtime_attr.preemptible_tries, default_attr.preemptible_tries])
+        maxRetries:             select_first([runtime_attr.max_retries,       default_attr.max_retries])
+        docker:                 select_first([runtime_attr.docker,            default_attr.docker])
     }
 }
 
@@ -175,6 +189,7 @@ task haplograph_eval {
         File truth_fasta
         File query_fasta
         String prefix
+        RuntimeAttr? runtime_attr_override
     }
 
     command <<<
@@ -191,11 +206,25 @@ task haplograph_eval {
         
     }
 
+    #########################
+    RuntimeAttr default_attr = object {
+        cpu_cores:          1,
+        mem_gb:             4,
+        disk_gb:            50,
+        boot_disk_gb:       10,
+        preemptible_tries:  2,
+        max_retries:        1,
+        docker:             "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograph:dev"
+    }
+    RuntimeAttr runtime_attr = select_first([runtime_attr_override, default_attr])
     runtime {
-        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograph:dev"
-        memory: "4 GB"
-        cpu: 1
-        disks: "local-disk 100 SSD"
+        cpu:                    select_first([runtime_attr.cpu_cores,         default_attr.cpu_cores])
+        memory:                 select_first([runtime_attr.mem_gb,            default_attr.mem_gb]) + " GiB"
+        disks: "local-disk " +  select_first([runtime_attr.disk_gb,           default_attr.disk_gb]) + " HDD"
+        bootDiskSizeGb:         select_first([runtime_attr.boot_disk_gb,      default_attr.boot_disk_gb])
+        preemptible:            select_first([runtime_attr.preemptible_tries, default_attr.preemptible_tries])
+        maxRetries:             select_first([runtime_attr.max_retries,       default_attr.max_retries])
+        docker:                 select_first([runtime_attr.docker,            default_attr.docker])
     }
 }
 
@@ -208,6 +237,7 @@ task get_truth_haplotypes {
         File truth_hap2_bai
         String locus
         String prefix
+        RuntimeAttr? runtime_attr_override
     }
 
     command <<<
@@ -239,12 +269,25 @@ task get_truth_haplotypes {
         File fasta_file = "~{prefix}.truth.fasta"
         
     }
-
+    #########################
+    RuntimeAttr default_attr = object {
+        cpu_cores:          1,
+        mem_gb:             10,
+        disk_gb:            50,
+        boot_disk_gb:       10,
+        preemptible_tries:  2,
+        max_retries:        1,
+        docker:             "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograph:dev"
+    }
+    RuntimeAttr runtime_attr = select_first([runtime_attr_override, default_attr])
     runtime {
-        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograph:dev"
-        memory: "4 GB"
-        cpu: 1
-        disks: "local-disk 100 SSD"
+        cpu:                    select_first([runtime_attr.cpu_cores,         default_attr.cpu_cores])
+        memory:                 select_first([runtime_attr.mem_gb,            default_attr.mem_gb]) + " GiB"
+        disks: "local-disk " +  select_first([runtime_attr.disk_gb,           default_attr.disk_gb]) + " HDD"
+        bootDiskSizeGb:         select_first([runtime_attr.boot_disk_gb,      default_attr.boot_disk_gb])
+        preemptible:            select_first([runtime_attr.preemptible_tries, default_attr.preemptible_tries])
+        maxRetries:             select_first([runtime_attr.max_retries,       default_attr.max_retries])
+        docker:                 select_first([runtime_attr.docker,            default_attr.docker])
     }
 }
 
@@ -343,6 +386,7 @@ task downsampleBam {
         Int desiredCoverage
         Float currentCoverage
         Int? preemptible_tries
+        RuntimeAttr? runtime_attr_override
     }
 
     meta {
@@ -366,13 +410,28 @@ task downsampleBam {
         fi
 
     >>>
-    runtime {
-        preemptible: select_first([preemptible_tries, 5])
-        memory: "8 GB"
-        cpu: "2"
-        disks: "local-disk 500 HDD"
-        docker: "us.gcr.io/broad-gatk/gatk"
+
+    #########################
+    RuntimeAttr default_attr = object {
+        cpu_cores:          1,
+        mem_gb:             10,
+        disk_gb:            50,
+        boot_disk_gb:       10,
+        preemptible_tries:  2,
+        max_retries:        1,
+        docker:             "us.gcr.io/broad-gatk/gatk"
     }
+    RuntimeAttr runtime_attr = select_first([runtime_attr_override, default_attr])
+    runtime {
+        cpu:                    select_first([runtime_attr.cpu_cores,         default_attr.cpu_cores])
+        memory:                 select_first([runtime_attr.mem_gb,            default_attr.mem_gb]) + " GiB"
+        disks: "local-disk " +  select_first([runtime_attr.disk_gb,           default_attr.disk_gb]) + " HDD"
+        bootDiskSizeGb:         select_first([runtime_attr.boot_disk_gb,      default_attr.boot_disk_gb])
+        preemptible:            select_first([runtime_attr.preemptible_tries, default_attr.preemptible_tries])
+        maxRetries:             select_first([runtime_attr.max_retries,       default_attr.max_retries])
+        docker:                 select_first([runtime_attr.docker,            default_attr.docker])
+    }
+
     output {
         File downsampled_bam = "~{basename}_~{desiredCoverage}x.bam"
         File downsampled_bai = "~{basename}_~{desiredCoverage}x.bai"
@@ -386,6 +445,7 @@ task parseBed {
         String output_prefix
 
         Int? preemptible_tries
+        
     }
 
 
@@ -543,6 +603,7 @@ task hifiasm_asm{
         String prefix
         Int num_cpus
         Int mem_gb
+        RuntimeAttr? runtime_attr_override
     }
 
     Int disk_size = 10 + ceil(2 * size(bam, "GiB"))
@@ -565,14 +626,26 @@ task hifiasm_asm{
         File assembly_hap2="~{prefix}.bp.hap2.p_ctg.fa"
         File asm_file = "~{prefix}.hifiasm.fa"
     }
+
+    #########################
+    RuntimeAttr default_attr = object {
+        cpu_cores:          1,
+        mem_gb:             10,
+        disk_gb:            50,
+        boot_disk_gb:       10,
+        preemptible_tries:  2,
+        max_retries:        1,
+        docker:             "us.gcr.io/broad-dsp-lrma/hangsuunc/hifiasm:0.25.0"
+    }
+    RuntimeAttr runtime_attr = select_first([runtime_attr_override, default_attr])
     runtime {
-        cpu: num_cpus
-        memory: mem_gb + " GiB"
-        disks: "local-disk " + disk_size + " HDD" #"local-disk 100 HDD"
-        bootDiskSizeGb: 10
-        preemptible: 2
-        maxRetries: 1
-        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/hifiasm:0.25.0"
-    }    
+        cpu:                    select_first([runtime_attr.cpu_cores,         default_attr.cpu_cores])
+        memory:                 select_first([runtime_attr.mem_gb,            default_attr.mem_gb]) + " GiB"
+        disks: "local-disk " +  select_first([runtime_attr.disk_gb,           default_attr.disk_gb]) + " HDD"
+        bootDiskSizeGb:         select_first([runtime_attr.boot_disk_gb,      default_attr.boot_disk_gb])
+        preemptible:            select_first([runtime_attr.preemptible_tries, default_attr.preemptible_tries])
+        maxRetries:             select_first([runtime_attr.max_retries,       default_attr.max_retries])
+        docker:                 select_first([runtime_attr.docker,            default_attr.docker])
+    }  
 }
 
