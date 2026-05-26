@@ -1222,18 +1222,20 @@ pub fn find_node_haplotype(
             let node_haplotype = find_most_supported_path(node_info);
             return (haplotype_reads, node_haplotype)
         } else {
-            // let filtered_haplotype_nodes =
-            //     filter_haplotype_nodes(node_info, &haplotype_nodes_new, &haplotype_reads_new);
-            let mut haplotype_nodes_new = HashMap::new();
+            let mut haplotype_nodes = HashMap::new();
             let read_to_nodes = assign_node_to_reads(node_info);
             
             for (hap, reads) in haplotype_reads.iter() {
                 for read in reads.iter() {
                     let nodes_on_read = read_to_nodes.get(read).unwrap().clone();
-                    haplotype_nodes_new.entry(*hap).or_insert(HashSet::new()).extend(nodes_on_read);
+                    haplotype_nodes.entry(*hap).or_insert(HashSet::new()).extend(nodes_on_read);
                 }
             }
-            let node_haplotype = assign_haplotype_to_nodes(&haplotype_nodes_new);
+            let filtered_haplotype_nodes =
+                filter_haplotype_nodes(node_info, &haplotype_nodes, &haplotype_reads);
+
+            let node_haplotype = assign_haplotype_to_nodes(&filtered_haplotype_nodes);
+            
             // for (interval, nodes) in heterozygous_nodes.iter() {
             //     for node in nodes {
             //         println!("interval: {}, node: {}, hap: {:?}", interval, node, node_haplotype.get(node));
@@ -1427,11 +1429,7 @@ pub fn start(
 
     let (haplotype_reads, node_haplotype) =
         find_node_haplotype(&node_info, haplotype_number);
-    for (k, v) in node_haplotype.iter() {
-        if v == &HashSet::from([1usize]) {
-            eprintln!("hap1-only node: {}", k);
-        }
-    }
+        
     // println!("node_haplotype: {:?}", node_haplotype);
     let all_paths = enumerate_all_paths_with_haplotype(
         &node_info,
