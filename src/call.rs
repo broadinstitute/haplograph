@@ -8,6 +8,8 @@ use ndarray::Array2;
 use rust_htslib::bcf::{self, record::GenotypeAllele};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use ndarray::s;
+use rayon::prelude::*;
 
 #[derive(Debug, Clone)]
 pub struct Variant {
@@ -505,64 +507,64 @@ fn write_vcf(
 }
 
 /// Phase variants and write phased VCF
-pub fn Phase_germline_variants(
-    graph_filename: &PathBuf,
-    Variants: &Vec<Variant>,
-    haplotype_number: usize,
-    het_fold_threshold: f64,
-) -> AnyhowResult<Vec<Variant>> {
-    let (node_info, edge_info) = asm::load_graph(graph_filename).unwrap();
-    let (haplotype_reads, node_haplotype) =
-        asm::find_node_haplotype(&node_info, haplotype_number);
+// pub fn Phase_germline_variants(
+//     graph_filename: &PathBuf,
+//     Variants: &Vec<Variant>,
+//     haplotype_number: usize,
+//     het_fold_threshold: f64,
+// ) -> AnyhowResult<Vec<Variant>> {
+//     let (node_info, edge_info) = asm::load_graph(graph_filename).unwrap();
+//     let (haplotype_reads, node_haplotype) =
+//         asm::find_node_haplotype(&node_info, haplotype_number);
 
-    let mut collapsed_variants = HashMap::new();
-    for variant in Variants.iter() {
-        let key = (
-            variant.chromosome.clone(),
-            variant.pos,
-            variant.ref_allele.clone(),
-            variant.alt_allele.clone(),
-            variant.variant_type.clone(),
-        );
-        collapsed_variants
-            .entry(key)
-            .or_insert(Vec::new())
-            .push((variant.allele_count, variant.node_id.clone()));
-    }
+//     let mut collapsed_variants = HashMap::new();
+//     for variant in Variants.iter() {
+//         let key = (
+//             variant.chromosome.clone(),
+//             variant.pos,
+//             variant.ref_allele.clone(),
+//             variant.alt_allele.clone(),
+//             variant.variant_type.clone(),
+//         );
+//         collapsed_variants
+//             .entry(key)
+//             .or_insert(Vec::new())
+//             .push((variant.allele_count, variant.node_id.clone()));
+//     }
 
-    let mut phased_variants = Vec::new();
-    for (key_t, node_list) in collapsed_variants.iter() {
-        let chromosome = key_t.0.clone();
-        let pos = key_t.1;
-        let ref_allele = key_t.2.clone();
-        let alt_allele = key_t.3.clone();
-        let variant_type = key_t.4.clone();
-        let allele_count = node_list.iter().map(|x| x.0).sum();
-        let node_id_list = node_list
-            .iter()
-            .map(|x| x.1.clone())
-            .collect::<Vec<String>>();
-        let mut haplotype_index = Vec::new();
-        for node_id in node_id_list.iter() {
-            if node_haplotype.contains_key(node_id) {
-                // println!("node_id: {:?}, haplotype_map: {:?}", node_id, node_haplotype.get(node_id).unwrap());
-                haplotype_index.extend(node_haplotype.get(node_id).unwrap().iter().map(|x| x + 1));
-            }
-        }
+//     let mut phased_variants = Vec::new();
+//     for (key_t, node_list) in collapsed_variants.iter() {
+//         let chromosome = key_t.0.clone();
+//         let pos = key_t.1;
+//         let ref_allele = key_t.2.clone();
+//         let alt_allele = key_t.3.clone();
+//         let variant_type = key_t.4.clone();
+//         let allele_count = node_list.iter().map(|x| x.0).sum();
+//         let node_id_list = node_list
+//             .iter()
+//             .map(|x| x.1.clone())
+//             .collect::<Vec<String>>();
+//         let mut haplotype_index = Vec::new();
+//         for node_id in node_id_list.iter() {
+//             if node_haplotype.contains_key(node_id) {
+//                 // println!("node_id: {:?}, haplotype_map: {:?}", node_id, node_haplotype.get(node_id).unwrap());
+//                 haplotype_index.extend(node_haplotype.get(node_id).unwrap().iter().map(|x| x + 1));
+//             }
+//         }
 
-        phased_variants.push(Variant {
-            chromosome,
-            pos,
-            ref_allele,
-            alt_allele,
-            variant_type,
-            allele_count,
-            node_id: node_id_list.join(","),
-            haplotype_index: Some(normalize_haplotype_indices(haplotype_index)),
-        });
-    }
-    Ok(phased_variants)
-}
+//         phased_variants.push(Variant {
+//             chromosome,
+//             pos,
+//             ref_allele,
+//             alt_allele,
+//             variant_type,
+//             allele_count,
+//             node_id: node_id_list.join(","),
+//             haplotype_index: Some(normalize_haplotype_indices(haplotype_index)),
+//         });
+//     }
+//     Ok(phased_variants)
+// }
 
 pub fn get_variants_from_node(
     node_info: &HashMap<String, asm::NodeInfo>,
@@ -641,18 +643,18 @@ pub fn get_variants_from_path(
 
     let all_sequences = asm::construct_sequences_from_haplotype_path(node_info, &all_paths);
 
-    println!(
-        "all_paths: {:?}",
-        all_sequences
-            .iter()
-            .map(|(haplotype_index, path_info_list)| format!(
-                "haplotype_index: {:?}, path_number: {:?}",
-                haplotype_index,
-                path_info_list.len()
-            ))
-            .collect::<Vec<_>>()
-            .join(",")
-    );
+    // println!(
+    //     "all_paths: {:?}",
+    //     all_sequences
+    //         .iter()
+    //         .map(|(haplotype_index, path_info_list)| format!(
+    //             "haplotype_index: {:?}, path_number: {:?}",
+    //             haplotype_index,
+    //             path_info_list.len()
+    //         ))
+    //         .collect::<Vec<_>>()
+    //         .join(",")
+    // );
 
     // Select the best path for each haplotype (same as assemble function)
     let primary_haplotypes =
@@ -815,28 +817,28 @@ pub fn get_variants_from_path(
     (phased_variants, somatic_variants)
 }
 // /// Recursive DFS to find all paths from a starting node
-fn dfs_traverse(
-    current_node: usize,
-    connection_dict: &HashMap<usize, HashSet<usize>>,
-    current_path: &mut Vec<usize>,
-    all_paths: &mut Vec<Vec<usize>>,
-) {
-    if !connection_dict.contains_key(&current_node) {
-        all_paths.push(current_path.clone());
-        return;
-    }
-    if current_path.contains(&current_node) {
-        all_paths.push(current_path.clone());
-        return;
-    }
+// fn dfs_traverse(
+//     current_node: usize,
+//     connection_dict: &HashMap<usize, HashSet<usize>>,
+//     current_path: &mut Vec<usize>,
+//     all_paths: &mut Vec<Vec<usize>>,
+// ) {
+//     if !connection_dict.contains_key(&current_node) {
+//         all_paths.push(current_path.clone());
+//         return;
+//     }
+//     if current_path.contains(&current_node) {
+//         all_paths.push(current_path.clone());
+//         return;
+//     }
 
-    let next_nodes = connection_dict.get(&current_node).unwrap();
-    for next_node in next_nodes.clone().iter().cloned() {
-        current_path.push(next_node);
-        dfs_traverse(next_node, connection_dict, current_path, all_paths);
-        current_path.pop(); // Backtrack
-    }
-}
+//     let next_nodes = connection_dict.get(&current_node).unwrap();
+//     for next_node in next_nodes.clone().iter().cloned() {
+//         current_path.push(next_node);
+//         dfs_traverse(next_node, connection_dict, current_path, all_paths);
+//         current_path.pop(); // Backtrack
+//     }
+// }
 
 pub fn construct_var_read_matrix(
     node_info: &HashMap<String, asm::NodeInfo>,
@@ -965,10 +967,32 @@ pub fn start(
 
     //filter somatic variants
     let (matrix, var_list, read_list) = construct_var_read_matrix(&node_info, reference_seqs)?;
-    // println!("var_list: {:?}", var_list.len());
-    // println!("read_list: {:?}", read_list.len());
-
-    let filtered_var_name = util::permutation_test(&matrix, 0.05, 100, var_list.clone());
+    // permutation test for somatic variants
+    
+    let filtered_var_name =  if matrix.shape()[0] > 2000 {
+        // split the matrix into chunks of 2000 rows
+        let chunk_num = matrix.shape()[0] / 2000 as usize;
+        let n_rows = matrix.shape()[0];
+        let chunks_filtered: Vec<String> = (0..chunk_num)
+            .into_par_iter()
+            .flat_map_iter(|i| {
+                let raw_start = i * 2000;
+                let (start, end) = if raw_start + 2000 > n_rows {
+                    (n_rows - 2000, n_rows)
+                } else {
+                    (raw_start, raw_start + 2000)
+                };
+                let chunk = matrix.slice(s![start..end, ..]).to_owned();
+                let var_list_chunk = var_list[start..end].to_vec();
+                util::permutation_test(&chunk, 0.5, 100, var_list_chunk).into_iter()
+            })
+            .collect();
+        chunks_filtered.into_iter().collect::<HashSet<_>>().into_iter().collect()
+    }else{
+        util::permutation_test(&matrix, 0.05, 100, var_list.clone())
+    };
+    
+    
     let mut filtered_somatic_variants = Vec::new();
     for var in s_variants.iter() {
         // println!("var: {:?}, {:?}, {:?}, {:?}, {:?}", var.chromosome.clone(), var.pos, var.ref_allele.clone(), var.alt_allele.clone(), var.variant_type.clone());

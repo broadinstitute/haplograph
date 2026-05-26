@@ -2,9 +2,11 @@ use crate::eval;
 use crate::util;
 use anyhow::Result as AnyhowResult;
 use flate2::read::GzDecoder;
+use intervals::partitions;
 use log::{info, warn};
 use ndarray::Array2;
 use serde_json::Value;
+use itertools::Itertools;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs::File;
@@ -12,6 +14,8 @@ use std::io::Write;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::path::PathBuf;
+use ndarray::s;
+use rayon::prelude::*;
 
 #[derive(Debug, Clone)]
 pub struct NodeInfo {
@@ -129,29 +133,497 @@ pub fn find_parallele_nodes(
     all_nodes
 }
 
-fn identify_heterozygous_nodes(
+/// Minimum supporting reads required for a node to be considered a haplotype candidate.
+const HET_MIN_NODE_SUPPORT: usize = 2;
+/// Maximum allowed pairwise Jaccard between read sets of two heterozygous-allele candidates.
+const HET_MAX_PAIRWISE_JACCARD: f64 = 0.2;
+
+/// Jaccard similarity |A ∩ B| / |A ∪ B|; returns 0.0 if both sets are empty.
+fn read_set_jaccard(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
+    let union = a.union(b).count();
+    if union == 0 {
+        0.0
+    } else {
+        a.intersection(b).count() as f64 / union as f64
+    }
+}
+
+/// Maximum pairwise Jaccard across all node pairs in the subset (0.0 if subset has < 2 nodes).
+fn max_pairwise_jaccard(read_sets: &[HashSet<String>]) -> f64 {
+    let mut worst = 0.0f64;
+    for i in 0..read_sets.len() {
+        for j in (i + 1)..read_sets.len() {
+            worst = worst.max(read_set_jaccard(&read_sets[i], &read_sets[j]));
+        }
+    }
+    worst
+}
+
+/// Balance score: min/max support across the subset (1.0 = perfect balance, 0.0 = degenerate).
+fn min_max_support_ratio(supports: &[usize]) -> f64 {
+    let max = *supports.iter().max().unwrap_or(&0) as f64;
+    let min = *supports.iter().min().unwrap_or(&0) as f64;
+    if max == 0.0 {
+        0.0
+    } else {
+        min / max
+    }
+}
+
+/// Identify a subset of parallel nodes at each interval that look like distinct haplotypes.
+///
+/// Among all feasible subsets of the largest valid size, the one maximizing the composite score
+/// `(1 - max_jaccard, min_max_ratio, total_unique_reads)` is selected (lexicographic).
+pub fn identify_heterozygous_nodes(
     node_info: &HashMap<String, NodeInfo>,
     hap_number: usize,
-) ->HashMap<String, HashSet<String>> {
-    let mut interval_dict:HashMap<String, Vec<String>> = HashMap::new();
-    for (node, node_info) in node_info.iter() {
-        let interval_name = node.split(".").collect::<Vec<_>>()[1];
-        interval_dict.entry(interval_name.to_string().clone()).or_default().push(node.clone());
-    }
-    let mut heterozygous_nodes:HashMap<String, HashSet<String>> = HashMap::new();
-    for interval_name in interval_dict.keys() {
-        let nodes = interval_dict.get(interval_name).unwrap();
-        if nodes.len() < 2 {
-            continue;
-        }
-        // select the top hapnum nodes by the number of support reads
-        let mut nodes_with_support_reads = nodes.iter().map(|node| (node.clone(), node_info.get(node).unwrap().support_reads)).collect::<Vec<_>>();
-        nodes_with_support_reads.sort_by(|a, b| b.1.cmp(&a.1));
-        let top_nodes = nodes_with_support_reads.iter().take(hap_number).map(|(node, _)| node.clone()).collect::<Vec<_>>();
-        heterozygous_nodes.entry(interval_name.clone()).or_default().extend(top_nodes);
+    het_fold_threshold: f64,
+) -> HashMap<String, HashSet<String>> {
+    let mut heterozygous_nodes: HashMap<String, HashSet<String>> = HashMap::new();
+    if hap_number < 2 {
+        return heterozygous_nodes;
     }
 
+    let all_nodes = find_parallele_nodes(node_info);
+    let mut interval_list: Vec<&String> = all_nodes.keys().collect();
+    interval_list.sort_by(|a, b| {
+        util::split_locus(a.to_string())
+            .1
+            .cmp(&util::split_locus(b.to_string()).1)
+    });
+
+    for interval_name in interval_list.iter() {
+        let node_vec = all_nodes.get(*interval_name).unwrap();
+
+        let mut candidates: Vec<(String, HashSet<String>)> = node_vec
+            .iter()
+            .map(|node| (node.clone(), get_read_name_list(node_info, node.clone())))
+            .filter(|(_, reads)| reads.len() >= HET_MIN_NODE_SUPPORT)
+            .collect();
+        if candidates.len() < 2 {
+            continue;
+        }
+        candidates.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+
+        let max_k = hap_number.min(candidates.len());
+        let mut chosen: Option<Vec<String>> = None;
+
+        for k in (2..=max_k).rev() {
+            let mut best: Option<(f64, f64, usize, Vec<String>)> = None;
+
+            for combo in (0..candidates.len()).combinations(k) {
+                let reads: Vec<&HashSet<String>> =
+                    combo.iter().map(|&i| &candidates[i].1).collect();
+                let supports: Vec<usize> = reads.iter().map(|r| r.len()).collect();
+
+                let balance = min_max_support_ratio(&supports);
+
+                let reads_owned: Vec<HashSet<String>> =
+                    reads.iter().map(|&r| r.clone()).collect();
+                let max_jac = max_pairwise_jaccard(&reads_owned);
+
+                let union_reads: HashSet<&String> =
+                    reads.iter().flat_map(|r| r.iter()).collect();
+                let disjointness = 1.0 - max_jac;
+                let total_unique = union_reads.len();
+
+                let candidate_score = (disjointness, balance, total_unique);
+                let is_better = match &best {
+                    None => true,
+                    Some((d, b, t, _)) => {
+                        (candidate_score.0, candidate_score.1, candidate_score.2)
+                            > (*d, *b, *t)
+                    }
+                };
+                if is_better {
+                    let nodes: Vec<String> =
+                        combo.iter().map(|&i| candidates[i].0.clone()).collect();
+                    best = Some((disjointness, balance, total_unique, nodes));
+                }
+            }
+
+            if let Some((_, _, _, nodes)) = best {
+                chosen = Some(nodes);
+                break;
+            }
+        }
+
+        if let Some(nodes) = chosen {
+            heterozygous_nodes
+                .entry((*interval_name).clone())
+                .or_default()
+                .extend(nodes);
+        }
+    }
     heterozygous_nodes
+}
+
+/// Split each interval's heterozygous-node read sets into strictly non-overlapping groups.
+
+// pub fn partition_heterozygous_reads(
+//     node_info: &HashMap<String, NodeInfo>,
+//     heterozygous_nodes: &HashMap<String, HashSet<String>>,
+// ) -> HashMap<String, Vec<(String, HashSet<String>)>> {
+
+//     let mut partitioned: HashMap<String, Vec<(String, HashSet<String>)>> = HashMap::new();
+
+//     for (interval, nodes) in heterozygous_nodes.iter() {
+//         let mut node_reads: Vec<(String, HashSet<String>)> = nodes
+//             .iter()
+//             .map(|node_id| (node_id.clone(), get_read_name_list(node_info, node_id.clone())))
+//             .collect();
+//         // Deterministic order: top support first; tie-break on node id.
+//         node_reads.sort_by(|a, b| {
+//             b.1.len()
+//                 .cmp(&a.1.len())
+//                 .then_with(|| a.0.cmp(&b.0))
+//         });
+
+//         // Count how many chosen nodes at this interval contain each read.
+//         let mut read_count: HashMap<String, usize> = HashMap::new();
+//         for (_, reads) in &node_reads {
+//             for r in reads {
+//                 *read_count.entry(r.clone()).or_insert(0) += 1;
+//             }
+//         }
+
+//         // Keep reads that appear in exactly one chosen node.
+//         let exclusive: Vec<(String, HashSet<String>)> = node_reads
+//             .into_iter()
+//             .map(|(node_id, reads)| {
+//                 let kept: HashSet<String> = reads
+//                     .into_iter()
+//                     .filter(|r| read_count.get(r) == Some(&1))
+//                     .collect();
+//                 (node_id, kept)
+//             })
+//             .collect();
+
+//         partitioned.insert(interval.clone(), exclusive);
+//     }
+//     partitioned
+// }
+
+
+/// Maximum number of corrections (flips) allowed per node row.
+/// Bounds the DP state expansion to `sum_{i=0..=k} C(n_reads, i)` candidates per row.
+const MEC_K_PER_NODE: usize = 2;
+/// Soft balance penalty (corrections per 1-unit imbalance |‖A‖ − ‖B‖|).
+const MEC_BALANCE_WEIGHT: f64 = 0.25;
+/// Hard cap on `n_reads` for the k-cMEC DP; above this the local-search heuristic kicks in.
+const MEC_KCMEC_MAX_READS: usize = 256;
+/// Iteration cap for the local-search heuristic.
+const MEC_LOCAL_SEARCH_MAX_ITER: usize = 100;
+
+/// Partition reads (columns of `het_matrix`) into two non-conflicting groups by Minimum Error
+/// Correction (MEC). A "conflict-free" group requires that, for every node row, all reads in
+/// the group share the same value; the minimum number of entry flips to reach this state is
+/// the cost. The total objective is:
+///
+///     cost(A, B) = corrections + balance_weight * |‖A‖ − ‖B‖|
+///
+/// Returns `(group_a, group_b, corrections)` where the index vectors are columns of
+/// `het_matrix`. The k-constrained MEC dynamic programming (`MEC_K_PER_NODE` flips per row max)
+/// runs when `n_reads ≤ MEC_KCMEC_MAX_READS`; otherwise the local-search heuristic is used.
+/// If the DP turns out infeasible at the chosen `k`, the local-search fallback also fires.
+pub fn mec_partition_reads(
+    het_matrix: &Array2<f64>,
+    balance_weight: f64,
+) -> (Vec<usize>, Vec<usize>, usize) {
+    let (n_nodes, n_reads) = het_matrix.dim();
+    if n_reads <= 1 || n_nodes == 0 {
+        return ((0..n_reads).collect(), Vec::new(), 0);
+    }
+
+    if n_reads <= MEC_KCMEC_MAX_READS {
+        if let Some(result) = mec_kcmec_dp(het_matrix, MEC_K_PER_NODE, balance_weight) {
+            return result;
+        }
+    }
+    mec_local_search(het_matrix, balance_weight)
+}
+
+/// k-constrained MEC dynamic programming (HapCol-style).
+///
+/// At each node row, only k-corrections — vectors obtained from the row by flipping **at most
+/// `k`** non-missing entries — are considered as candidate "corrected columns" `C_j`. A pair
+/// of corrected rows is *in accordance* if they encode the same bipartition of reads (equal or
+/// bitwise-complement on the active fragments). The DP keeps, for every surviving canonical
+/// bipartition, the minimum cumulative number of corrections to realize it across all rows
+/// processed so far.
+///
+/// State per row: `HashMap<canonical_bipartition, total_corrections>`. The canonical form
+/// fixes read 0 to group A so that `(A, B)` and `(B, A)` collapse to a single state.
+///
+/// Returns `None` when no canonical bipartition is reachable through all rows under the
+/// `k` budget — the caller should escalate `k` or fall back to a heuristic.
+fn mec_kcmec_dp(
+    het_matrix: &Array2<f64>,
+    k: usize,
+    balance_weight: f64,
+) -> Option<(Vec<usize>, Vec<usize>, usize)> {
+    let (n_nodes, n_reads) = het_matrix.dim();
+    if n_reads < 2 || n_nodes == 0 {
+        return None;
+    }
+
+    let rows: Vec<Vec<u8>> = (0..n_nodes)
+        .map(|r| {
+            (0..n_reads)
+                .map(|c| (het_matrix[[r, c]] != 0.0) as u8)
+                .collect()
+        })
+        .collect();
+
+    // DP state: canonical bipartition (Vec<u8>, first bit == 0) → cumulative corrections.
+    let mut dp: HashMap<Vec<u8>, usize> = HashMap::new();
+    let mut seeded = false;
+
+    for row in &rows {
+        // Skip rows that carry no phasing information.
+        let row_ones = row.iter().filter(|&&b| b == 1).count();
+        if row_ones == 0 || row_ones == n_reads {
+            continue;
+        }
+
+        // Enumerate all heterozygous k-corrections of `row` and keep the best (min flips) per
+        // canonical bipartition.
+        let mut local: HashMap<Vec<u8>, usize> = HashMap::new();
+        for flips in 0..=k {
+            for combo in (0..n_reads).combinations(flips) {
+                let mut corrected = row.clone();
+                for &i in &combo {
+                    corrected[i] ^= 1;
+                }
+                let c_ones = corrected.iter().filter(|&&b| b == 1).count();
+                if c_ones == 0 || c_ones == n_reads {
+                    continue;
+                }
+                if corrected[0] == 1 {
+                    for bit in corrected.iter_mut() {
+                        *bit ^= 1;
+                    }
+                }
+                local
+                    .entry(corrected)
+                    .and_modify(|c| {
+                        if flips < *c {
+                            *c = flips;
+                        }
+                    })
+                    .or_insert(flips);
+            }
+        }
+
+        if local.is_empty() {
+            return None;
+        }
+
+        if !seeded {
+            dp = local;
+            seeded = true;
+        } else {
+            let mut new_dp: HashMap<Vec<u8>, usize> = HashMap::with_capacity(dp.len().min(local.len()));
+            for (canon, prev_cost) in &dp {
+                if let Some(&local_cost) = local.get(canon) {
+                    new_dp.insert(canon.clone(), prev_cost + local_cost);
+                }
+            }
+            if new_dp.is_empty() {
+                return None;
+            }
+            dp = new_dp;
+        }
+    }
+
+    if !seeded {
+        // Every row was homozygous → no phasing information; return a trivial split.
+        return Some(((0..n_reads).collect(), Vec::new(), 0));
+    }
+
+    let (best_canon, &best_cost) = dp.iter().min_by(|x, y| {
+        let px = x.0.iter().filter(|&&bit| bit == 1).count();
+        let py = y.0.iter().filter(|&&bit| bit == 1).count();
+        let bal_x = balance_weight * (n_reads as f64 - 2.0 * px as f64).abs();
+        let bal_y = balance_weight * (n_reads as f64 - 2.0 * py as f64).abs();
+        ((*x.1 as f64) + bal_x)
+            .partial_cmp(&((*y.1 as f64) + bal_y))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    })?;
+
+    let group_a: Vec<usize> = (0..n_reads).filter(|&i| best_canon[i] == 0).collect();
+    let group_b: Vec<usize> = (0..n_reads).filter(|&i| best_canon[i] == 1).collect();
+    Some((group_a, group_b, best_cost))
+}
+
+/// Total cost of a bipartition expressed as 64-bit masks: number of minority votes per row,
+/// plus the weighted balance penalty. Used by the local-search helper while sizing the cost.
+fn mec_partition_cost(
+    row_masks: &[u64],
+    a_mask: u64,
+    b_mask: u64,
+    balance_weight: f64,
+) -> (usize, f64) {
+    let size_a = a_mask.count_ones() as usize;
+    let size_b = b_mask.count_ones() as usize;
+    let mut corrections = 0usize;
+    for &row in row_masks {
+        let a_ones = (row & a_mask).count_ones() as usize;
+        let a_zeros = size_a - a_ones;
+        let b_ones = (row & b_mask).count_ones() as usize;
+        let b_zeros = size_b - b_ones;
+        corrections += a_ones.min(a_zeros) + b_ones.min(b_zeros);
+    }
+    let balance_pen = balance_weight * (size_a as f64 - size_b as f64).abs();
+    (corrections, corrections as f64 + balance_pen)
+}
+
+/// Greedy local search: alternates between (a) majority-vote consensus per group, (b) re-assigning
+/// each read to the closer haplotype (Hamming distance + balance gradient). Converges quickly for
+/// large matrices but is not guaranteed to be globally optimal.
+fn mec_local_search(
+    het_matrix: &Array2<f64>,
+    balance_weight: f64,
+) -> (Vec<usize>, Vec<usize>, usize) {
+    let (n_nodes, n_reads) = het_matrix.dim();
+
+    // Initial bipartition: assign reads in column-index order alternating A/B,
+    // then immediately refine. (Cheap, deterministic; PCA init is overkill here.)
+    let mut assignment: Vec<u8> = (0..n_reads).map(|i| (i & 1) as u8).collect();
+
+    let mut last_cost = i64::MAX;
+    for _ in 0..MEC_LOCAL_SEARCH_MAX_ITER {
+        // Consensus per group: majority bit per row.
+        let mut hap_a = vec![0u8; n_nodes];
+        let mut hap_b = vec![0u8; n_nodes];
+        for r in 0..n_nodes {
+            let (mut a1, mut a0, mut b1, mut b0) = (0usize, 0usize, 0usize, 0usize);
+            for c in 0..n_reads {
+                let bit = (het_matrix[[r, c]] != 0.0) as usize;
+                match assignment[c] {
+                    0 => {
+                        if bit == 1 {
+                            a1 += 1;
+                        } else {
+                            a0 += 1;
+                        }
+                    }
+                    _ => {
+                        if bit == 1 {
+                            b1 += 1;
+                        } else {
+                            b0 += 1;
+                        }
+                    }
+                }
+            }
+            hap_a[r] = (a1 > a0) as u8;
+            hap_b[r] = (b1 > b0) as u8;
+        }
+
+        // Reassign each read to the closer haplotype, with balance pull.
+        let size_a = assignment.iter().filter(|&&g| g == 0).count();
+        let size_b = n_reads - size_a;
+        let mut changed = false;
+        for c in 0..n_reads {
+            let mut dist_a = 0i64;
+            let mut dist_b = 0i64;
+            for r in 0..n_nodes {
+                let bit = (het_matrix[[r, c]] != 0.0) as u8;
+                if bit != hap_a[r] {
+                    dist_a += 1;
+                }
+                if bit != hap_b[r] {
+                    dist_b += 1;
+                }
+            }
+            let current = assignment[c];
+            // Balance gradient: moving from oversize group toward undersize one is cheaper.
+            let bal_a = (size_a as i64 - size_b as i64 - if current == 0 { 0 } else { 2 }).abs();
+            let bal_b = (size_a as i64 - size_b as i64 + if current == 1 { 0 } else { 2 }).abs();
+            let score_a = dist_a as f64 + balance_weight * bal_a as f64;
+            let score_b = dist_b as f64 + balance_weight * bal_b as f64;
+            let new = if score_a <= score_b { 0u8 } else { 1u8 };
+            if new != current {
+                assignment[c] = new;
+                changed = true;
+            }
+        }
+
+        // Compute total cost; bail if no improvement.
+        let mut a_mask = 0u64;
+        let mut b_mask = 0u64;
+        for c in 0..n_reads.min(64) {
+            if assignment[c] == 0 {
+                a_mask |= 1u64 << c;
+            } else {
+                b_mask |= 1u64 << c;
+            }
+        }
+        // For n_reads > 64 the bitmask cost helper is wrong; recompute manually.
+        let (corrections, objective) = if n_reads <= 64 {
+            // Build row_masks only when small enough to fit.
+            let row_masks: Vec<u64> = (0..n_nodes)
+                .map(|r| {
+                    let mut mask = 0u64;
+                    for c in 0..n_reads.min(64) {
+                        if het_matrix[[r, c]] != 0.0 {
+                            mask |= 1u64 << c;
+                        }
+                    }
+                    mask
+                })
+                .collect();
+            mec_partition_cost(&row_masks, a_mask, b_mask, balance_weight)
+        } else {
+            // General path: O(n_nodes · n_reads).
+            let mut corrections = 0usize;
+            for r in 0..n_nodes {
+                let (mut a1, mut a0, mut b1, mut b0) =
+                    (0usize, 0usize, 0usize, 0usize);
+                for c in 0..n_reads {
+                    let bit = (het_matrix[[r, c]] != 0.0) as usize;
+                    match assignment[c] {
+                        0 => {
+                            if bit == 1 {
+                                a1 += 1;
+                            } else {
+                                a0 += 1;
+                            }
+                        }
+                        _ => {
+                            if bit == 1 {
+                                b1 += 1;
+                            } else {
+                                b0 += 1;
+                            }
+                        }
+                    }
+                }
+                corrections += a1.min(a0) + b1.min(b0);
+            }
+            let sa = assignment.iter().filter(|&&g| g == 0).count();
+            let sb = n_reads - sa;
+            let pen = balance_weight * (sa as f64 - sb as f64).abs();
+            (corrections, corrections as f64 + pen)
+        };
+
+        let objective_i64 = objective.round() as i64;
+        if !changed || objective_i64 >= last_cost {
+            return (
+                (0..n_reads).filter(|&c| assignment[c] == 0).collect(),
+                (0..n_reads).filter(|&c| assignment[c] == 1).collect(),
+                corrections,
+            );
+        }
+        last_cost = objective_i64;
+    }
+
+    (
+        (0..n_reads).filter(|&c| assignment[c] == 0).collect(),
+        (0..n_reads).filter(|&c| assignment[c] == 1).collect(),
+        last_cost.max(0) as usize,
+    )
 }
 
 pub fn assign_haplotype_reads(
@@ -159,64 +631,46 @@ pub fn assign_haplotype_reads(
     heterozygous_nodes: &HashMap<String, HashSet<String>>,
     hap_number: usize,
 ) -> HashMap<usize, HashSet<String>> {
-    // assign reads to haplotypes
-    let mut haplotype_reads = HashMap::new();
-    let mut interval_list = heterozygous_nodes.keys().collect::<Vec<_>>();
-    interval_list.sort_by(|a, b| {
-        util::split_locus(a.to_string())
-            .1
-            .cmp(&util::split_locus(b.to_string()).1)
-    });
-    for interval_name in interval_list.iter() {
-        let mut node_set = heterozygous_nodes
-            .get(interval_name.clone())
-            .unwrap()
-            .clone()
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>();
-        node_set.sort_by(|a, b| {
-            get_read_name_list(node_info, a.clone())
-                .len()
-                .cmp(&get_read_name_list(node_info, b.clone()).len())
-        });
-        if node_set.len() < hap_number {
-            continue;
-        }
-        if haplotype_reads.is_empty() {
-            for (index, node) in node_set.iter().enumerate() {
-                // println!("node: {:?}, index: {:?}", node, index);
-                let read_name_list = get_read_name_list(node_info, node.clone());
-                haplotype_reads
-                    .entry(index)
-                    .or_insert(HashSet::new())
-                    .extend(read_name_list.clone());
-            }
-        } else {
-            for (index, node) in node_set.iter().enumerate() {
-                let read_name_list = get_read_name_list(node_info, node.clone());
-                let mut max_overlap_reads = 0;
-                let mut major_haplotype_index = hap_number + 1_usize;
-                for (hap, hap_reads) in haplotype_reads.iter_mut() {
-                    let overlap_reads = hap_reads
-                        .intersection(&read_name_list)
-                        .cloned()
-                        .collect::<HashSet<_>>();
-                    if overlap_reads.len() > max_overlap_reads {
-                        max_overlap_reads = overlap_reads.len();
-                        major_haplotype_index = *hap;
-                    }
-                }
-                if max_overlap_reads > 0 {
-                    haplotype_reads
-                        .entry(major_haplotype_index)
-                        .or_insert(HashSet::new())
-                        .extend(read_name_list.clone());
-                }
-            }
-        }
+    let mut haplotype_reads: HashMap<usize, HashSet<String>> = HashMap::new();
+    if hap_number < 2 {
+        return haplotype_reads;
+    }
+    let mut node_list: Vec<String> = heterozygous_nodes
+        .values()
+        .flat_map(|set| set.iter().cloned())
+        .collect();
+    node_list.sort();
+    node_list.dedup();
+    if node_list.is_empty() {
+        return haplotype_reads;
     }
 
+    let het_matrix = construct_heterozygous_nodes_matrix(node_info, node_list.clone());
+
+    // Build the read-index → read-name map matching the matrix's column order.
+    let mut read_vec: HashSet<String> = HashSet::new();
+    for node in &node_list {
+        read_vec.extend(get_read_name_list(node_info, node.clone()));
+    }
+    let read_list: Vec<String> = read_vec.iter().cloned().collect();
+
+    let (group_a, group_b, corrections) =
+        mec_partition_reads(&het_matrix, MEC_BALANCE_WEIGHT);
+    info!(
+        "MEC partition: |A| = {}, |B| = {}, corrections = {}",
+        group_a.len(),
+        group_b.len(),
+        corrections
+    );
+
+    haplotype_reads.insert(
+        0,
+        group_a.into_iter().map(|i| read_list[i].clone()).collect(),
+    );
+    haplotype_reads.insert(
+        1,
+        group_b.into_iter().map(|i| read_list[i].clone()).collect(),
+    );
     haplotype_reads
 }
 
@@ -287,6 +741,7 @@ pub fn construct_heterozygous_nodes_matrix(
     matrix
 }
 
+const MAX_NODE_PER_CHUNK: usize = 200;
 pub fn filter_heterozygous_nodes(
     node_info: &HashMap<String, NodeInfo>,
     heterozygous_nodes: &HashMap<String, HashSet<String>>,
@@ -297,7 +752,27 @@ pub fn filter_heterozygous_nodes(
     }
     let node_list = nodelist.iter().cloned().collect::<Vec<_>>();
     let matrix = construct_heterozygous_nodes_matrix(node_info, node_list.clone());
-    let node_list_filtered = util::permutation_test(&matrix, 0.5, 100, node_list.clone());
+    let node_list_filtered: Vec<String> = if matrix.shape()[0] > 2000 {
+        let n_rows = matrix.shape()[0];
+        let chunk_num = n_rows / MAX_NODE_PER_CHUNK;
+        let chunks_filtered: Vec<String> = (0..chunk_num)
+            .into_par_iter()
+            .flat_map_iter(|i| {
+                let raw_start = i * MAX_NODE_PER_CHUNK;
+                let (start, end) = if raw_start + MAX_NODE_PER_CHUNK > n_rows {
+                    (n_rows - MAX_NODE_PER_CHUNK, n_rows)
+                } else {
+                    (raw_start, raw_start + MAX_NODE_PER_CHUNK)
+                };
+                let chunk = matrix.slice(s![start..end, ..]).to_owned();
+                let node_list_chunk = node_list[start..end].to_vec();
+                util::permutation_test(&chunk, 0.5, 100, node_list_chunk).into_iter()
+            })
+            .collect();
+        chunks_filtered.into_iter().collect::<HashSet<_>>().into_iter().collect()
+    } else {
+        util::permutation_test(&matrix, 0.5, 100, node_list.clone())
+    };
     let mut filtered_heterozygous_nodes = HashMap::new();
     for node_id in node_list_filtered.iter() {
         let interval_name = node_id.split(".").collect::<Vec<_>>()[1].to_string();
@@ -311,7 +786,7 @@ pub fn filter_heterozygous_nodes(
 
 pub fn assign_unassigned_reads(
     node_info: &HashMap<String, NodeInfo>,
-    haplotype_reads: &HashMap<usize, HashSet<String>>,
+    haplotype_reads: &HashMap<usize, HashSet<String>>
 ) -> (
     HashMap<usize, HashSet<String>>,
     HashMap<usize, HashSet<String>>,
@@ -323,8 +798,6 @@ pub fn assign_unassigned_reads(
     let mut haplotype_nodes_new = haplotype_nodes.clone();
     for read in unassigned_reads {
         let read_nodes = read_to_nodes.get(&read).unwrap();
-        // let mut max_overlap = 0;
-        // let mut max_haplotype = 100;
         let mut find_haplotype = false;
         for (haplotype, hap_nodes) in haplotype_nodes.iter() {
             let overlap_nodes = hap_nodes
@@ -497,7 +970,7 @@ fn dfs_traverse_with_haplotype_constrains(
     if haplotype_index.is_empty() {
         return;
     }
-
+    // println!("current_node: {:?}, haplotype_index: {:?}", current_node, haplotype_index);
     let next_nodes = edge_info.get(current_node).unwrap();
     for next_node in next_nodes {
         let haplotypes_next = if node_haplotype.contains_key(next_node) {
@@ -720,45 +1193,68 @@ pub fn find_node_haplotype(
         let node_haplotype = find_most_supported_path(node_info);
         return (HashMap::new(), node_haplotype);
     }else if hap_number == 2 {
-        let heterozygous_nodes = identify_heterozygous_nodes(node_info, hap_number);
+        let heterozygous_nodes = identify_heterozygous_nodes(node_info, hap_number, 3.0);
         info!("heterozygous_nodes: {:?}", heterozygous_nodes.len());
-        let filtered_heterozygous_nodes = filter_heterozygous_nodes(node_info, &heterozygous_nodes);
-        info!(
-            "filtered_heterozygous_nodes: {:?}",
-            filtered_heterozygous_nodes.len()
-        );
+        // let filtered_heterozygous_nodes = filter_heterozygous_nodes(node_info, &heterozygous_nodes);
+        // info!(
+        //     "filtered_heterozygous_nodes: {:?}",
+        //     filtered_heterozygous_nodes.len()
+        // );
 
         let haplotype_reads =
-            assign_haplotype_reads(node_info, &filtered_heterozygous_nodes, hap_number);
+            assign_haplotype_reads(node_info, &heterozygous_nodes, hap_number);
 
-        let (haplotype_reads_new, haplotype_nodes_new) =
-            assign_unassigned_reads(node_info, &haplotype_reads);
+        // let (haplotype_reads_new, haplotype_nodes_new) =
+        //     assign_unassigned_reads(node_info, &haplotype_reads);
+        // info!(
+        //     "haplotype_reads: {:?}",
+        //     haplotype_reads
+        //         .iter()
+        //         .map(|(hap, reads)| format!("hap: {}, reads: {}", hap, reads.len()))
+        //         .collect::<Vec<_>>()
+        //         .join(", ")
+        // );
+        // info!(
+        //     "haplotype_reads_new: {:?}",
+        //     haplotype_reads_new
+        //         .iter()
+        //         .map(|(hap, reads)| format!("hap: {}, reads: {}", hap, reads.len()))
+        //         .collect::<Vec<_>>()
+        //         .join(", ")
+        // );
+        // println!("haplotype_reads_new: {}, {}, {:?}", haplotype_reads_new.get(&0).unwrap().len(), haplotype_reads_new.get(&1).unwrap().len(), haplotype_reads_new.get(&0).unwrap().intersection(haplotype_reads_new.get(&1).unwrap()).count());
+        let mut total_reads = HashSet::new();
+        for node in node_info.keys(){
+            let read_names = get_read_name_list(node_info, node.clone());
+            total_reads.extend(read_names);
+        }
         info!(
-            "haplotype_reads: {:?}",
-            haplotype_reads
-                .iter()
-                .map(|(hap, reads)| format!("hap: {}, reads: {}", hap, reads.len()))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        info!(
-            "haplotype_reads_new: {:?}",
-            haplotype_reads_new
-                .iter()
-                .map(|(hap, reads)| format!("hap: {}, reads: {}", hap, reads.len()))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-
-        if haplotype_reads_new.is_empty() {
+            "total reads: {:?}",
+            total_reads.len()
+        );        
+        if haplotype_reads.is_empty() {
             let node_haplotype = find_most_supported_path(node_info);
-            return (haplotype_reads_new, node_haplotype)
+            return (haplotype_reads, node_haplotype)
         } else {
-            let filtered_haplotype_nodes =
-                filter_haplotype_nodes(node_info, &haplotype_nodes_new, &haplotype_reads_new);
-            let node_haplotype = assign_haplotype_to_nodes(&filtered_haplotype_nodes);
+            // let filtered_haplotype_nodes =
+            //     filter_haplotype_nodes(node_info, &haplotype_nodes_new, &haplotype_reads_new);
+            let mut haplotype_nodes_new = HashMap::new();
+            let read_to_nodes = assign_node_to_reads(node_info);
+            
+            for (hap, reads) in haplotype_reads.iter() {
+                for read in reads.iter() {
+                    let nodes_on_read = read_to_nodes.get(read).unwrap().clone();
+                    haplotype_nodes_new.entry(*hap).or_insert(HashSet::new()).extend(nodes_on_read);
+                }
+            }
+            let node_haplotype = assign_haplotype_to_nodes(&haplotype_nodes_new);
+            // for (interval, nodes) in heterozygous_nodes.iter() {
+            //     for node in nodes {
+            //         println!("interval: {}, node: {}, hap: {:?}", interval, node, node_haplotype.get(node));
+            //     }
+            // }
             // println!("node_haplotype: {:?}", node_haplotype);
-        return (haplotype_reads_new, node_haplotype)
+        return (haplotype_reads, node_haplotype)
     }}else{
         warn!("Unsupported hap_number: {}", hap_number);
         (HashMap::new(), HashMap::new())
@@ -945,6 +1441,7 @@ pub fn start(
 
     let (haplotype_reads, node_haplotype) =
         find_node_haplotype(&node_info, haplotype_number);
+    // println!("node_haplotype: {:?}", node_haplotype);
     let all_paths = enumerate_all_paths_with_haplotype(
         &node_info,
         &edge_info,
@@ -970,4 +1467,165 @@ pub fn start(
         output_prefix.to_str().unwrap()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod identify_heterozygous_tests {
+    use super::*;
+
+    fn make_node(reads: &[&str]) -> NodeInfo {
+        NodeInfo {
+            seq: "A".to_string(),
+            cigar: "10=".to_string(),
+            support_reads: reads.len(),
+            allele_frequency: "0.5".to_string(),
+            read_names: reads.join(","),
+            methyl_info: HashMap::new(),
+        }
+    }
+
+    fn insert(map: &mut HashMap<String, NodeInfo>, id: &str, reads: &[&str]) {
+        map.insert(id.to_string(), make_node(reads));
+    }
+
+    #[test]
+    fn balanced_disjoint_pair_accepted() {
+        let mut nodes = HashMap::new();
+        insert(&mut nodes, "H.chr1:1-100.0", &["r1", "r2", "r3", "r4"]);
+        insert(&mut nodes, "H.chr1:1-100.1", &["r5", "r6", "r7", "r8"]);
+
+        let het = identify_heterozygous_nodes(&nodes, 2, 3.0);
+        let chosen = het.get("chr1:1-100").expect("interval should be heterozygous");
+        assert_eq!(chosen.len(), 2);
+    }
+
+    #[test]
+    fn overlapping_reads_rejected_for_full_haps() {
+        let mut nodes = HashMap::new();
+        insert(&mut nodes, "H.chr1:1-100.0", &["r1", "r2", "r3", "r4"]);
+        insert(&mut nodes, "H.chr1:1-100.1", &["r1", "r2", "r3", "r5"]);
+
+        let het = identify_heterozygous_nodes(&nodes, 2, 3.0);
+        assert!(het.get("chr1:1-100").is_none());
+    }
+
+    #[test]
+    fn imbalanced_support_rejected() {
+        let mut nodes = HashMap::new();
+        insert(&mut nodes, "H.chr1:1-100.0", &["r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8"]);
+        insert(&mut nodes, "H.chr1:1-100.1", &["r9", "r10"]);
+
+        let het = identify_heterozygous_nodes(&nodes, 2, 3.0);
+        assert!(het.get("chr1:1-100").is_none());
+    }
+
+    #[test]
+    fn low_support_node_skipped() {
+        let mut nodes = HashMap::new();
+        insert(&mut nodes, "H.chr1:1-100.0", &["r1", "r2", "r3"]);
+        insert(&mut nodes, "H.chr1:1-100.1", &["r4"]);
+
+        let het = identify_heterozygous_nodes(&nodes, 2, 3.0);
+        assert!(het.get("chr1:1-100").is_none());
+    }
+
+    #[test]
+    fn back_off_from_three_to_two() {
+        let mut nodes = HashMap::new();
+        insert(&mut nodes, "H.chr1:1-100.0", &["r1", "r2", "r3", "r4"]);
+        insert(&mut nodes, "H.chr1:1-100.1", &["r5", "r6", "r7", "r8"]);
+        // Third allele shares heavily with both other alleles → no valid 3-subset.
+        insert(&mut nodes, "H.chr1:1-100.2", &["r1", "r2", "r5", "r6"]);
+
+        let het = identify_heterozygous_nodes(&nodes, 3, 3.0);
+        let chosen = het.get("chr1:1-100").expect("partial het set should be returned");
+        assert_eq!(chosen.len(), 2, "should back off to disjoint pair");
+        assert!(chosen.contains("H.chr1:1-100.0"));
+        assert!(chosen.contains("H.chr1:1-100.1"));
+    }
+
+    #[test]
+    fn picks_disjoint_subset_among_many_candidates() {
+        let mut nodes = HashMap::new();
+        // Two pairs are roughly balanced; only one pair is also disjoint.
+        insert(&mut nodes, "H.chr1:1-100.0", &["r1", "r2", "r3", "r4"]);
+        insert(&mut nodes, "H.chr1:1-100.1", &["r1", "r2", "r3", "r4"]);
+        insert(&mut nodes, "H.chr1:1-100.2", &["r5", "r6", "r7", "r8"]);
+
+        let het = identify_heterozygous_nodes(&nodes, 2, 3.0);
+        let chosen = het.get("chr1:1-100").expect("should find disjoint pair");
+        assert!(chosen.contains("H.chr1:1-100.2"));
+        let other = chosen
+            .iter()
+            .find(|id| id.as_str() != "H.chr1:1-100.2")
+            .expect("expected a second allele");
+        assert!(other == "H.chr1:1-100.0" || other == "H.chr1:1-100.1");
+    }
+
+    #[test]
+    fn mec_recovers_clean_diploid_partition() {
+        // Two haplotypes h_A = [1,0,1,0], h_B = [0,1,0,1] across 4 nodes / 6 reads
+        // (3 reads per haplotype, error-free input → 0 corrections expected).
+        let m = ndarray::array![
+            // rows = nodes, cols = reads
+            [1.0, 1.0, 1.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+        ];
+        let (a, b, corr) = mec_partition_reads(&m, 0.0);
+        assert_eq!(corr, 0);
+        let mut a_sorted = a.clone();
+        a_sorted.sort();
+        let mut b_sorted = b.clone();
+        b_sorted.sort();
+        assert!(
+            (a_sorted == vec![0, 1, 2] && b_sorted == vec![3, 4, 5])
+                || (a_sorted == vec![3, 4, 5] && b_sorted == vec![0, 1, 2])
+        );
+    }
+
+    #[test]
+    fn mec_corrects_single_flip() {
+        // Same setup but column 0 has a flipped entry at node 0 (read 0 says "0" instead of "1").
+        let m = ndarray::array![
+            [0.0, 1.0, 1.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+        ];
+        let (_, _, corr) = mec_partition_reads(&m, 0.0);
+        assert_eq!(corr, 1, "exactly one entry should need flipping");
+    }
+
+    #[test]
+    fn mec_balance_penalty_breaks_ties() {
+        // 1 row, 4 reads, perfectly balanced 2-2 het row. The bipartition agreeing with the
+        // row (|A| = |B| = 2) yields 0 corrections; balance penalty rewards this over the
+        // degenerate 1-3 splits which would require 1 flip.
+        let m = ndarray::array![[1.0, 1.0, 0.0, 0.0]];
+        let (a, b, corr) = mec_partition_reads(&m, 1.0);
+        assert_eq!(corr, 0);
+        assert_eq!(a.len() + b.len(), 4);
+        assert_eq!((a.len() as i64 - b.len() as i64).abs(), 0);
+    }
+
+    #[test]
+    fn mec_kcmec_falls_back_when_too_many_flips_needed() {
+        // Row 0 disagrees with rows 1-3 about the bipartition by FOUR positions
+        // (>> k = 2). The k-cMEC DP should be infeasible at k = 2, and the
+        // helper should fall back to the local-search heuristic, which still
+        // returns a 2-3 / 3-2 partition without crashing.
+        let m = ndarray::array![
+            [1.0, 0.0, 1.0, 0.0, 1.0, 0.0],  // alternating
+            [1.0, 1.0, 1.0, 0.0, 0.0, 0.0],  // block
+            [1.0, 1.0, 1.0, 0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0, 0.0, 0.0, 0.0],
+        ];
+        let (a, b, corr) = mec_partition_reads(&m, 0.0);
+        assert_eq!(a.len() + b.len(), 6);
+        // Heuristic should land at the 3-3 split derived from the majority rows.
+        assert!(corr <= 3, "fallback should produce a reasonable partition");
+    }
+
 }
