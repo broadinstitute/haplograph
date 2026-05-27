@@ -50,14 +50,7 @@ pub(crate) fn query_boundary_offset_from_cigar(
     }
 }
 
-/// Map a locus to query slice bounds `[query_start, query_end)`.
-///
-/// Locus coordinates follow BED / htslib convention: `[locus_start, locus_end_excl)` on the
-/// reference (start inclusive, end exclusive). Same convention as `bam.fetch` and pileup
-/// checks in `intervals.rs`.
-///
-/// When the locus extends past the alignment (breakpoints / partial overlap), coordinates
-/// are clamped to the read's aligned reference footprint instead of returning `None`.
+
 pub(crate) fn alignment_query_interval_bounds(
     cigar: &[Cigar],
     ref_start: u64,
@@ -79,7 +72,11 @@ pub(crate) fn alignment_query_interval_bounds(
     let query_start = query_boundary_offset_from_cigar(cigar, ref_start, overlap_start)?;
     let query_end = query_boundary_offset_from_cigar(cigar, ref_start, overlap_end_excl)?;
 
-    if query_end <= query_start {
+    // `query_end == query_start` means the locus falls entirely inside a deletion
+    // (or ref-skip) in the alignment. The read does cover the reference range, just
+    // with zero query bases, so we keep the empty slice as evidence rather than
+    // dropping the read.
+    if query_end < query_start {
         return None;
     }
 
@@ -445,5 +442,33 @@ mod tests {
         let cigar = vec![Cigar::Match(100)];
         let bounds = alignment_query_interval_bounds(&cigar, 1000, 1100, 2000, 2100);
         assert!(bounds.is_none());
+    }
+
+    #[test]
+    fn locus_fully_inside_deletion_returns_empty_query_slice() {
+        // CIGAR: 50M 200D 50M, alignment ref [1000, 1300).
+        // Locus [1100, 1200) lies entirely in the 200D op -> zero query bases at offset 50.
+        let cigar = vec![Cigar::Match(50), Cigar::Del(200), Cigar::Match(50)];
+        let bounds =
+            alignment_query_interval_bounds(&cigar, 1000, 1300, 1100, 1200).unwrap();
+        assert_eq!(bounds, (50, 50));
+    }
+
+    #[test]
+    fn locus_equal_to_deletion_boundaries_returns_empty_query_slice() {
+        // Locus matches the deletion exactly.
+        let cigar = vec![Cigar::Match(50), Cigar::Del(200), Cigar::Match(50)];
+        let bounds =
+            alignment_query_interval_bounds(&cigar, 1000, 1300, 1050, 1250).unwrap();
+        assert_eq!(bounds, (50, 50));
+    }
+
+    #[test]
+    fn locus_straddling_deletion_keeps_only_match_bases() {
+        // Half of the locus is in the leading M, the other half in the deletion.
+        let cigar = vec![Cigar::Match(50), Cigar::Del(200), Cigar::Match(50)];
+        let bounds =
+            alignment_query_interval_bounds(&cigar, 1000, 1300, 1025, 1150).unwrap();
+        assert_eq!(bounds, (25, 50));
     }
 }

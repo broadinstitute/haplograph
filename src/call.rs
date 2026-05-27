@@ -492,79 +492,8 @@ fn write_vcf(
 
     info!("Created compressed VCF: {}", &output_file.display());
 
-    // // Build tabix index for the compressed VCF file
-    // let idx = std::ptr::null();
-    // println!("Building index file: ");
-    // let rs = unsafe {
-    //     rust_htslib::htslib::bcf_index_build3(
-    //         rust_htslib::utils::path_to_cstring(&output_file).unwrap().as_ptr(),
-    //         idx,
-    //         0,
-    //         4 as i32,
-    // )};
-
     Ok(())
 }
-
-/// Phase variants and write phased VCF
-// pub fn Phase_germline_variants(
-//     graph_filename: &PathBuf,
-//     Variants: &Vec<Variant>,
-//     haplotype_number: usize,
-//     het_fold_threshold: f64,
-// ) -> AnyhowResult<Vec<Variant>> {
-//     let (node_info, edge_info) = asm::load_graph(graph_filename).unwrap();
-//     let (haplotype_reads, node_haplotype) =
-//         asm::find_node_haplotype(&node_info, haplotype_number);
-
-//     let mut collapsed_variants = HashMap::new();
-//     for variant in Variants.iter() {
-//         let key = (
-//             variant.chromosome.clone(),
-//             variant.pos,
-//             variant.ref_allele.clone(),
-//             variant.alt_allele.clone(),
-//             variant.variant_type.clone(),
-//         );
-//         collapsed_variants
-//             .entry(key)
-//             .or_insert(Vec::new())
-//             .push((variant.allele_count, variant.node_id.clone()));
-//     }
-
-//     let mut phased_variants = Vec::new();
-//     for (key_t, node_list) in collapsed_variants.iter() {
-//         let chromosome = key_t.0.clone();
-//         let pos = key_t.1;
-//         let ref_allele = key_t.2.clone();
-//         let alt_allele = key_t.3.clone();
-//         let variant_type = key_t.4.clone();
-//         let allele_count = node_list.iter().map(|x| x.0).sum();
-//         let node_id_list = node_list
-//             .iter()
-//             .map(|x| x.1.clone())
-//             .collect::<Vec<String>>();
-//         let mut haplotype_index = Vec::new();
-//         for node_id in node_id_list.iter() {
-//             if node_haplotype.contains_key(node_id) {
-//                 // println!("node_id: {:?}, haplotype_map: {:?}", node_id, node_haplotype.get(node_id).unwrap());
-//                 haplotype_index.extend(node_haplotype.get(node_id).unwrap().iter().map(|x| x + 1));
-//             }
-//         }
-
-//         phased_variants.push(Variant {
-//             chromosome,
-//             pos,
-//             ref_allele,
-//             alt_allele,
-//             variant_type,
-//             allele_count,
-//             node_id: node_id_list.join(","),
-//             haplotype_index: Some(normalize_haplotype_indices(haplotype_index)),
-//         });
-//     }
-//     Ok(phased_variants)
-// }
 
 pub fn get_variants_from_node(
     node_info: &HashMap<String, asm::NodeInfo>,
@@ -626,39 +555,26 @@ pub fn get_variants_from_node(
 
 pub fn get_variants_from_path(
     node_info: &HashMap<String, asm::NodeInfo>,
-    edge_info: &HashMap<String, Vec<String>>,
-    haplotype_number: usize,
+    // edge_info: &HashMap<String, Vec<String>>,
+    primary_haplotypes: &HashMap<usize, (Vec<String>, String, HashSet<String>, usize, usize)>,
     reference_seqs: &fastq::Record,
 ) -> (Vec<Variant>, Vec<Variant>) {
-    let (_haplotype_reads, node_haplotype) =
-        asm::find_node_haplotype(node_info, haplotype_number);
-    // Use the same path enumeration as assemble to ensure paths follow graph edges
-    let all_paths = asm::enumerate_all_paths_with_haplotype(
-        node_info,
-        edge_info,
-        &node_haplotype,
-        haplotype_number,
-    )
-    .expect("Failed to enumerate all paths");
+    // let (_haplotype_reads, node_haplotype) =
+    //     asm::find_node_haplotype(node_info, haplotype_number);
+    // // Use the same path enumeration as assemble to ensure paths follow graph edges
+    // let all_paths = asm::enumerate_all_paths_with_haplotype(
+    //     node_info,
+    //     edge_info,
+    //     &node_haplotype,
+    //     haplotype_number,
+    // )
+    // .expect("Failed to enumerate all paths");
 
-    let all_sequences = asm::construct_sequences_from_haplotype_path(node_info, &all_paths);
+    // let all_sequences = asm::construct_sequences_from_haplotype_path(node_info, &all_paths);
 
-    // println!(
-    //     "all_paths: {:?}",
-    //     all_sequences
-    //         .iter()
-    //         .map(|(haplotype_index, path_info_list)| format!(
-    //             "haplotype_index: {:?}, path_number: {:?}",
-    //             haplotype_index,
-    //             path_info_list.len()
-    //         ))
-    //         .collect::<Vec<_>>()
-    //         .join(",")
-    // );
-
-    // Select the best path for each haplotype (same as assemble function)
-    let primary_haplotypes =
-        asm::find_full_range_haplotypes(node_info, &node_haplotype, &all_sequences);
+    // // Select the best path for each haplotype (same as assemble function)
+    // let primary_haplotypes =
+    //     asm::find_full_range_haplotypes(node_info, &node_haplotype, &all_sequences);
 
     // Collect all phased nodes from the paths
     let mut phased_nodes = HashSet::new();
@@ -816,29 +732,6 @@ pub fn get_variants_from_path(
 
     (phased_variants, somatic_variants)
 }
-// /// Recursive DFS to find all paths from a starting node
-// fn dfs_traverse(
-//     current_node: usize,
-//     connection_dict: &HashMap<usize, HashSet<usize>>,
-//     current_path: &mut Vec<usize>,
-//     all_paths: &mut Vec<Vec<usize>>,
-// ) {
-//     if !connection_dict.contains_key(&current_node) {
-//         all_paths.push(current_path.clone());
-//         return;
-//     }
-//     if current_path.contains(&current_node) {
-//         all_paths.push(current_path.clone());
-//         return;
-//     }
-
-//     let next_nodes = connection_dict.get(&current_node).unwrap();
-//     for next_node in next_nodes.clone().iter().cloned() {
-//         current_path.push(next_node);
-//         dfs_traverse(next_node, connection_dict, current_path, all_paths);
-//         current_path.pop(); // Backtrack
-//     }
-// }
 
 pub fn construct_var_read_matrix(
     node_info: &HashMap<String, asm::NodeInfo>,
@@ -875,6 +768,7 @@ pub fn construct_var_read_matrix(
 pub fn start(
     graph_filename: &PathBuf,
     reference_seqs: &Vec<fastq::Record>,
+    primary_haplotypes: &HashMap<usize, (Vec<String>, String, HashSet<String>, usize, usize)>,
     sampleid: &String,
     output_prefix: &String,
     haplotype_number: usize,
@@ -904,8 +798,9 @@ pub fn start(
 
     let (phased_variants, somatic_variants) = get_variants_from_path(
         &node_info,
-        &edge_info,
-        haplotype_number,
+        primary_haplotypes,
+        // &node_info,
+        // &edge_info,
         &ref_chromosome_seqs,
     );
     let all_variants = [phased_variants.clone(), somatic_variants.clone()].concat();
@@ -991,7 +886,6 @@ pub fn start(
     }else{
         util::permutation_test(&matrix, 0.05, 100, var_list.clone())
     };
-    
     
     let mut filtered_somatic_variants = Vec::new();
     for var in s_variants.iter() {

@@ -66,10 +66,6 @@ enum DevToolsCommands {
         #[arg(short, long, default_value_t = 2)]
         maximum_haplotypes: usize,
 
-        /// heterozygous coverage fold threshold, > 3.0 is not heterozygous,  the smaller the more strict
-        #[arg(short, long, default_value_t = 3.0)]
-        fold_threshold: f64,
-
         /// Sequencing technology, accepted hifi, nanopore
         #[arg(short, long, default_value = "hifi")]
         detection_technology: String,
@@ -136,7 +132,7 @@ enum Commands {
         #[arg(short, long, default_value = "gfa")]
         file_format: String,
 
-        /// Haplotype number
+        /// Haplotype number, currently only support 1 or 2
         #[arg(short, long, default_value_t = 2)]
         number_of_haplotypes: usize,
 
@@ -384,7 +380,7 @@ fn main() -> Result<()> {
             let output_p = PathBuf::from(&output_prefix);
             let graph_gfa = output_p.with_extension("gfa");
             
-            asm::start(
+            let (primary_haplotypes, node_info, edge_info) = asm::start(
                 &graph_gfa,
                 true,
                 number_of_haplotypes,
@@ -393,6 +389,7 @@ fn main() -> Result<()> {
             call::start(
                 &graph_gfa,
                 &reference_seqs,
+                &primary_haplotypes.clone(),
                 &sampleid,
                 &output_prefix,
                 number_of_haplotypes,
@@ -587,7 +584,6 @@ fn main() -> Result<()> {
                     reference_fa,
                     verbose,
                     maximum_haplotypes,
-                    fold_threshold,
                     detection_technology,
                 } => {
                     // Initialize logging
@@ -600,14 +596,22 @@ fn main() -> Result<()> {
                         .init();
 
                     let reference_seqs = util::get_all_ref_seq(&reference_fa);
+                    let (primary_haplotypes, node_info, edge_info) = asm::start(
+                        &gfa_file,
+                        true,
+                        maximum_haplotypes,
+                        &PathBuf::from(&output_prefix.clone())
+                    )?;
                     call::start(
                         &gfa_file,
                         &reference_seqs,
+                        &primary_haplotypes,
                         &sampleid,
                         &output_prefix,
                         maximum_haplotypes,
                         &detection_technology,
                     )?;
+                    
                 }
             }
         }

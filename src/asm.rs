@@ -2,7 +2,6 @@ use crate::eval;
 use crate::util;
 use anyhow::Result as AnyhowResult;
 use flate2::read::GzDecoder;
-use intervals::partitions;
 use log::{info, warn};
 use ndarray::Array2;
 use serde_json::Value;
@@ -135,8 +134,6 @@ pub fn find_parallele_nodes(
 
 /// Minimum supporting reads required for a node to be considered a haplotype candidate.
 const HET_MIN_NODE_SUPPORT: usize = 2;
-/// Maximum allowed pairwise Jaccard between read sets of two heterozygous-allele candidates.
-const HET_MAX_PAIRWISE_JACCARD: f64 = 0.2;
 
 /// Jaccard similarity |A ∩ B| / |A ∪ B|; returns 0.0 if both sets are empty.
 fn read_set_jaccard(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
@@ -177,7 +174,6 @@ fn min_max_support_ratio(supports: &[usize]) -> f64 {
 pub fn identify_heterozygous_nodes(
     node_info: &HashMap<String, NodeInfo>,
     hap_number: usize,
-    het_fold_threshold: f64,
 ) -> HashMap<String, HashSet<String>> {
     let mut heterozygous_nodes: HashMap<String, HashSet<String>> = HashMap::new();
     if hap_number < 2 {
@@ -268,17 +264,6 @@ const MEC_KCMEC_MAX_READS: usize = 256;
 /// Iteration cap for the local-search heuristic.
 const MEC_LOCAL_SEARCH_MAX_ITER: usize = 100;
 
-/// Partition reads (columns of `het_matrix`) into two non-conflicting groups by Minimum Error
-/// Correction (MEC). A "conflict-free" group requires that, for every node row, all reads in
-/// the group share the same value; the minimum number of entry flips to reach this state is
-/// the cost. The total objective is:
-///
-///     cost(A, B) = corrections + balance_weight * |‖A‖ − ‖B‖|
-///
-/// Returns `(group_a, group_b, corrections)` where the index vectors are columns of
-/// `het_matrix`. The k-constrained MEC dynamic programming (`MEC_K_PER_NODE` flips per row max)
-/// runs when `n_reads ≤ MEC_KCMEC_MAX_READS`; otherwise the local-search heuristic is used.
-/// If the DP turns out infeasible at the chosen `k`, the local-search fallback also fires.
 pub fn mec_partition_reads(
     het_matrix: &Array2<f64>,
     balance_weight: f64,
@@ -296,20 +281,7 @@ pub fn mec_partition_reads(
     mec_local_search(het_matrix, balance_weight)
 }
 
-/// k-constrained MEC dynamic programming (HapCol-style).
-///
-/// At each node row, only k-corrections — vectors obtained from the row by flipping **at most
-/// `k`** non-missing entries — are considered as candidate "corrected columns" `C_j`. A pair
-/// of corrected rows is *in accordance* if they encode the same bipartition of reads (equal or
-/// bitwise-complement on the active fragments). The DP keeps, for every surviving canonical
-/// bipartition, the minimum cumulative number of corrections to realize it across all rows
-/// processed so far.
-///
-/// State per row: `HashMap<canonical_bipartition, total_corrections>`. The canonical form
-/// fixes read 0 to group A so that `(A, B)` and `(B, A)` collapse to a single state.
-///
-/// Returns `None` when no canonical bipartition is reachable through all rows under the
-/// `k` budget — the caller should escalate `k` or fall back to a heuristic.
+
 fn mec_kcmec_dp(
     het_matrix: &Array2<f64>,
     k: usize,
@@ -319,16 +291,6 @@ fn mec_kcmec_dp(
     if n_reads < 2 || n_nodes == 0 {
         return None;
     }
-
-    // DP state: canonical bipartition (Vec<u8>, canon[0] == 0) → cumulative corrections.
-    //
-    // Ternary encoding: +1.0 = read votes allele-A (→ natural group A / bit 0),
-    //                   -1.0 = read votes allele-B (→ natural group B / bit 1),
-    //                    0.0 = read missing at this interval (wildcard, defaults to bit 0).
-    //
-    // Per row we enumerate k-corrections over the ACTIVE reads (non-zero) only.
-    // Missing reads never contribute to corrections and stay at their default value
-    // under canonicalization (bit 0 unless the whole bipartition is flipped).
     let mut dp: HashMap<Vec<u8>, usize> = HashMap::new();
     let mut seeded = false;
 
@@ -553,17 +515,6 @@ fn mec_local_search(
 }
 
 /// Build a per-interval ternary matrix for MEC phasing.
-///
-/// Each row i represents one heterozygous interval (sorted by start position).
-/// Each column j represents one read (sorted alphabetically).
-///
-/// Cell values:
-///   +1.0  → read j supports allele-0 at interval i (first node, alphabetically)
-///   -1.0  → read j supports allele-1 at interval i
-///    0.0  → read j not observed at interval i (missing / uninformative)
-///
-/// Reads present in both alleles at the same interval are set to 0.0 (conflict → missing).
-/// Returns `(matrix, read_list)` where `read_list[j]` is the name of column j.
 fn construct_het_interval_matrix(
     node_info: &HashMap<String, NodeInfo>,
     heterozygous_nodes: &HashMap<String, HashSet<String>>,
@@ -586,6 +537,7 @@ fn construct_het_interval_matrix(
 
     // Sort intervals by start position for a deterministic row order.
     let mut intervals: Vec<&String> = heterozygous_nodes.keys().collect();
+
     intervals.sort_by(|a, b| {
         util::split_locus((*a).clone())
             .1
@@ -648,6 +600,8 @@ pub fn assign_haplotype_reads(
         group_b.len(),
         corrections
     );
+
+    // #endregion
 
     haplotype_reads.insert(
         0,
@@ -1066,11 +1020,8 @@ pub fn get_supports(node_info: &HashMap<String, NodeInfo>, path: &Vec<String>) -
 
 pub fn find_full_range_haplotypes(
     node_info: &HashMap<String, NodeInfo>,
-    node_haplotype: &HashMap<String, HashSet<usize>>,
     all_sequences: &HashMap<usize, Vec<(Vec<String>, String, HashSet<String>)>>,
 ) -> HashMap<usize, (Vec<String>, String, HashSet<String>, usize, usize)> {
-    // sort all_sequences by the spanning length and the supported_reads
-    let node_list = node_info.keys().collect::<Vec<_>>();
     // let full_range = eval::find_alignment_intervals(node_list.iter().map(|x| x.as_str()).collect::<Vec<_>>()).unwrap();
     let mut best_paths = HashMap::new();
     for (hap_index, path_list) in all_sequences.iter() {
@@ -1134,10 +1085,14 @@ pub fn filter_haplotype_nodes(
         interval_list.sort(); // ascending order a < b
 
         let read_list = haplotype_reads.get(hap).unwrap().clone();
+        // #region agent log (H3: filter_haplotype_nodes tie-break)
+
+        // #endregion
         for interval in interval_list.iter() {
             let nodes = interval_node.get(*interval).unwrap().clone();
             let mut best_node = "".to_string();
             let mut best_read_count = 0;
+
             for node in nodes.clone() {
                 let node_read_names = get_read_name_list(node_info, node.clone());
                 let intersection_count = read_list.intersection(&node_read_names).count();
@@ -1164,6 +1119,8 @@ pub fn filter_haplotype_nodes(
                 );
             }
         }
+
+        // #endregion
     }
     filtered_haplotype_nodes
 }
@@ -1179,7 +1136,7 @@ pub fn find_node_haplotype(
         let node_haplotype = find_most_supported_path(node_info);
         return (HashMap::new(), node_haplotype);
     }else if hap_number == 2 {
-        let heterozygous_nodes = identify_heterozygous_nodes(node_info, hap_number, 3.0);
+        let heterozygous_nodes = identify_heterozygous_nodes(node_info, hap_number);
         info!("heterozygous_nodes: {:?}", heterozygous_nodes.len());
         // let filtered_heterozygous_nodes = filter_heterozygous_nodes(node_info, &heterozygous_nodes);
         // info!(
@@ -1236,12 +1193,22 @@ pub fn find_node_haplotype(
 
             let node_haplotype = assign_haplotype_to_nodes(&filtered_haplotype_nodes);
             
-            // for (interval, nodes) in heterozygous_nodes.iter() {
-            //     for node in nodes {
-            //         println!("interval: {}, node: {}, hap: {:?}", interval, node, node_haplotype.get(node));
-            //     }
-            // }
-            // println!("node_haplotype: {:?}", node_haplotype);
+            // #region agent log (H4+H5: node_haplotype label distribution)
+            {
+                let mut nodes_hap0 = 0usize;
+                let mut nodes_hap1 = 0usize;
+                let mut nodes_both = 0usize;
+                for haps in node_haplotype.values() {
+                    let has0 = haps.contains(&0);
+                    let has1 = haps.contains(&1);
+                    if has0 && has1 { nodes_both += 1; }
+                    else if has0 { nodes_hap0 += 1; }
+                    else if has1 { nodes_hap1 += 1; }
+                }
+                let reads_hap0 = haplotype_reads.get(&0).map(|s| s.len()).unwrap_or(0);
+                let reads_hap1 = haplotype_reads.get(&1).map(|s| s.len()).unwrap_or(0);
+            }
+            // #endregion
         return (haplotype_reads, node_haplotype)
     }}else{
         warn!("Unsupported hap_number: {}", hap_number);
@@ -1420,7 +1387,7 @@ pub fn start(
     germline_only: bool,
     haplotype_number: usize,
     output_prefix: &PathBuf
-) -> AnyhowResult<()> {
+) -> AnyhowResult<(HashMap<usize, (Vec<String>, String, HashSet<String>, usize, usize)>, HashMap<String, NodeInfo>, HashMap<String, Vec<String>>)> {
     let (node_info, edge_info) = load_graph(graph_filename).unwrap();
     info!(
         "Traversing graph with germline_only: {}, hap_number: {}",
@@ -1440,7 +1407,7 @@ pub fn start(
     .expect("Failed to enumerate all paths");
     let allseq = construct_sequences_from_haplotype_path(&node_info, &all_paths);
     let primary_haplotypes =
-        find_full_range_haplotypes(&node_info, &node_haplotype, &allseq);
+        find_full_range_haplotypes(&node_info, &allseq);
     info!("All sequences constructed: {}", primary_haplotypes.len());
     // call methylation
     call_methylation(&node_info, primary_haplotypes.clone(), output_prefix);
@@ -1455,7 +1422,7 @@ pub fn start(
         "All sequences written to fasta: {}",
         output_prefix.to_str().unwrap()
     );
-    Ok(())
+    Ok((primary_haplotypes, node_info.clone(), edge_info.clone()))
 }
 
 #[cfg(test)]
@@ -1483,7 +1450,7 @@ mod identify_heterozygous_tests {
         insert(&mut nodes, "H.chr1:1-100.0", &["r1", "r2", "r3", "r4"]);
         insert(&mut nodes, "H.chr1:1-100.1", &["r5", "r6", "r7", "r8"]);
 
-        let het = identify_heterozygous_nodes(&nodes, 2, 3.0);
+        let het = identify_heterozygous_nodes(&nodes, 2);
         let chosen = het.get("chr1:1-100").expect("interval should be heterozygous");
         assert_eq!(chosen.len(), 2);
     }
@@ -1494,7 +1461,7 @@ mod identify_heterozygous_tests {
         insert(&mut nodes, "H.chr1:1-100.0", &["r1", "r2", "r3", "r4"]);
         insert(&mut nodes, "H.chr1:1-100.1", &["r1", "r2", "r3", "r5"]);
 
-        let het = identify_heterozygous_nodes(&nodes, 2, 3.0);
+        let het = identify_heterozygous_nodes(&nodes, 2);
         assert!(het.get("chr1:1-100").is_none());
     }
 
@@ -1504,7 +1471,7 @@ mod identify_heterozygous_tests {
         insert(&mut nodes, "H.chr1:1-100.0", &["r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8"]);
         insert(&mut nodes, "H.chr1:1-100.1", &["r9", "r10"]);
 
-        let het = identify_heterozygous_nodes(&nodes, 2, 3.0);
+        let het = identify_heterozygous_nodes(&nodes, 2);
         assert!(het.get("chr1:1-100").is_none());
     }
 
@@ -1514,7 +1481,7 @@ mod identify_heterozygous_tests {
         insert(&mut nodes, "H.chr1:1-100.0", &["r1", "r2", "r3"]);
         insert(&mut nodes, "H.chr1:1-100.1", &["r4"]);
 
-        let het = identify_heterozygous_nodes(&nodes, 2, 3.0);
+        let het = identify_heterozygous_nodes(&nodes, 2);
         assert!(het.get("chr1:1-100").is_none());
     }
 
@@ -1526,7 +1493,7 @@ mod identify_heterozygous_tests {
         // Third allele shares heavily with both other alleles → no valid 3-subset.
         insert(&mut nodes, "H.chr1:1-100.2", &["r1", "r2", "r5", "r6"]);
 
-        let het = identify_heterozygous_nodes(&nodes, 3, 3.0);
+        let het = identify_heterozygous_nodes(&nodes, 3);
         let chosen = het.get("chr1:1-100").expect("partial het set should be returned");
         assert_eq!(chosen.len(), 2, "should back off to disjoint pair");
         assert!(chosen.contains("H.chr1:1-100.0"));
@@ -1541,7 +1508,7 @@ mod identify_heterozygous_tests {
         insert(&mut nodes, "H.chr1:1-100.1", &["r1", "r2", "r3", "r4"]);
         insert(&mut nodes, "H.chr1:1-100.2", &["r5", "r6", "r7", "r8"]);
 
-        let het = identify_heterozygous_nodes(&nodes, 2, 3.0);
+        let het = identify_heterozygous_nodes(&nodes, 2);
         let chosen = het.get("chr1:1-100").expect("should find disjoint pair");
         assert!(chosen.contains("H.chr1:1-100.2"));
         let other = chosen
