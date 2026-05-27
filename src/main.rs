@@ -30,10 +30,6 @@ enum DevToolsCommands {
         #[arg(short, long, default_value = "haplograph_asm")]
         output_prefix: PathBuf,
 
-        /// Germline only, default to false
-        #[arg(short, long, default_value = "false")]
-        major_haplotype_only: bool,
-
         /// Haplotype number
         #[arg(short, long, default_value_t = 2)]
         number_of_haplotypes: usize,
@@ -86,6 +82,8 @@ pub struct Cli {
     #[clap(subcommand)]
     command: Commands,
 }
+
+const MINIMAL_GAP_LENGTH: usize = 50;
 
 #[derive(Debug, Subcommand)]
 enum Commands {
@@ -143,6 +141,10 @@ enum Commands {
         /// Sequencing technology, accepted hifi, nanopore
         #[arg(short, long, default_value = "hifi")]
         detection_technology: String,
+
+        /// maxial locus size
+        #[arg(long, default_value_t = 200000)]
+        maximal_locus_size: usize,
 
         /// Verbose output
         #[arg(long)]
@@ -326,6 +328,8 @@ fn main() -> Result<()> {
             threshold_methyl_likelihood,
             // Sequencing technology, accepted hifi, nanopore
             detection_technology,
+            //maximal locus size
+            maximal_locus_size,
             // Verbose output
             verbose,
         } => {
@@ -336,6 +340,8 @@ fn main() -> Result<()> {
                     file_format
                 );
             }
+
+           
 
             // Initialize logging
             env_logger::Builder::from_default_env()
@@ -358,6 +364,77 @@ fn main() -> Result<()> {
 
             let (reference_seqs, reference_chromosome_seqs) =
                 util::get_ref_seq_from_chromosome(&reference_fa, &chromosome);
+
+            // check if the locus size is larger than the maximal locus size
+            if end - start > maximal_locus_size {
+                info!("Locus size is larger than the maximal locus size: {}, skipping analysis", end - start);
+                info!("Splitting the locus into multiple overlapping intervals");
+                const OVERLAP_BP: usize = 500;
+                if maximal_locus_size <= OVERLAP_BP {
+                    anyhow::bail!(
+                        "maximal_locus_size ({}) must be greater than overlap ({} bp)",
+                        maximal_locus_size,
+                        OVERLAP_BP
+                    );
+                }
+                let step = maximal_locus_size - OVERLAP_BP;
+                let mut locus_list = Vec::new();
+                // Windows of length maximal_locus_size, advanced by step so adjacent windows share 500 bp.
+                let mut start_pos = start;
+                while start_pos < end {
+                    let end_pos = std::cmp::min(start_pos + maximal_locus_size, end);
+                    locus_list.push((chromosome.clone(), start_pos, end_pos));
+                    if end_pos >= end {
+                        break;
+                    }
+                    start_pos += step;
+                }
+                locus_list.sort_by(|a, b| a.1.cmp(&b.1).then(a.2.cmp(&b.2)));
+                for (index, locus) in locus_list.iter().enumerate() {
+                    info!("Interval: {}:{}-{}", locus.0, locus.1, locus.2);
+                    let output_prefix = format!("{}_{}", output_prefix, index);
+                    let start = locus.1;
+                    let end = locus.2;
+                    // // Extract read sequences from BAM file using utility function
+                    let mut windows = Vec::new();
+                    for i in (start..end).step_by(window_size) {
+                        let end_pos = std::cmp::min(i + window_size, end);
+                        windows.push((chromosome.clone(), i, end_pos));
+                    }
+           
+                    graph::start(
+                        &alignment_bam,
+                        &windows,
+                        &reference_chromosome_seqs,
+                        &sampleid,
+                        min_reads as usize,
+                        threshold_methyl_likelihood,
+                        var_frequency_min,
+                        primary_only,
+                        &output_prefix,
+                        MINIMAL_GAP_LENGTH
+                    )?;
+           
+                    let output_p = PathBuf::from(&output_prefix);
+                    let graph_gfa = output_p.with_extension("gfa");
+                    
+                    let (primary_haplotypes, node_info, edge_info) = asm::start(
+                        &graph_gfa,
+                        number_of_haplotypes,
+                        &output_p
+                    )?;
+                    call::start(
+                        &graph_gfa,
+                        &reference_seqs,
+                        &primary_haplotypes.clone(),
+                        &sampleid,
+                        &output_prefix,
+                        number_of_haplotypes,
+                        &detection_technology,
+                    )?;
+
+                }
+            }
             // // Extract read sequences from BAM file using utility function
             let mut windows = Vec::new();
             for i in (start..end).step_by(window_size) {
@@ -374,7 +451,8 @@ fn main() -> Result<()> {
                 threshold_methyl_likelihood,
                 var_frequency_min,
                 primary_only,
-                &output_prefix
+                &output_prefix,
+                MINIMAL_GAP_LENGTH
             )?;
             
             let output_p = PathBuf::from(&output_prefix);
@@ -382,7 +460,6 @@ fn main() -> Result<()> {
             
             let (primary_haplotypes, node_info, edge_info) = asm::start(
                 &graph_gfa,
-                true,
                 number_of_haplotypes,
                 &output_p
             )?;
@@ -532,13 +609,13 @@ fn main() -> Result<()> {
                     0.5,
                     0.0,
                     false,
-                    &format!("{}_{}_tmp", output_prefix, chromosome)
+                    &format!("{}_{}_tmp", output_prefix, chromosome),
+                    MINIMAL_GAP_LENGTH
                 )?;
                 let output_p = PathBuf::from(&format!("{}_{}_tmp", output_prefix, chromosome));
                 let graph_gfa = output_p.with_extension("gfa");
                 asm::start(
                     &graph_gfa,
-                    true,
                     1,
                     &output_p,
                 )?;
@@ -558,7 +635,6 @@ fn main() -> Result<()> {
                 DevToolsCommands::Assemble {
                     graph_gfa,
                     output_prefix,
-                    major_haplotype_only,
                     number_of_haplotypes,
                     verbose,
                 } => {
@@ -572,7 +648,6 @@ fn main() -> Result<()> {
                         .init();
                     asm::start(
                         &graph_gfa,
-                        major_haplotype_only,
                         number_of_haplotypes,
                         &output_prefix,
                     )?;
@@ -598,7 +673,6 @@ fn main() -> Result<()> {
                     let reference_seqs = util::get_all_ref_seq(&reference_fa);
                     let (primary_haplotypes, node_info, edge_info) = asm::start(
                         &gfa_file,
-                        true,
                         maximum_haplotypes,
                         &PathBuf::from(&output_prefix.clone())
                     )?;

@@ -42,6 +42,7 @@ pub fn get_node_edge_info(
         HashMap<String, String>,
     )>,
     min_reads: usize,
+    minimal_gap_length: usize,
 ) -> (
     HashMap<String, NodeInfo>,
     HashMap<(String, String), EdgeInfo>,
@@ -83,51 +84,6 @@ pub fn get_node_edge_info(
                     coordinate_list.push((node_id.clone(), read_name.clone(), *start, *end));
                 }
             }
-            // add edge information
-            // build edge according to the read coordinate list
-
-            // if index < windows.len() - 1 {
-            //     let next_window = windows[index + 1].clone();
-            //     // every node only have one choice for the next window
-            //     for (
-            //         j,
-            //         (
-            //             next_final_haplotype_seq,
-            //             (next_cigar, next_methyl_dict, next_allele_frequency),
-            //         ),
-            //     ) in final_hap_list[index + 1].iter().enumerate()
-            //     {
-            //         let next_node_id = format!(
-            //             "H.{}:{}-{}.{}",
-            //             next_window.0, next_window.1, next_window.2, j
-            //         );
-            //         // let next_cigar = cigar_dict_list[index + 1].get(next_final_haplotype_seq).unwrap();
-            //         let next_read_vector = next_methyl_dict.keys().cloned().collect::<Vec<_>>();
-            //         let next_read_vector_len = next_read_vector.len();
-            //         let next_read_vector_clone = next_read_vector
-            //             .iter()
-            //             .map(|x| x.split("|").collect::<Vec<_>>()[0].to_string())
-            //             .collect::<HashSet<_>>();
-            //         let overlapping_reads = read_vector_clone
-            //             .intersection(&next_read_vector_clone)
-            //             .cloned()
-            //             .collect::<Vec<_>>();
-            //         let overlap_ratio = overlapping_reads.len() as f64
-            //             / (read_vector_len as f64).max(next_read_vector_len as f64);
-            //         // println!("readset1: {}, readset2: {}, overlap_ratio: {}", read_vector.len(), next_read_vector.len(), overlap_ratio);
-            //         if overlapping_reads.len() >= min_reads - 1 {
-            //             edge_info.insert(
-            //                 (node_id.clone(), next_node_id.clone()),
-            //                 EdgeInfo {
-            //                     src: node_id.clone(),
-            //                     dst: next_node_id.clone(),
-            //                     overlap_ratio,
-            //                     overlapping_reads: overlapping_reads.join(","),
-            //                 },
-            //             );
-            //         }
-            //     }
-            // }
         }
     }
 
@@ -151,7 +107,7 @@ pub fn get_node_edge_info(
                 continue;
             }
             if let Some(gap) = next_start.checked_sub(*end) {
-                if gap > 10{
+                if gap > minimal_gap_length as u64{
                     continue;
                 }
                
@@ -294,6 +250,7 @@ pub fn start(
     frequency_min: f64,
     primary_only: bool,
     output_prefix: &String,
+    minimal_gap_length: usize,
 ) -> AnyhowResult<()> {
     // Parallelize window processing - each thread gets its own BAM reader
     info!("Processing {} windows in parallel", windows.len());
@@ -320,7 +277,7 @@ pub fn start(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    let (node_info, edge_info) = get_node_edge_info(windows, &final_hap_list, 1_usize);
+    let (node_info, edge_info) = get_node_edge_info(windows, &final_hap_list, 1_usize, minimal_gap_length);
     println!("node_info: {:?}", node_info.len());
     println!("edge_info: {:?}", edge_info.len());
     let gfa_output = PathBuf::from(format!("{}.gfa", output_prefix));
