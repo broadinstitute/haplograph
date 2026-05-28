@@ -444,29 +444,27 @@ fn write_vcf(
         if phase_variants {
             let mut phase = false;
             for haplotype_index in 1..=haplotype_number {
-                let mut found = false;
-                for (index, variant) in var_list.iter().enumerate() {
+                // One allele per haplotype to keep GT ploidy == haplotype_number.
+                let matched_allele = var_list.iter().enumerate().find_map(|(index, variant)| {
                     let haplotype_index_list = variant.clone().haplotype_index.unwrap();
-                    // println!("haplotype_index_: {}", haplotype_index_);
-                    for hap_index in haplotype_index_list.iter() {
-                        if *hap_index == haplotype_index {
-                            if haplotype_index == 1 {
-                                genotype_list.push(GenotypeAllele::Unphased(index as i32 + 1));
-                            } else {
-                                genotype_list.push(GenotypeAllele::Phased(index as i32 + 1));
-                            }
-                            found = true;
-                            phase = true;
-                            break;
-                        }
-                    }
-                }
-                if !found {
-                    if phase {
-                        genotype_list.push(GenotypeAllele::Phased(0));
+                    if haplotype_index_list.contains(&haplotype_index) {
+                        Some(index as i32 + 1)
                     } else {
-                        genotype_list.push(GenotypeAllele::Unphased(0));
+                        None
                     }
+                });
+
+                if let Some(allele_index) = matched_allele {
+                    if haplotype_index == 1 {
+                        genotype_list.push(GenotypeAllele::Unphased(allele_index));
+                    } else {
+                        genotype_list.push(GenotypeAllele::Phased(allele_index));
+                    }
+                    phase = true;
+                } else if phase {
+                    genotype_list.push(GenotypeAllele::Phased(0));
+                } else {
+                    genotype_list.push(GenotypeAllele::Unphased(0));
                 }
             }
             if !phase {
@@ -559,22 +557,6 @@ pub fn get_variants_from_path(
     primary_haplotypes: &HashMap<usize, (Vec<String>, String, HashSet<String>, usize, usize)>,
     reference_seqs: &fastq::Record,
 ) -> (Vec<Variant>, Vec<Variant>) {
-    // let (_haplotype_reads, node_haplotype) =
-    //     asm::find_node_haplotype(node_info, haplotype_number);
-    // // Use the same path enumeration as assemble to ensure paths follow graph edges
-    // let all_paths = asm::enumerate_all_paths_with_haplotype(
-    //     node_info,
-    //     edge_info,
-    //     &node_haplotype,
-    //     haplotype_number,
-    // )
-    // .expect("Failed to enumerate all paths");
-
-    // let all_sequences = asm::construct_sequences_from_haplotype_path(node_info, &all_paths);
-
-    // // Select the best path for each haplotype (same as assemble function)
-    // let primary_haplotypes =
-    //     asm::find_full_range_haplotypes(node_info, &node_haplotype, &all_sequences);
 
     // Collect all phased nodes from the paths
     let mut phased_nodes = HashSet::new();

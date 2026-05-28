@@ -1129,7 +1129,7 @@ pub fn filter_haplotype_nodes(
             }
 
             // More than one node: choose the one with max read agreement for this haplotype.
-            let minimal_read_count = 2usize;
+            let minimal_read_count = 1usize;
             let mut best_node: Option<String> = None;
             let mut best_intersection = 0usize;
 
