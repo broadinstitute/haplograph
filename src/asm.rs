@@ -1336,52 +1336,110 @@ pub fn find_parallele_nodes_from_nodelist(
 //     filtered_haplotype_nodes
 // }
 
+/// Assign every graph interval at least one node per haplotype.
+///
+/// This iterates over *all* intervals in the graph (not just the ones a haplotype's
+/// reads already cover) so that no haplotype is left with a gap. Within each interval:
+///   * an uncontested interval (a single node) is treated as homozygous backbone and
+///     assigned to every haplotype, so it never blocks the haplotype-constrained DFS;
+///   * a contested interval picks, per haplotype, the node with the highest read overlap,
+///     falling back to the most-supported node when there is no overlap so that every
+///     haplotype still gets a node there.
 pub fn filter_haplotype_nodes(
     node_info: &HashMap<String, NodeInfo>,
     haplotype_nodes: &HashMap<usize, HashSet<String>>,
     haplotype_reads: &HashMap<usize, HashSet<String>>,
 ) -> HashMap<usize, HashSet<String>> {
-    let mut filtered_haplotype_nodes = HashMap::new();
+    // All intervals across the whole graph, each with every parallel node it contains.
+    let interval_all_nodes =
+        find_parallele_nodes_from_nodelist(&node_info.keys().cloned().collect::<Vec<_>>());
 
-    for (hap, node_list) in haplotype_nodes.iter() {
-        let interval_node = find_parallele_nodes_from_nodelist(
-            &node_list.iter().cloned().collect::<Vec<_>>(),
-        );
-        let mut interval_list = interval_node.keys().collect::<Vec<_>>();
-        interval_list.sort(); // ascending order a < b
+    // The full set of haplotype indices we must cover in every interval.
+    let mut hap_set: HashSet<usize> = HashSet::new();
+    hap_set.extend(haplotype_reads.keys().cloned());
+    hap_set.extend(haplotype_nodes.keys().cloned());
 
-        let read_list = haplotype_reads.get(hap).unwrap().clone();
-        for interval in interval_list.iter() {
-            let nodes = interval_node.get(*interval).unwrap().clone();
-            let mut best_node = "".to_string();
-            let mut best_read_count = 0;
-            for node in nodes.clone() {
-                let node_read_names = get_read_name_list(node_info, node.clone());
-                let intersection_count = read_list.intersection(&node_read_names).count();
-                if intersection_count > best_read_count {
-                    best_node = node.clone();
-                    best_read_count = intersection_count;
-                }
-            }
-            if best_read_count > 0 {
+    let mut filtered_haplotype_nodes: HashMap<usize, HashSet<String>> = HashMap::new();
+    for hap in hap_set.iter() {
+        filtered_haplotype_nodes.entry(*hap).or_default();
+    }
+
+    let support_of = |node: &String| -> usize {
+        node_info.get(node).map(|n| n.support_reads).unwrap_or(0)
+    };
+
+    for (interval, nodes_set) in interval_all_nodes.iter() {
+        let nodes: Vec<String> = nodes_set.iter().cloned().collect();
+        if nodes.is_empty() {
+            continue;
+        }
+
+        // Uncontested interval: a single allele shared by every haplotype (homozygous backbone).
+        if nodes.len() == 1 {
+            let node = nodes[0].clone();
+            for hap in hap_set.iter() {
                 filtered_haplotype_nodes
                     .entry(*hap)
-                    .or_insert(HashSet::new())
-                    .insert(best_node.clone());
-            } else {
-                warn!(
-                    "hap: {}, interval: {}, nodes: {:?}",
-                    hap,
-                    interval,
-                    nodes
-                        .clone()
-                        .iter().cloned()
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
+                    .or_default()
+                    .insert(node.clone());
             }
+            continue;
+        }
+
+        // Deterministic fallback: most-supported node (tie-break: lexicographically smaller id),
+        // guaranteeing every haplotype is assigned a node even with no read overlap.
+        let fallback_node = nodes
+            .iter()
+            .max_by(|a, b| support_of(a).cmp(&support_of(b)).then_with(|| b.cmp(a)))
+            .cloned()
+            .unwrap();
+
+        for hap in hap_set.iter() {
+            let read_list = haplotype_reads.get(hap).cloned().unwrap_or_default();
+
+            let mut best_node: Option<String> = None;
+            let mut best_intersection = 0usize;
+            for node in nodes.iter() {
+                let node_read_names = get_read_name_list(node_info, node.clone());
+                let intersection_count = read_list.intersection(&node_read_names).count();
+                let better = match &best_node {
+                    None => intersection_count > 0,
+                    Some(current) => {
+                        if intersection_count > best_intersection {
+                            true
+                        } else if intersection_count == best_intersection {
+                            // tie-break: higher support, then lexicographically smaller id
+                            let ns = support_of(node);
+                            let cs = support_of(current);
+                            ns > cs || (ns == cs && node < current)
+                        } else {
+                            false
+                        }
+                    }
+                };
+                if better {
+                    best_node = Some(node.clone());
+                    best_intersection = intersection_count;
+                }
+            }
+
+            let chosen = match best_node {
+                Some(n) if best_intersection > 0 => n,
+                _ => {
+                    warn!(
+                        "hap: {}, interval: {}, no read overlap; falling back to most-supported node {}",
+                        hap, interval, fallback_node
+                    );
+                    fallback_node.clone()
+                }
+            };
+            filtered_haplotype_nodes
+                .entry(*hap)
+                .or_default()
+                .insert(chosen);
         }
     }
+
     filtered_haplotype_nodes
 }
 
