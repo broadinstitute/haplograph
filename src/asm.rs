@@ -190,6 +190,7 @@ pub fn identify_heterozygous_nodes(
     });
 
     for interval_name in interval_list.iter() {
+        let (chromo, start, end )= util::split_locus(interval_name.to_string());
         let node_vec = all_nodes.get(*interval_name).unwrap();
 
         let mut candidates: Vec<(String, HashSet<String>)> = node_vec
@@ -197,6 +198,7 @@ pub fn identify_heterozygous_nodes(
             .map(|node| (node.clone(), get_read_name_list(node_info, node.clone())))
             .filter(|(_, reads)| reads.len() >= HET_MIN_NODE_SUPPORT)
             .collect();
+
         if candidates.len() < 2 {
             continue;
         }
@@ -225,6 +227,7 @@ pub fn identify_heterozygous_nodes(
                 let total_unique = union_reads.len();
 
                 let candidate_score = (disjointness, balance, total_unique);
+
                 let is_better = match &best {
                     None => true,
                     Some((d, b, t, _)) => {
@@ -249,7 +252,8 @@ pub fn identify_heterozygous_nodes(
             heterozygous_nodes
                 .entry((*interval_name).clone())
                 .or_default()
-                .extend(nodes);
+                .extend(nodes.clone());
+            // println!("heterozygous_nodes: {:?}", nodes.clone().into_iter().collect::<Vec<_>>().join(", "));
         }
     }
     heterozygous_nodes
@@ -1466,24 +1470,24 @@ pub fn find_node_haplotype(
         let haplotype_reads =
             assign_haplotype_reads(node_info, &heterozygous_nodes, hap_number);
 
-        let (haplotype_reads_new, haplotype_nodes_new) =
-            assign_unassigned_reads(node_info, &haplotype_reads);
-        info!(
-            "haplotype_reads: {:?}",
-            haplotype_reads
-                .iter()
-                .map(|(hap, reads)| format!("hap: {}, reads: {}", hap, reads.len()))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        info!(
-            "haplotype_reads_new: {:?}",
-            haplotype_reads_new
-                .iter()
-                .map(|(hap, reads)| format!("hap: {}, reads: {}", hap, reads.len()))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
+        // let (haplotype_reads_new, haplotype_nodes_new) =
+        //     assign_unassigned_reads(node_info, &haplotype_reads);
+        // info!(
+        //     "haplotype_reads: {:?}",
+        //     haplotype_reads
+        //         .iter()
+        //         .map(|(hap, reads)| format!("hap: {}, reads: {}", hap, reads.len()))
+        //         .collect::<Vec<_>>()
+        //         .join(", ")
+        // );
+        // info!(
+        //     "haplotype_reads_new: {:?}",
+        //     haplotype_reads_new
+        //         .iter()
+        //         .map(|(hap, reads)| format!("hap: {}, reads: {}", hap, reads.len()))
+        //         .collect::<Vec<_>>()
+        //         .join(", ")
+        // );
         // println!("haplotype_reads_new: {}, {}, {:?}", haplotype_reads_new.get(&0).unwrap().len(), haplotype_reads_new.get(&1).unwrap().len(), haplotype_reads_new.get(&0).unwrap().intersection(haplotype_reads_new.get(&1).unwrap()).count());
         let mut total_reads = HashSet::new();
         for node in node_info.keys(){
@@ -1494,14 +1498,14 @@ pub fn find_node_haplotype(
             "total reads: {:?}",
             total_reads.len()
         );        
-        if haplotype_reads_new.is_empty() {
+        if haplotype_reads.is_empty() {
             let node_haplotype = find_most_supported_path(node_info);
             return (haplotype_reads, node_haplotype)
         } else {
             let mut haplotype_nodes = HashMap::new();
             let read_to_nodes = assign_node_to_reads(node_info);
             
-            for (hap, reads) in haplotype_reads_new.iter() {
+            for (hap, reads) in haplotype_reads.iter() {
                 for read in reads.iter() {
                     let nodes_on_read = read_to_nodes.get(read).unwrap().clone();
                     haplotype_nodes.entry(*hap).or_insert(HashSet::new()).extend(nodes_on_read);

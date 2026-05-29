@@ -72,10 +72,6 @@ pub(crate) fn alignment_query_interval_bounds(
     let query_start = query_boundary_offset_from_cigar(cigar, ref_start, overlap_start)?;
     let query_end = query_boundary_offset_from_cigar(cigar, ref_start, overlap_end_excl)?;
 
-    // `query_end == query_start` means the locus falls entirely inside a deletion
-    // (or ref-skip) in the alignment. The read does cover the reference range, just
-    // with zero query bases, so we keep the empty slice as evidence rather than
-    // dropping the read.
     if query_end < query_start {
         return None;
     }
@@ -251,10 +247,10 @@ pub fn extract_haplotypes_coordinates_from_bam(
 
         let record_id = intervals::generate_read_name(&read_name, chr, start, end, sampleid);
         read_coordinates_formatted.insert(record_id.clone(), (read_start as u64, read_end as u64));
-        read_sequence_dict_formatted.insert(record_id.clone(), read_seq_final.into_bytes());
+        read_sequence_dict_formatted.insert(record_id.clone(), read_seq_final.clone().into_bytes());
         read_quality_dict_formatted.insert(record_id.clone(), record.qual().to_vec());
         read_strand_dict_formatted.insert(record_id.clone(), read_strand);
-        bam_records_dict_formatted.insert(record_id, record.clone());
+        bam_records_dict_formatted.insert(record_id.clone(), record.clone());
 
         if read_coordinates_formatted.len() % 100 == 0 {
             pb.set_message(format!(
