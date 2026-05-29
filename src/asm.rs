@@ -15,6 +15,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use ndarray::s;
 use rayon::prelude::*;
+use csv::Writer;
 
 #[derive(Debug, Clone)]
 pub struct NodeInfo {
@@ -254,271 +255,353 @@ pub fn identify_heterozygous_nodes(
     heterozygous_nodes
 }
 
-/// Maximum number of corrections (flips) allowed per node row.
-/// Bounds the DP state expansion to `sum_{i=0..=k} C(n_reads, i)` candidates per row.
-const MEC_K_PER_NODE: usize = 2;
-/// Soft balance penalty (corrections per 1-unit imbalance |‖A‖ − ‖B‖|).
+/// Soft balance penalty (corrections per 1-unit imbalance between cluster sizes).
 const MEC_BALANCE_WEIGHT: f64 = 0.25;
-/// Hard cap on `n_reads` for the k-cMEC DP; above this the local-search heuristic kicks in.
-const MEC_KCMEC_MAX_READS: usize = 256;
-/// Iteration cap for the local-search heuristic.
-const MEC_LOCAL_SEARCH_MAX_ITER: usize = 100;
+/// Number of farthest-first seeded restarts for the read-clustering phaser.
+const CLUSTER_RESTARTS: usize = 64;
+/// Iteration cap per restart for the Lloyd-style centroid refinement.
+const CLUSTER_MAX_ITER: usize = 100;
+/// Minimum number of co-covered het sites required to trust a read↔centroid comparison.
+const CLUSTER_MIN_OVERLAP: usize = 1;
 
-pub fn mec_partition_reads(
-    het_matrix: &Array2<f64>,
-    balance_weight: f64,
-) -> (Vec<usize>, Vec<usize>, usize) {
+/// Sparse ternary representation of a single read: `(row index, sign ∈ {-1, +1})`,
+/// kept sorted by row so two reads can be compared with a linear merge.
+type ReadVec = Vec<(usize, i8)>;
+
+/// Build per-read sparse vectors from the ternary het matrix (matrix columns = reads).
+fn build_read_vectors(het_matrix: &Array2<f64>) -> Vec<ReadVec> {
     let (n_nodes, n_reads) = het_matrix.dim();
-    if n_reads <= 1 || n_nodes == 0 {
-        return ((0..n_reads).collect(), Vec::new(), 0);
-    }
-
-    if n_reads <= MEC_KCMEC_MAX_READS {
-        if let Some(result) = mec_kcmec_dp(het_matrix, MEC_K_PER_NODE, balance_weight) {
-            return result;
+    let mut reads: Vec<ReadVec> = vec![Vec::new(); n_reads];
+    for r in 0..n_nodes {
+        for c in 0..n_reads {
+            let v = het_matrix[[r, c]];
+            if v > 0.5 {
+                reads[c].push((r, 1i8));
+            } else if v < -0.5 {
+                reads[c].push((r, -1i8));
+            }
         }
     }
-    mec_local_search(het_matrix, balance_weight)
+    reads
 }
 
-
-fn mec_kcmec_dp(
-    het_matrix: &Array2<f64>,
-    k: usize,
-    balance_weight: f64,
-) -> Option<(Vec<usize>, Vec<usize>, usize)> {
-    let (n_nodes, n_reads) = het_matrix.dim();
-    if n_reads < 2 || n_nodes == 0 {
-        return None;
-    }
-    let mut dp: HashMap<Vec<u8>, usize> = HashMap::new();
-    let mut seeded = false;
-
-    for row_idx in 0..n_nodes {
-        let a_indices: Vec<usize> = (0..n_reads)
-            .filter(|&c| het_matrix[[row_idx, c]] > 0.5)
-            .collect();
-        let b_indices: Vec<usize> = (0..n_reads)
-            .filter(|&c| het_matrix[[row_idx, c]] < -0.5)
-            .collect();
-
-        // Skip rows that carry no phasing information.
-        if a_indices.is_empty() || b_indices.is_empty() {
+/// Disagreement between a read and a dense ternary centroid, restricted to positions
+/// where both are informative. Returns `(disagreements, overlap)`.
+fn read_centroid_disagreement(read: &ReadVec, centroid: &[i8]) -> (usize, usize) {
+    let mut disagree = 0usize;
+    let mut overlap = 0usize;
+    for &(row, sign) in read.iter() {
+        let c = centroid[row];
+        if c == 0 {
             continue;
         }
-
-        // Active = sorted union of both allele-index sets.
-        let mut active: Vec<usize> =
-            a_indices.iter().chain(b_indices.iter()).copied().collect();
-        active.sort_unstable();
-
-        // Enumerate all k-corrections over active reads.
-        // Natural assignment: a_reads → 0 (group A), b_reads → 1 (group B), missing → 0.
-        let mut local: HashMap<Vec<u8>, usize> = HashMap::new();
-        for flips in 0..=k {
-            for combo in active.iter().copied().combinations(flips) {
-                let mut canon = vec![0u8; n_reads];
-                for &c in &b_indices {
-                    canon[c] = 1;
-                }
-                for c in &combo {
-                    canon[*c] ^= 1;
-                }
-                // Ensure the bipartition is non-trivial over active reads.
-                let active_in_b = active.iter().filter(|&&c| canon[c] == 1).count();
-                if active_in_b == 0 || active_in_b == active.len() {
-                    continue;
-                }
-                // Canonicalize: fix canon[0] = 0 (read 0 always in group A).
-                if canon[0] == 1 {
-                    for bit in canon.iter_mut() {
-                        *bit ^= 1;
-                    }
-                }
-                local
-                    .entry(canon)
-                    .and_modify(|c| {
-                        if flips < *c {
-                            *c = flips;
-                        }
-                    })
-                    .or_insert(flips);
-            }
-        }
-
-        if local.is_empty() {
-            return None;
-        }
-
-        if !seeded {
-            dp = local;
-            seeded = true;
-        } else {
-            let mut new_dp: HashMap<Vec<u8>, usize> =
-                HashMap::with_capacity(dp.len().min(local.len()));
-            for (canon, prev_cost) in &dp {
-                if let Some(&local_cost) = local.get(canon) {
-                    new_dp.insert(canon.clone(), prev_cost + local_cost);
-                }
-            }
-            if new_dp.is_empty() {
-                return None;
-            }
-            dp = new_dp;
+        overlap += 1;
+        if c != sign {
+            disagree += 1;
         }
     }
-
-    if !seeded {
-        // Every row lacked phasing information; return a trivial split.
-        return Some(((0..n_reads).collect(), Vec::new(), 0));
-    }
-
-    let (best_canon, &best_cost) = dp.iter().min_by(|x, y| {
-        let px = x.0.iter().filter(|&&bit| bit == 1).count();
-        let py = y.0.iter().filter(|&&bit| bit == 1).count();
-        let bal_x = balance_weight * (n_reads as f64 - 2.0 * px as f64).abs();
-        let bal_y = balance_weight * (n_reads as f64 - 2.0 * py as f64).abs();
-        ((*x.1 as f64) + bal_x)
-            .partial_cmp(&((*y.1 as f64) + bal_y))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    })?;
-
-    let group_a: Vec<usize> = (0..n_reads).filter(|&i| best_canon[i] == 0).collect();
-    let group_b: Vec<usize> = (0..n_reads).filter(|&i| best_canon[i] == 1).collect();
-    Some((group_a, group_b, best_cost))
+    (disagree, overlap)
 }
 
-/// Compute the total number of minority-vote corrections for the current assignment,
-/// counting only non-missing (non-zero) reads.  O(n_rows · n_reads).
-fn mec_ternary_corrections(
-    het_matrix: &Array2<f64>,
-    assignment: &[u8],
-) -> usize {
-    let (n_nodes, n_reads) = het_matrix.dim();
-    let mut corrections = 0usize;
-    for r in 0..n_nodes {
-        let (mut a_pos, mut a_neg, mut b_pos, mut b_neg) =
-            (0usize, 0usize, 0usize, 0usize);
-        for c in 0..n_reads {
-            let vote = het_matrix[[r, c]];
-            if vote.abs() < 0.5 {
-                continue; // missing — does not contribute
-            }
-            let is_pos = vote > 0.0;
-            match assignment[c] {
-                0 => {
-                    if is_pos { a_pos += 1; } else { a_neg += 1; }
+/// Disagreement fraction between two reads over their co-covered het sites.
+/// Returns `(fraction, overlap)`; the fraction is 1.0 when there is no overlap.
+fn read_pair_disagreement(a: &ReadVec, b: &ReadVec) -> (f64, usize) {
+    let (mut i, mut j) = (0usize, 0usize);
+    let mut overlap = 0usize;
+    let mut disagree = 0usize;
+    while i < a.len() && j < b.len() {
+        let (ra, sa) = a[i];
+        let (rb, sb) = b[j];
+        match ra.cmp(&rb) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                overlap += 1;
+                if sa != sb {
+                    disagree += 1;
                 }
-                _ => {
-                    if is_pos { b_pos += 1; } else { b_neg += 1; }
-                }
+                i += 1;
+                j += 1;
             }
         }
-        corrections += a_pos.min(a_neg) + b_pos.min(b_neg);
+    }
+    if overlap == 0 {
+        (1.0, 0)
+    } else {
+        (disagree as f64 / overlap as f64, overlap)
+    }
+}
+
+/// Recompute a dense ternary centroid for `members` by per-row majority vote.
+fn compute_centroid(reads: &[ReadVec], members: &[usize], n_nodes: usize) -> Vec<i8> {
+    let mut score = vec![0i32; n_nodes];
+    for &m in members {
+        for &(row, sign) in reads[m].iter() {
+            score[row] += sign as i32;
+        }
+    }
+    score
+        .into_iter()
+        .map(|s| match s.cmp(&0) {
+            std::cmp::Ordering::Greater => 1i8,
+            std::cmp::Ordering::Less => -1i8,
+            std::cmp::Ordering::Equal => 0i8,
+        })
+        .collect()
+}
+
+/// Total minimum-error corrections for a clustering: for every row and every cluster, the
+/// minority-vote count, summed over all rows and clusters.
+fn cluster_corrections(
+    reads: &[ReadVec],
+    assignment: &[usize],
+    n_clusters: usize,
+    n_nodes: usize,
+) -> usize {
+    let mut pos = vec![vec![0u32; n_nodes]; n_clusters];
+    let mut neg = vec![vec![0u32; n_nodes]; n_clusters];
+    for (read_idx, &cl) in assignment.iter().enumerate() {
+        for &(row, sign) in reads[read_idx].iter() {
+            if sign > 0 {
+                pos[cl][row] += 1;
+            } else {
+                neg[cl][row] += 1;
+            }
+        }
+    }
+    let mut corrections = 0usize;
+    for cl in 0..n_clusters {
+        for row in 0..n_nodes {
+            corrections += pos[cl][row].min(neg[cl][row]) as usize;
+        }
     }
     corrections
 }
 
-/// Greedy local search: alternates between (a) majority-vote consensus per group ignoring
-/// missing entries, (b) re-assigning each read to the closer haplotype (Hamming distance
-/// over active votes + balance gradient).  Converges quickly but is not globally optimal.
-fn mec_local_search(
-    het_matrix: &Array2<f64>,
-    balance_weight: f64,
-) -> (Vec<usize>, Vec<usize>, usize) {
-    let (n_nodes, n_reads) = het_matrix.dim();
-
-    // Initial bipartition: alternating A/B by column index.
-    let mut assignment: Vec<u8> = (0..n_reads).map(|i| (i & 1) as u8).collect();
-
-    let mut last_objective = f64::MAX;
-    for _ in 0..MEC_LOCAL_SEARCH_MAX_ITER {
-        // ── Step A: consensus haplotype per group ─────────────────────────────
-        // hap_X[r] = 0 means group X uses allele-A (+1) at interval r,
-        //           = 1 means group X uses allele-B (-1).
-        // Only non-missing (|vote| > 0.5) reads vote.
-        let mut hap_a = vec![0u8; n_nodes];
-        let mut hap_b = vec![0u8; n_nodes];
-        for r in 0..n_nodes {
-            let (mut a_pos, mut a_neg, mut b_pos, mut b_neg) =
-                (0usize, 0usize, 0usize, 0usize);
-            for c in 0..n_reads {
-                let vote = het_matrix[[r, c]];
-                if vote.abs() < 0.5 {
-                    continue;
-                }
-                let is_pos = vote > 0.0;
-                match assignment[c] {
-                    0 => {
-                        if is_pos { a_pos += 1; } else { a_neg += 1; }
-                    }
-                    _ => {
-                        if is_pos { b_pos += 1; } else { b_neg += 1; }
-                    }
-                }
-            }
-            hap_a[r] = (a_neg > a_pos) as u8;
-            hap_b[r] = (b_neg > b_pos) as u8;
-        }
-
-        // ── Step B: reassign each read to the closer haplotype ────────────────
-        let size_a = assignment.iter().filter(|&&g| g == 0).count();
-        let size_b = n_reads - size_a;
-        let mut changed = false;
+/// Farthest-first seeding: pick `hap_number` reads as initial centroids, starting from
+/// `first` and repeatedly adding the read whose pattern is most dissimilar (largest minimum
+/// disagreement) to the reads already chosen. Different `first` values let restarts explore
+/// distinct basins.
+fn seed_clusters(reads: &[ReadVec], hap_number: usize, first: usize) -> Vec<usize> {
+    let n_reads = reads.len();
+    let mut seeds = vec![first];
+    while seeds.len() < hap_number {
+        let mut best_read: Option<usize> = None;
+        let mut best_key = (f64::MIN, 0usize);
         for c in 0..n_reads {
-            let mut dist_a = 0i64;
-            let mut dist_b = 0i64;
-            for r in 0..n_nodes {
-                let vote = het_matrix[[r, c]];
-                if vote.abs() < 0.5 {
-                    continue; // missing — skip
+            if reads[c].is_empty() || seeds.contains(&c) {
+                continue;
+            }
+            let mut min_frac = f64::MAX;
+            let mut acc_overlap = 0usize;
+            let mut comparable = false;
+            for &s in seeds.iter() {
+                let (frac, ov) = read_pair_disagreement(&reads[c], &reads[s]);
+                if ov >= CLUSTER_MIN_OVERLAP {
+                    comparable = true;
+                    acc_overlap += ov;
+                    if frac < min_frac {
+                        min_frac = frac;
+                    }
                 }
-                let read_allele = if vote > 0.0 { 0u8 } else { 1u8 };
-                if read_allele != hap_a[r] { dist_a += 1; }
-                if read_allele != hap_b[r] { dist_b += 1; }
             }
-            let current = assignment[c];
-            // Balance gradient: moving from the oversize group is cheaper.
-            let bal_a = (size_a as i64 - size_b as i64 - if current == 0 { 0 } else { 2 }).abs();
-            let bal_b = (size_a as i64 - size_b as i64 + if current == 1 { 0 } else { 2 }).abs();
-            let score_a = dist_a as f64 + balance_weight * bal_a as f64;
-            let score_b = dist_b as f64 + balance_weight * bal_b as f64;
-            let new_g = if score_a <= score_b { 0u8 } else { 1u8 };
-            if new_g != current {
-                assignment[c] = new_g;
-                changed = true;
+            if !comparable {
+                continue;
+            }
+            // Prefer reads far from existing seeds, breaking ties by larger overlap.
+            let key = (min_frac, acc_overlap);
+            if key > best_key {
+                best_key = key;
+                best_read = Some(c);
             }
         }
-
-        // ── Step C: compute cost; bail early if converged ────────────────────
-        let corrections = mec_ternary_corrections(het_matrix, &assignment);
-        let sa = assignment.iter().filter(|&&g| g == 0).count();
-        let sb = n_reads - sa;
-        let objective = corrections as f64 + balance_weight * (sa as f64 - sb as f64).abs();
-
-        if !changed || objective >= last_objective {
-            return (
-                (0..n_reads).filter(|&c| assignment[c] == 0).collect(),
-                (0..n_reads).filter(|&c| assignment[c] == 1).collect(),
-                corrections,
-            );
+        match best_read {
+            Some(c) => seeds.push(c),
+            None => break, // not enough informative reads to seed another cluster
         }
-        last_objective = objective;
+    }
+    seeds
+}
+
+/// Partition reads into `hap_number` haplotype clusters from the ternary het matrix.
+///
+/// Reads are clustered by the similarity of their `{-1, 0, +1}` patterns: each read is
+/// compared against a per-cluster consensus spanning the *whole* interval, which makes the
+/// assignment robust to switch errors (the bipartition can no longer silently flip
+/// orientation midway, as happened with the row-by-row DP). Farthest-first seeding plus many
+/// restarts, scored by total minimum-error corrections, avoids degenerate solutions where
+/// both haplotypes collapse onto a single truth haplotype.
+///
+/// Returns the clusters (read column indices, largest first) and the total MEC corrections.
+pub fn mec_partition_reads(
+    het_matrix: &Array2<f64>,
+    hap_number: usize,
+    balance_weight: f64,
+) -> (Vec<Vec<usize>>, usize) {
+    let (n_nodes, n_reads) = het_matrix.dim();
+    let k = hap_number.max(1);
+
+    let trivial = || {
+        let mut clusters = vec![Vec::new(); k];
+        clusters[0] = (0..n_reads).collect::<Vec<_>>();
+        (clusters, 0usize)
+    };
+    if n_reads <= 1 || n_nodes == 0 || k == 1 {
+        return trivial();
     }
 
-    let corrections = mec_ternary_corrections(het_matrix, &assignment);
-    (
-        (0..n_reads).filter(|&c| assignment[c] == 0).collect(),
-        (0..n_reads).filter(|&c| assignment[c] == 1).collect(),
-        corrections,
-    )
+    let reads = build_read_vectors(het_matrix);
+
+    // Seed restarts from the highest-coverage reads first (most informative sites).
+    let mut informative: Vec<usize> = (0..n_reads).filter(|&c| !reads[c].is_empty()).collect();
+    informative.sort_by(|&a, &b| reads[b].len().cmp(&reads[a].len()).then(a.cmp(&b)));
+    if informative.is_empty() {
+        return trivial();
+    }
+
+    let restarts = CLUSTER_RESTARTS.min(informative.len());
+    let mut best: Option<(f64, usize, usize, Vec<usize>)> = None; // (objective, corrections, eff_k, assignment)
+
+    for restart in 0..restarts {
+        let first = informative[restart];
+        let seeds = seed_clusters(&reads, k, first);
+        if seeds.len() < 2 {
+            continue;
+        }
+        let eff_k = seeds.len();
+
+        let mut centroids: Vec<Vec<i8>> = seeds
+            .iter()
+            .map(|&s| {
+                let mut dense = vec![0i8; n_nodes];
+                for &(row, sign) in reads[s].iter() {
+                    dense[row] = sign;
+                }
+                dense
+            })
+            .collect();
+
+        let mut assignment = vec![0usize; n_reads];
+        let mut prev_assignment: Vec<usize> = Vec::new();
+
+        for _iter in 0..CLUSTER_MAX_ITER {
+            let mut sizes = vec![0usize; eff_k];
+
+            // Assign informative reads to the closest consensus over the whole interval.
+            for &c in informative.iter() {
+                let mut best_cl = 0usize;
+                let mut best_frac = f64::MAX;
+                let mut best_overlap = 0usize;
+                let mut found = false;
+                for cl in 0..eff_k {
+                    let (dis, ov) = read_centroid_disagreement(&reads[c], &centroids[cl]);
+                    if ov < CLUSTER_MIN_OVERLAP {
+                        continue;
+                    }
+                    let frac = dis as f64 / ov as f64;
+                    let better = !found
+                        || frac < best_frac - 1e-9
+                        || ((frac - best_frac).abs() <= 1e-9 && ov > best_overlap);
+                    if better {
+                        found = true;
+                        best_frac = frac;
+                        best_overlap = ov;
+                        best_cl = cl;
+                    }
+                }
+                if !found {
+                    // No overlap with any centroid this round: keep clusters balanced.
+                    best_cl = (0..eff_k).min_by_key(|&cl| sizes[cl]).unwrap();
+                }
+                assignment[c] = best_cl;
+                sizes[best_cl] += 1;
+            }
+            // Reads with no informative site carry no phasing signal → balance filler.
+            for c in 0..n_reads {
+                if reads[c].is_empty() {
+                    let cl = (0..eff_k).min_by_key(|&x| sizes[x]).unwrap();
+                    assignment[c] = cl;
+                    sizes[cl] += 1;
+                }
+            }
+
+            if assignment == prev_assignment {
+                break;
+            }
+            prev_assignment = assignment.clone();
+
+            let mut members: Vec<Vec<usize>> = vec![Vec::new(); eff_k];
+            for (idx, &cl) in assignment.iter().enumerate() {
+                members[cl].push(idx);
+            }
+            for cl in 0..eff_k {
+                centroids[cl] = compute_centroid(&reads, &members[cl], n_nodes);
+            }
+        }
+
+        let corrections = cluster_corrections(&reads, &assignment, eff_k, n_nodes);
+        let mut sizes = vec![0usize; eff_k];
+        for &cl in assignment.iter() {
+            sizes[cl] += 1;
+        }
+        let imbalance = (sizes.iter().max().unwrap() - sizes.iter().min().unwrap()) as f64;
+        let objective = corrections as f64 + balance_weight * imbalance;
+
+        if best.as_ref().map_or(true, |(bo, _, _, _)| objective < *bo) {
+            best = Some((objective, corrections, eff_k, assignment.clone()));
+        }
+    }
+
+    let (_, corrections, _eff_k, assignment) = match best {
+        Some(b) => b,
+        None => return trivial(),
+    };
+
+    let mut clusters: Vec<Vec<usize>> = vec![Vec::new(); k];
+    for (idx, &cl) in assignment.iter().enumerate() {
+        clusters[cl.min(k - 1)].push(idx);
+    }
+    // Largest cluster first for deterministic, stable haplotype indexing.
+    clusters.sort_by(|a, b| b.len().cmp(&a.len()));
+    (clusters, corrections)
+}
+
+fn write_matrix_to_csv<P: AsRef<Path>>(
+    matrix: &Array2<f64>,
+    groups: &[Vec<usize>],
+    nodelist: &[String],
+    read_set: &[String],
+    path: P,
+) -> Result<(), Box<dyn Error>> {
+    let file = File::create(path)?;
+    let mut writer = Writer::from_writer(file);
+
+    // Column order groups reads by their assigned cluster so the CSV visually separates haplotypes.
+    let ordered_cols: Vec<usize> = groups.iter().flat_map(|g| g.iter().copied()).collect();
+
+    let mut header = vec!["node".to_string()];
+    for &col in ordered_cols.iter() {
+        header.push(read_set[col].clone());
+    }
+    writer.write_record(&header)?;
+
+    for (row_idx, node) in nodelist.iter().enumerate() {
+        let mut row = vec![node.clone()];
+        for &col in ordered_cols.iter() {
+            row.push(matrix[[row_idx, col]].to_string());
+        }
+        writer.write_record(&row)?;
+    }
+
+    writer.flush()?;
+    Ok(())
 }
 
 /// Build a per-interval ternary matrix for MEC phasing.
 fn construct_het_interval_matrix(
     node_info: &HashMap<String, NodeInfo>,
     heterozygous_nodes: &HashMap<String, HashSet<String>>,
-) -> (Array2<f64>, Vec<String>) {
+) -> (Array2<f64>, Vec<String>, Vec<String>) {
     // Collect all reads across het intervals.
     let mut all_reads: HashSet<String> = HashSet::new();
     for nodes in heterozygous_nodes.values() {
@@ -536,41 +619,56 @@ fn construct_het_interval_matrix(
         .collect();
 
     // Sort intervals by start position for a deterministic row order.
-    let mut intervals: Vec<&String> = heterozygous_nodes.keys().collect();
-    // println!("intervals: {:?}", intervals);
+    let mut het_nodes: Vec<String> = Vec::new();
+    for (interval, nodes) in heterozygous_nodes.iter() {
+        het_nodes.extend(nodes.iter().cloned());
+    }
+    println!("het_nodes: {:?}", het_nodes.len());
+    het_nodes.sort_by(|a, b| a.cmp(b));
+    // let mut intervals: Vec<&String> = heterozygous_nodes.keys().collect();
+    // // println!("intervals: {:?}", intervals);
 
-    intervals.sort_by(|a, b| {
-        util::split_locus((*a).clone())
-            .1
-            .cmp(&util::split_locus((*b).clone()).1)
-    });
+    // intervals.sort_by(|a, b| {
+    //     util::split_locus((*a).clone())
+    //         .1
+    //         .cmp(&util::split_locus((*b).clone()).1)
+    // });
 
     let n_reads = read_list.len();
-    let n_rows = intervals.len();
+    let n_rows = het_nodes.len();
     let mut matrix = Array2::<f64>::zeros((n_rows, n_reads));
 
-    for (row, interval) in intervals.iter().enumerate() {
-        let nodes = heterozygous_nodes.get(*interval).unwrap();
-        // Sort nodes so allele-0 vs allele-1 assignment is deterministic.
-        let mut sorted_nodes: Vec<&String> = nodes.iter().collect();
-        sorted_nodes.sort();
+    for (row, node) in het_nodes.iter().enumerate() {
+        // let vote = if allele_idx == 0 { 1.0_f64 } else { -1.0_f64 };
+        // get all read in the interval
+        let interval = node.split(".").collect::<Vec<_>>()[1];
+        let interval_nodes = heterozygous_nodes.get(interval).unwrap().iter().cloned().collect::<Vec<_>>();
+        let mut total_reads = HashSet::new();
+        for node in interval_nodes.iter(){
+            let read_names = get_read_name_list(node_info, node.clone());
+            total_reads.extend(read_names);
+        }
 
-        for (allele_idx, node) in sorted_nodes.iter().enumerate() {
-            let vote = if allele_idx == 0 { 1.0_f64 } else { -1.0_f64 };
-            for read in get_read_name_list(node_info, (*node).clone()) {
-                if let Some(&col) = read_index.get(read.as_str()) {
-                    if matrix[[row, col]] == 0.0 {
-                        matrix[[row, col]] = vote;
-                    } else {
-                        // Read present in multiple alleles at this interval → conflict.
-                        matrix[[row, col]] = 0.0;
-                    }
+        let current_read_list = get_read_name_list(node_info, node.clone());
+        for read in  read_list.iter(){
+            let vote = if total_reads.contains(read){
+                if current_read_list.contains(read){
+                    1.0
+                } else {
+                    -1.0
                 }
+            } else {
+                0.0
+            };
+            
+            if let Some(&col) = read_index.get(read.as_str()) {
+                matrix[[row, col]] = vote;
             }
         }
+        
     }
 
-    (matrix, read_list)
+    (matrix, read_list, het_nodes)
 }
 
 pub fn assign_haplotype_reads(
@@ -587,28 +685,27 @@ pub fn assign_haplotype_reads(
     }
 
     // Build the ternary per-interval matrix; read_list matches the column order.
-    let (het_matrix, read_list) =
+    let (het_matrix, read_list, het_nodes) =
         construct_het_interval_matrix(node_info, heterozygous_nodes);
     if read_list.is_empty() {
         return haplotype_reads;
     }
+    
+    let (clusters, corrections) =
+        mec_partition_reads(&het_matrix, hap_number, MEC_BALANCE_WEIGHT);
+    write_matrix_to_csv(&het_matrix, &clusters, &het_nodes, &read_list, "het_matrix.csv").unwrap();
 
-    let (group_a, group_b, corrections) =
-        mec_partition_reads(&het_matrix, MEC_BALANCE_WEIGHT);
     info!(
-        "MEC partition: |A| = {}, |B| = {}, corrections = {}",
-        group_a.len(),
-        group_b.len(),
+        "MEC partition: cluster sizes = {:?}, corrections = {}",
+        clusters.iter().map(|c| c.len()).collect::<Vec<_>>(),
         corrections
     );
-    haplotype_reads.insert(
-        0,
-        group_a.into_iter().map(|i| read_list[i].clone()).collect(),
-    );
-    haplotype_reads.insert(
-        1,
-        group_b.into_iter().map(|i| read_list[i].clone()).collect(),
-    );
+    for (hap, cluster) in clusters.into_iter().enumerate() {
+        haplotype_reads.insert(
+            hap,
+            cluster.into_iter().map(|i| read_list[i].clone()).collect(),
+        );
+    }
     haplotype_reads
 }
 
@@ -1674,8 +1771,10 @@ mod identify_heterozygous_tests {
             [ 1.0,  1.0,  1.0, -1.0, -1.0, -1.0], // interval 0
             [ 1.0,  1.0,  1.0, -1.0, -1.0, -1.0], // interval 1
         ];
-        let (a, b, corr) = mec_partition_reads(&m, 0.0);
+        let (clusters, corr) = mec_partition_reads(&m, 2, 0.0);
         assert_eq!(corr, 0);
+        let a = clusters[0].clone();
+        let b = clusters.get(1).cloned().unwrap_or_default();
         let mut a_sorted = a.clone();
         a_sorted.sort();
         let mut b_sorted = b.clone();
@@ -1694,7 +1793,7 @@ mod identify_heterozygous_tests {
             [-1.0,  1.0,  1.0, -1.0, -1.0, -1.0], // interval 0: read 0 flipped
             [ 1.0,  1.0,  1.0, -1.0, -1.0, -1.0], // interval 1: clean
         ];
-        let (_, _, corr) = mec_partition_reads(&m, 0.0);
+        let (_, corr) = mec_partition_reads(&m, 2, 0.0);
         assert_eq!(corr, 1, "exactly one entry should need flipping");
     }
 
@@ -1703,8 +1802,10 @@ mod identify_heterozygous_tests {
         // 1 interval, reads 0-1 vote allele-A, reads 2-3 vote allele-B.
         // Zero-correction 2-2 split should beat any 3-1 split with balance_weight = 1.
         let m = ndarray::array![[1.0, 1.0, -1.0, -1.0]];
-        let (a, b, corr) = mec_partition_reads(&m, 1.0);
+        let (clusters, corr) = mec_partition_reads(&m, 2, 1.0);
         assert_eq!(corr, 0);
+        let a = clusters[0].clone();
+        let b = clusters.get(1).cloned().unwrap_or_default();
         assert_eq!(a.len() + b.len(), 4);
         assert_eq!((a.len() as i64 - b.len() as i64).abs(), 0);
     }
@@ -1718,8 +1819,10 @@ mod identify_heterozygous_tests {
             [ 1.0,  1.0,  1.0, -1.0, -1.0,  0.0],
             [ 1.0,  1.0,  1.0, -1.0, -1.0,  0.0],
         ];
-        let (a, b, corr) = mec_partition_reads(&m, 0.0);
+        let (clusters, corr) = mec_partition_reads(&m, 2, 0.0);
         assert_eq!(corr, 0, "missing reads must not add corrections");
+        let a = clusters[0].clone();
+        let b = clusters.get(1).cloned().unwrap_or_default();
         // Reads 0-2 and 3-4 should land in opposite groups; read 5 can be anywhere.
         let a_set: std::collections::HashSet<usize> = a.into_iter().collect();
         let b_set: std::collections::HashSet<usize> = b.into_iter().collect();
@@ -1732,7 +1835,7 @@ mod identify_heterozygous_tests {
     }
 
     #[test]
-    fn mec_kcmec_falls_back_when_too_many_flips_needed() {
+    fn mec_clusters_block_pattern_over_noisy_site() {
         // Interval 0 alternates (+/-), intervals 1-3 are block (+/+/+/-/-/-).
         // The optimal split {0,1,2}|{3,4,5} satisfies intervals 1-3 perfectly
         // and costs 2 corrections at interval 0 (reads 1 and 4).
@@ -1742,8 +1845,9 @@ mod identify_heterozygous_tests {
             [ 1.0,  1.0,  1.0, -1.0, -1.0, -1.0], // interval 2
             [ 1.0,  1.0,  1.0, -1.0, -1.0, -1.0], // interval 3
         ];
-        let (a, b, corr) = mec_partition_reads(&m, 0.0);
-        assert_eq!(a.len() + b.len(), 6);
+        let (clusters, corr) = mec_partition_reads(&m, 2, 0.0);
+        let total: usize = clusters.iter().map(|c| c.len()).sum();
+        assert_eq!(total, 6);
         assert!(corr <= 3, "should produce a reasonable partition");
     }
 
