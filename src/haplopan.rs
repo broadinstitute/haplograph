@@ -1,6 +1,7 @@
 use anyhow::Result;
 use std::process::Command;
 use log::info;
+use rust_htslib::bam::Read as BamRead;
 use std::path::PathBuf;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -8,33 +9,10 @@ use bio::io::fasta::Reader as FastaReader;
 use flate2::read::GzDecoder;
 use std::collections::{HashMap, HashSet};
 use crate::util;
-use rust_htslib::bam::Read as BamRead;
-use rust_htslib::bam::record::{Cigar, CigarString};
 use ndarray::Array2;
 use nalgebra::DMatrix;
 use std::f64;
 use rayon::prelude::*;
-
-
-fn cigar_to_cigarstr(cigar: &Vec<(u32, u8)>) -> CigarString {
-    let op_vec: Vec<Cigar> = cigar
-        .to_owned()
-        .iter()
-        .map(|(len, op)| match op {
-            0 => Cigar::Match(*len),
-            1 => Cigar::Ins(*len),
-            2 => Cigar::Del(*len),
-            3 => Cigar::RefSkip(*len),
-            4 => Cigar::SoftClip(*len),
-            5 => Cigar::HardClip(*len),
-            6 => Cigar::Pad(*len),
-            7 => Cigar::Equal(*len),
-            8 => Cigar::Diff(*len),
-            _ => panic!("Unexpected cigar operation"),
-        })
-        .collect();
-    CigarString(op_vec)
-}
 
 
 pub fn count_kmer(sequence: &String, rollingkmer_list: &Vec<usize>) -> HashMap<String, i32> {
@@ -314,91 +292,6 @@ fn realign_minimap2(
 
     Ok(())
 }
-// fn realign_rust_htslib(
-//     ref_fa: &PathBuf,
-//     read_seq_dict: &HashMap<String, (String, Vec<u8>)>,
-//     out_bam: &PathBuf,
-//     data_technology: &String,
-// ) -> anyhow::Result<()> {
-
-    // // Build minimap2 index
-    // let aligner = if data_technology == "hifi" || data_technology == "pacbio" {
-    //     println!("Building minimap2 index for hifi/pacbio");
-    //     Aligner::builder()
-    //         .asm5()
-    //         .with_cigar()
-    //         .with_index(ref_fa, None)
-    //         .expect("Unable to build minimap2 index")
-    // } else if data_technology == "ont" || data_technology == "nanopore" {
-    //     Aligner::builder()
-    //         .map_ont()
-    //         .with_cigar()
-    //         .with_index(ref_fa, None)
-    //         .expect("Unable to build minimap2 index")
-    // }else if data_technology == "ont-r10" {
-    //     Aligner::builder()
-    //         .lrhq()
-    //         .with_cigar()
-    //         .with_index(ref_fa, None)
-    //         .expect("Unable to build minimap2 index")
-    // }else if data_technology == "sr" {
-    //     Aligner::builder()
-    //         .sr()
-    //         .with_cigar()
-    //         .with_index(ref_fa, None)
-    //         .expect("Unable to build minimap2 index")
-    // }else{
-    //     Aligner::builder()
-    //     .map_pb()
-    //     .with_cigar()
-    //     .with_index(ref_fa, None)
-    //     .expect("Unable to build minimap2 index")
-    // };
-
-    // Build Header
-    // Build BAM header from reference FASTA
-    // let mut header = Header::new();
-    // //use populate header from reference FASTA file
-    // let mut ref_fa_reader = fasta::Reader::from_file(ref_fa)?;
-    // for rec in ref_fa_reader.records() {
-    //     let rec = rec?;
-    //     let mut sq = HeaderRecord::new(b"SQ");
-    //     sq.push_tag(b"SN", &rec.id());
-    //     sq.push_tag(b"LN", &rec.seq().len());
-    //     header.push_record(&sq);
-    // }
-    // let header_view = HeaderView::from_header(&header);
-
-    // let mut writer = Writer::from_path(out_bam, &header, Format::Bam)?;
-
-    // Align reads and write BAM
-    // convert bam to fastq
-
-    // let results = read_seq_dict.par_iter().map(|(read_id, (read_seq, qual))| {
-    //     let alns = aligner
-    //         .map(read_seq.as_bytes(), true, true, None, None, Some(read_id.as_bytes()))
-    //         .unwrap();
-    //     alns.iter()
-    //         .map(|aln| {
-    //             aln.to_sam_record(header_view)
-    //         })
-    //         .collect::<Vec<_>>()
-    // }).collect::<Vec<_>>();
-
-    // // sort results by alignment position
-    // let mut final_results = results.iter().flatten().collect::<Vec<_>>();
-    // final_results.sort_by_key(|r| (r.tid(), r.pos()));
-    // for record in final_results.iter() {
-    //     writer.write(&record).unwrap();
-        
-    // }
-
-    // drop(writer);
-    // index::build(out_bam, None, index::Type::Bai, 1)?;
-
-//     Ok(())
-// }
-
 pub fn start(
     read_path: &PathBuf,
     pangenome_path: &PathBuf,

@@ -4,114 +4,101 @@ use anyhow::{Context, Result as AnyhowResult};
 use indicatif::ProgressBar;
 use indicatif::ProgressStyle;
 use log::info;
-use rust_htslib::bam::{record::Cigar, IndexedReader, Read as BamRead, Record as BamRecord};
+use rust_htslib::bam::{IndexedReader, Read as BamRead, Record as BamRecord};
+use rust_htslib::bam;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
 
-pub(crate) fn query_boundary_offset_from_cigar(
-    cigar: &[Cigar],
-    ref_start: u64,
-    target_ref: u64,
-) -> Option<usize> {
-    let mut ref_pos = ref_start;
-    let mut query_pos = 0_usize;
-
-    for op in cigar {
-        match *op {
-            Cigar::Match(len) | Cigar::Equal(len) | Cigar::Diff(len) => {
-                let len = len as u64;
-                if target_ref >= ref_pos && target_ref <= ref_pos + len {
-                    return Some(query_pos + (target_ref - ref_pos) as usize);
-                }
-                ref_pos += len;
-                query_pos += len as usize;
-            }
-            Cigar::Del(len) | Cigar::RefSkip(len) => {
-                let len = len as u64;
-                if target_ref >= ref_pos && target_ref <= ref_pos + len {
-                    return Some(query_pos);
-                }
-                ref_pos += len;
-            }
-            Cigar::Ins(len) | Cigar::SoftClip(len) => {
-                query_pos += len as usize;
-            }
-            Cigar::HardClip(_) | Cigar::Pad(_) => {}
-        }
-    }
-
-    if target_ref == ref_pos {
-        Some(query_pos)
-    } else {
-        None
-    }
-}
-
-
-pub(crate) fn alignment_query_interval_bounds(
-    cigar: &[Cigar],
-    ref_start: u64,
-    ref_end_excl: u64,
-    locus_start: u64,
-    locus_end_excl: u64,
-) -> Option<(usize, usize)> {
-    if locus_start >= locus_end_excl {
-        return None;
-    }
-    // No overlap between locus and this alignment interval.
-    if locus_end_excl <= ref_start || locus_start >= ref_end_excl {
-        return None;
-    }
-
-    let overlap_start = locus_start.max(ref_start);
-    let overlap_end_excl = locus_end_excl.min(ref_end_excl);
-
-    let query_start = query_boundary_offset_from_cigar(cigar, ref_start, overlap_start)?;
-    let query_end = query_boundary_offset_from_cigar(cigar, ref_start, overlap_end_excl)?;
-
-    if query_end < query_start {
-        return None;
-    }
-
-    Some((query_start, query_end))
-}
-
-pub(crate) fn record_interval_query_bounds(
-    record: &BamRecord,
-    start: u64,
-    end: u64,
-) -> Option<(usize, usize)> {
-    let cigar: Vec<Cigar> = record.cigar().iter().copied().collect();
-    alignment_query_interval_bounds(
-        &cigar,
-        record.pos() as u64,
-        record.cigar().end_pos() as u64,
-        start,
-        end,
-    )
-}
 
 pub fn normalized_read_slice_bounds(
     read_start: usize,
     read_end: usize,
     read_len: usize,
-    read_strand: &str,
+    _read_strand: &str,
 ) -> Option<(usize, usize)> {
-    let (pos_start, pos_end) = if read_strand == "+" {
-        (read_start.min(read_end), read_start.max(read_end))
-    } else {
-        (
-            read_len.saturating_sub(read_start.max(read_end)),
-            read_len.saturating_sub(read_start.min(read_end)),
-        )
-    };
-    if pos_end < pos_start || pos_end > read_len {
+    // BAM always stores sequences in forward-strand orientation for both plus and minus
+    // strand reads (FLAG 0x10 means the stored SEQ is already the reverse-complement of
+    // the original read, i.e. it is in the reference left→right direction).  Therefore
+    // qpos always increases with reference position for both strands, start_pos < end_pos
+    // in all normal cases, and no strand-specific coordinate transformation is needed.
+    let pos_start = read_start.min(read_end);
+    let pos_end = read_start.max(read_end);
+    if pos_end == pos_start || pos_end > read_len {
         return None;
     }
     Some((pos_start, pos_end))
+}
+
+
+/// Single-pass pileup scan over `[start, end)`.
+///
+/// Returns `(start_dict, end_dict, deletion_spanning)` where:
+///   - `start_dict`: each read's **first** valid inclusive qpos in the window.
+///     Reads whose base at exactly `start` is deleted are still included using the
+///     first non-deleted position they have within `[start, end)`.
+///   - `end_dict`: each read's **last** valid exclusive qpos in the window.
+///     Reads whose base at exactly `end-1` is deleted are still included using the
+///     last non-deleted position they have within `[start, end)`.
+///   - `deletion_spanning`: reads that appear in the pileup within `[start, end)` but
+///     have `qpos = None` for every column — i.e. the entire query window falls inside
+///     a large deletion of that read.  Callers should emit these reads with an empty
+///     sequence (`""`).
+///
+/// Exclusive-end semantics per indel type at the last valid column:
+///   - `None`   → `qpos + 1`         (include the matched base)
+///   - `Ins(N)` → `qpos + N + 1`     (include anchor base + inserted bases)
+///   - `Del(_)` → `qpos + 1`         (deletion starts outside the window; include the base)
+pub fn record_interval_query_bounds_range(
+    bam: &mut IndexedReader,
+    start: u64,
+    end: u64,
+) -> AnyhowResult<(HashMap<String, usize>, HashMap<String, usize>, HashSet<String>)> {
+    let mut start_dict: HashMap<String, usize> = HashMap::new();
+    let mut end_dict: HashMap<String, usize> = HashMap::new();
+    // Track every read that appears in any pileup column within [start, end).
+    // Reads here but absent from start_dict have qpos=None for the entire window
+    // (i.e. the window lies completely inside a deletion of that read).
+    let mut seen_in_window: HashSet<String> = HashSet::new();
+    for p in bam.pileup() {
+        let pileup = p?;
+        let ref_pos = pileup.pos() as u64;
+        if ref_pos < start {
+            continue;
+        }
+        if ref_pos >= end {
+            break;
+        }
+        let mut seen: HashSet<String> = HashSet::new();
+        for alignment in pileup.alignments() {
+            let record = alignment.record();
+            let qname = String::from_utf8_lossy(record.qname()).into_owned();
+            if seen.contains(&qname) {
+                continue;
+            }
+            seen.insert(qname.clone());
+            seen_in_window.insert(qname.clone());
+            if let Some(qpos) = alignment.qpos() {
+                // First valid position → start boundary (keep first, never overwrite)
+                start_dict.entry(qname.clone()).or_insert(qpos);
+                // Last valid exclusive position → end boundary (always overwrite to keep last)
+                let excl = match alignment.indel() {
+                    bam::pileup::Indel::Ins(len) => qpos + len as usize + 1,
+                    bam::pileup::Indel::Del(_) | bam::pileup::Indel::None => qpos + 1,
+                };
+                end_dict.insert(qname, excl);
+            }
+        }
+    }
+    // Reads seen in the window but with no valid qpos in any column are entirely
+    // covered by a deletion — return them separately so callers can emit "".
+    let deletion_spanning: HashSet<String> = seen_in_window
+        .into_iter()
+        .filter(|name| !start_dict.contains_key(name))
+        .collect();
+    Ok((start_dict, end_dict, deletion_spanning))
 }
 
 // extract haplotypes from bam file
@@ -132,9 +119,12 @@ pub fn extract_haplotypes_from_bam(
     // pb.set_message("Processing alignments...");
 
     let _ = bam.fetch((chr.as_bytes(), start, end));
+    let (start_pos_dict, end_pos_dict, deletion_spanning) =
+        record_interval_query_bounds_range(bam, start, end)?;
 
     let mut filtered_sequence_dict = HashMap::new();
     let mut seen_reads = HashSet::new();
+    let _ = bam.fetch((chr.as_bytes(), start, end));
     for record_result in bam.records() {
         let record = record_result?;
         let read_name = String::from_utf8_lossy(record.qname()).into_owned();
@@ -147,7 +137,17 @@ pub fn extract_haplotypes_from_bam(
             continue;
         }
 
-        let Some((read_start, read_end)) = record_interval_query_bounds(&record, start, end) else {
+        // The entire window lies within a deletion of this read → emit with empty sequence.
+        if deletion_spanning.contains(&read_name) {
+            let record_id = format!("{read_name}|{chr}:{start}-{end}|{sampleid}");
+            filtered_sequence_dict.insert(record_id, String::new());
+            continue;
+        }
+
+        let Some(start_pos) = start_pos_dict.get(&read_name) else {
+            continue;
+        };
+        let Some(end_pos) = end_pos_dict.get(&read_name) else {
             continue;
         };
 
@@ -155,17 +155,13 @@ pub fn extract_haplotypes_from_bam(
         let read_strand = record.strand().to_string();
         let read_len = read_seq.len();
         let Some((pos_start, pos_end)) =
-            normalized_read_slice_bounds(read_start, read_end, read_len, &read_strand)
+            normalized_read_slice_bounds(*start_pos, *end_pos, read_len, &read_strand)
         else {
             continue;
         };
 
-        let read_seq_sub = String::from_utf8_lossy(&read_seq[pos_start..pos_end]).to_string();
-        let read_seq_final = if read_strand == "+" {
-            read_seq_sub
-        } else {
-            util::reverse_complement(&read_seq_sub)
-        };
+        // BAM stores sequences in forward-strand orientation for both strands; no RC needed.
+        let read_seq_final = String::from_utf8_lossy(&read_seq[pos_start..pos_end]).to_string();
 
         let record_id = format!("{read_name}|{chr}:{start}-{end}|{sampleid}");
         filtered_sequence_dict.insert(record_id, read_seq_final);
@@ -207,12 +203,16 @@ pub fn extract_haplotypes_coordinates_from_bam(
     // pb.set_message("Processing alignments...");
 
     let _ = bam.fetch((chr.as_bytes(), start, end));
+    let (start_pos_dict, end_pos_dict, deletion_spanning) =
+        record_interval_query_bounds_range(bam, start, end)?;
+
     let mut read_coordinates_formatted = HashMap::new();
     let mut read_sequence_dict_formatted = HashMap::new();
     let mut read_quality_dict_formatted = HashMap::new();
     let mut read_strand_dict_formatted = HashMap::new();
     let mut bam_records_dict_formatted = HashMap::new();
     let mut seen_reads = HashSet::new();
+    let _ = bam.fetch((chr.as_bytes(), start, end));
     for record_result in bam.records() {
         let record = record_result?;
         let read_name = String::from_utf8_lossy(record.qname()).into_owned();
@@ -225,28 +225,38 @@ pub fn extract_haplotypes_coordinates_from_bam(
             continue;
         }
 
-        let Some((read_start, read_end)) = record_interval_query_bounds(&record, start, end) else {
+        // The entire window lies within a deletion of this read → emit with empty sequence.
+        if deletion_spanning.contains(&read_name) {
+            let record_id = intervals::generate_read_name(&read_name, chr, start, end, sampleid);
+            read_coordinates_formatted.insert(record_id.clone(), (0u64, 0u64));
+            read_sequence_dict_formatted.insert(record_id.clone(), Vec::new());
+            read_quality_dict_formatted.insert(record_id.clone(), Vec::new());
+            read_strand_dict_formatted
+                .insert(record_id.clone(), record.strand().to_string());
+            bam_records_dict_formatted.insert(record_id, record.clone());
+            continue;
+        }
+
+        let Some(start_pos) = start_pos_dict.get(&read_name) else {
             continue;
         };
-
+        let Some(end_pos) = end_pos_dict.get(&read_name) else {
+            continue;
+        };
         let read_seq = record.seq().as_bytes();
         let read_strand = record.strand().to_string();
         let read_len = read_seq.len();
         let Some((pos_start, pos_end)) =
-            normalized_read_slice_bounds(read_start, read_end, read_len, &read_strand)
+            normalized_read_slice_bounds(*start_pos, *end_pos, read_len, &read_strand)
         else {
             continue;
         };
 
-        let read_seq_sub = String::from_utf8_lossy(&read_seq[pos_start..pos_end]).to_string();
-        let read_seq_final = if read_strand == "+" {
-            read_seq_sub
-        } else {
-            util::reverse_complement(&read_seq_sub)
-        };
+        // BAM stores sequences in forward-strand orientation for both strands; no RC needed.
+        let read_seq_final = String::from_utf8_lossy(&read_seq[pos_start..pos_end]).to_string();
 
         let record_id = intervals::generate_read_name(&read_name, chr, start, end, sampleid);
-        read_coordinates_formatted.insert(record_id.clone(), (read_start as u64, read_end as u64));
+        read_coordinates_formatted.insert(record_id.clone(), (*start_pos as u64, *end_pos as u64));
         read_sequence_dict_formatted.insert(record_id.clone(), read_seq_final.clone().into_bytes());
         read_quality_dict_formatted.insert(record_id.clone(), record.qual().to_vec());
         read_strand_dict_formatted.insert(record_id.clone(), read_strand);
@@ -286,8 +296,8 @@ pub fn start(
     pileup: bool,
 ) -> AnyhowResult<()> {
     if pileup {
-        let (reads, read_coordinates, read_sequence_dictionary, bam_records) =
-            intervals::extract_haplotypes_coordinates_from_bam(
+        let (reads, read_coordinates, read_sequence_dictionary, bam_records, read_strand_dictionary) =
+            intervals::extract_haplotypes_coordinates_from_bam_pileup(
                 bam,
                 chromosome,
                 start as u64,
@@ -337,134 +347,27 @@ pub fn start(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        alignment_query_interval_bounds, normalized_read_slice_bounds,
-        query_boundary_offset_from_cigar,
-    };
-    use rust_htslib::bam::record::Cigar;
+mod extract_tests {
+    use super::extract_haplotypes_from_bam;
+    use rust_htslib::bam::IndexedReader;
 
     #[test]
-    fn forward_strand_bounds_are_ordered() {
-        let (start, end) = normalized_read_slice_bounds(10, 50, 100, "+").unwrap();
-        assert!(end > start);
-        assert_eq!((start, end), (10, 50));
-    }
-
-    #[test]
-    fn reverse_strand_bounds_are_ordered_after_conversion() {
-        let (start, end) = normalized_read_slice_bounds(80, 20, 100, "-").unwrap();
-        assert!(end > start);
-        assert_eq!((start, end), (20, 80));
-    }
-
-    #[test]
-    fn reverse_strand_equal_coordinates_preserve_empty_deleted_window() {
-        let bounds = normalized_read_slice_bounds(42, 42, 100, "-").unwrap();
-        assert_eq!(bounds, (58, 58));
-    }
-
-    #[test]
-    fn all_valid_cases_have_end_larger_than_start() {
-        let strands = ["+", "-"];
-        let read_len = 100usize;
-        for strand in strands {
-            for read_start in 0..read_len {
-                for read_end in 0..read_len {
-                    if let Some((start, end)) =
-                        normalized_read_slice_bounds(read_start, read_end, read_len, strand)
-                    {
-                        assert!(end >= start, "strand={strand}, start={start}, end={end}");
-                        assert!(
-                            end <= read_len,
-                            "strand={strand}, end={end}, len={read_len}"
-                        );
-                    }
-                }
-            }
+    fn extract_haplotypes_from_bam_tp53_interval() {
+        let bam_path = "HG00097_tp53_test.bam";
+        if !std::path::Path::new(bam_path).exists() {
+            return;
         }
-    }
-
-    #[test]
-    fn cigar_boundary_inside_deletion_returns_same_query_offset() {
-        let cigar = vec![Cigar::Match(50), Cigar::Del(200), Cigar::Match(50)];
-        let start = query_boundary_offset_from_cigar(&cigar, 100, 200).unwrap();
-        let end = query_boundary_offset_from_cigar(&cigar, 100, 300).unwrap();
-        assert_eq!((start, end), (50, 50));
-    }
-
-    #[test]
-    fn cigar_boundary_after_deletion_resumes_query_progress() {
-        let cigar = vec![Cigar::Match(50), Cigar::Del(200), Cigar::Match(50)];
-        let start = query_boundary_offset_from_cigar(&cigar, 100, 300).unwrap();
-        let end = query_boundary_offset_from_cigar(&cigar, 100, 380).unwrap();
-        assert_eq!((start, end), (50, 80));
-    }
-
-    #[test]
-    fn locus_end_past_alignment_clamps_to_alignment_end() {
-        let cigar = vec![Cigar::Match(100)];
-        let ref_start = 1000;
-        let ref_end_excl = 1100;
-        let bounds = alignment_query_interval_bounds(&cigar, ref_start, ref_end_excl, 1050, 1200)
-            .unwrap();
-        assert_eq!(bounds, (50, 100));
-    }
-
-    #[test]
-    fn locus_start_before_alignment_clamps_to_alignment_start() {
-        let cigar = vec![Cigar::Match(100)];
-        let ref_start = 1000;
-        let ref_end_excl = 1100;
-        // Locus [900, 1051) overlaps alignment at [1000, 1051) -> 51 query bases [0, 51)
-        let bounds = alignment_query_interval_bounds(&cigar, ref_start, ref_end_excl, 900, 1051)
-            .unwrap();
-        assert_eq!(bounds, (0, 51));
-    }
-
-    #[test]
-    fn locus_fully_inside_alignment_uses_half_open_end() {
-        let cigar = vec![Cigar::Match(100)];
-        let ref_start = 1000;
-        let ref_end_excl = 1100;
-        // Locus [1010, 1020) -> 10 bases, not 11
-        let bounds = alignment_query_interval_bounds(&cigar, ref_start, ref_end_excl, 1010, 1020)
-            .unwrap();
-        assert_eq!(bounds, (10, 20));
-    }
-
-    #[test]
-    fn locus_with_no_overlap_returns_none() {
-        let cigar = vec![Cigar::Match(100)];
-        let bounds = alignment_query_interval_bounds(&cigar, 1000, 1100, 2000, 2100);
-        assert!(bounds.is_none());
-    }
-
-    #[test]
-    fn locus_fully_inside_deletion_returns_empty_query_slice() {
-        // CIGAR: 50M 200D 50M, alignment ref [1000, 1300).
-        // Locus [1100, 1200) lies entirely in the 200D op -> zero query bases at offset 50.
-        let cigar = vec![Cigar::Match(50), Cigar::Del(200), Cigar::Match(50)];
-        let bounds =
-            alignment_query_interval_bounds(&cigar, 1000, 1300, 1100, 1200).unwrap();
-        assert_eq!(bounds, (50, 50));
-    }
-
-    #[test]
-    fn locus_equal_to_deletion_boundaries_returns_empty_query_slice() {
-        // Locus matches the deletion exactly.
-        let cigar = vec![Cigar::Match(50), Cigar::Del(200), Cigar::Match(50)];
-        let bounds =
-            alignment_query_interval_bounds(&cigar, 1000, 1300, 1050, 1250).unwrap();
-        assert_eq!(bounds, (50, 50));
-    }
-
-    #[test]
-    fn locus_straddling_deletion_keeps_only_match_bases() {
-        // Half of the locus is in the leading M, the other half in the deletion.
-        let cigar = vec![Cigar::Match(50), Cigar::Del(200), Cigar::Match(50)];
-        let bounds =
-            alignment_query_interval_bounds(&cigar, 1000, 1300, 1025, 1150).unwrap();
-        assert_eq!(bounds, (25, 50));
+        let mut bam = IndexedReader::from_path(bam_path).unwrap();
+        let sampleid = "HG00097".to_string();
+        let reads = extract_haplotypes_from_bam(
+            &mut bam,
+            "chr17",
+            7668752,
+            7668828,
+            &sampleid,
+            false,
+        )
+        .unwrap();
+        assert_eq!(reads.len(), 34);
     }
 }

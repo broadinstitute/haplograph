@@ -6,7 +6,6 @@ use itertools::Itertools;
 use log::{info, debug};
 use minimap2::Aligner;
 use rayon::prelude::*;
-use rust_htslib::bam::Read as BamRead;
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;

@@ -13,8 +13,6 @@ use std::io::Write;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::path::PathBuf;
-use ndarray::s;
-use rayon::prelude::*;
 use csv::Writer;
 
 #[derive(Debug, Clone)]
@@ -25,14 +23,6 @@ pub struct NodeInfo {
     pub allele_frequency: String,
     pub read_names: String,
     pub methyl_info: HashMap<usize, f32>,
-}
-
-#[derive(Debug, Clone)]
-pub struct EdgeInfo {
-    pub src: String,
-    pub dst: String,
-    pub overlap_ratio: f64,
-    pub overlapping_reads: String,
 }
 
 pub fn load_graph(
@@ -75,7 +65,6 @@ pub fn load_graph(
             } else {
                 HashMap::new()
             };
-            // let methyl_info_dict = methyl_info.iter().map(|x| x.split(":").collect::<Vec<_>>()).collect::<Vec<_>>().iter().map(|x| (x[0].parse::<usize>().unwrap(), x[1].parse::<f32>().unwrap())).collect::<HashMap<usize, f32>>();
             let value_info = NodeInfo {
                 seq: seq.to_string(),
                 cigar: value["cigar"].to_string(),
@@ -253,7 +242,6 @@ pub fn identify_heterozygous_nodes(
                 .entry((*interval_name).clone())
                 .or_default()
                 .extend(nodes.clone());
-            // println!("heterozygous_nodes: {:?}", nodes.clone().into_iter().collect::<Vec<_>>().join(", "));
         }
     }
     heterozygous_nodes
@@ -629,14 +617,6 @@ fn construct_het_interval_matrix(
     }
     println!("het_nodes: {:?}", het_nodes.len());
     het_nodes.sort_by(|a, b| a.cmp(b));
-    // let mut intervals: Vec<&String> = heterozygous_nodes.keys().collect();
-    // // println!("intervals: {:?}", intervals);
-
-    // intervals.sort_by(|a, b| {
-    //     util::split_locus((*a).clone())
-    //         .1
-    //         .cmp(&util::split_locus((*b).clone()).1)
-    // });
 
     let n_reads = read_list.len();
     let n_rows = het_nodes.len();
@@ -730,200 +710,6 @@ pub fn assign_node_to_reads(
     read_to_nodes
 }
 
-pub fn assign_haplotype_nodes(
-    node_info: &HashMap<String, NodeInfo>,
-    haplotype_reads: &HashMap<usize, HashSet<String>>,
-) -> HashMap<usize, HashSet<String>> {
-    let read_to_nodes = assign_node_to_reads(node_info);
-    let mut haplotype_nodes = HashMap::new();
-    for (haplotype, reads) in haplotype_reads.iter() {
-        for r in reads {
-            haplotype_nodes
-                .entry(*haplotype)
-                .or_insert(HashSet::new())
-                .extend(read_to_nodes.get(r).unwrap().iter().cloned());
-        }
-    }
-    haplotype_nodes
-}
-
-pub fn find_unassigned_reads(
-    node_info: &HashMap<String, NodeInfo>,
-    haplotype_reads: &HashMap<usize, HashSet<String>>,
-) -> HashSet<String> {
-    let mut assigned_reads = HashSet::new();
-    for reads in haplotype_reads.values() {
-        assigned_reads.extend(reads.iter().cloned());
-    }
-    let all_reads = find_all_reads(node_info);
-    all_reads.difference(&assigned_reads).cloned().collect()
-}
-
-pub fn construct_heterozygous_nodes_matrix(
-    node_info: &HashMap<String, NodeInfo>,
-    node_list: Vec<String>,
-) -> Array2<f64> {
-    let mut read_vec = HashSet::new();
-    for node in node_list.iter() {
-        let read_name_list = get_read_name_list(node_info, node.clone());
-        read_vec.extend(read_name_list.iter().cloned());
-    }
-    let read_list = read_vec.iter().cloned().collect::<Vec<_>>();
-    let mut matrix = Array2::<f64>::zeros((node_list.len(), read_list.len()));
-    for (n_index, node_name) in node_list.iter().enumerate() {
-        let read_name_list = get_read_name_list(node_info, node_name.clone());
-        for read in read_name_list {
-            let read_index = read_list.iter().position(|x| x == &read).unwrap();
-            matrix[[n_index, read_index]] = 1.0;
-        }
-    }
-    matrix
-}
-
-const MAX_NODE_PER_CHUNK: usize = 200;
-pub fn filter_heterozygous_nodes(
-    node_info: &HashMap<String, NodeInfo>,
-    heterozygous_nodes: &HashMap<String, HashSet<String>>,
-) -> HashMap<String, HashSet<String>> {
-    let mut nodelist = HashSet::new();
-    for (interval_name, node_set) in heterozygous_nodes.iter() {
-        nodelist.extend(node_set.iter().cloned());
-    }
-    let node_list = nodelist.iter().cloned().collect::<Vec<_>>();
-    let matrix = construct_heterozygous_nodes_matrix(node_info, node_list.clone());
-    let node_list_filtered: Vec<String> = if matrix.shape()[0] > MAX_NODE_PER_CHUNK {
-        let n_rows = matrix.shape()[0];
-        let chunk_num = n_rows / MAX_NODE_PER_CHUNK;
-        let chunks_filtered: Vec<String> = (0..chunk_num)
-            .into_par_iter()
-            .flat_map_iter(|i| {
-                let raw_start = i * MAX_NODE_PER_CHUNK;
-                let (start, end) = if raw_start + MAX_NODE_PER_CHUNK > n_rows {
-                    (n_rows - MAX_NODE_PER_CHUNK, n_rows)
-                } else {
-                    (raw_start, raw_start + MAX_NODE_PER_CHUNK)
-                };
-                let chunk = matrix.slice(s![start..end, ..]).to_owned();
-                let node_list_chunk = node_list[start..end].to_vec();
-                util::permutation_test(&chunk, 0.5, 10, node_list_chunk).into_iter()
-            })
-            .collect();
-        chunks_filtered.into_iter().collect::<HashSet<_>>().into_iter().collect()
-    } else {
-        util::permutation_test(&matrix, 0.5, 10, node_list.clone())
-    };
-    let mut filtered_heterozygous_nodes = HashMap::new();
-    for node_id in node_list_filtered.iter() {
-        let interval_name = node_id.split(".").collect::<Vec<_>>()[1].to_string();
-        filtered_heterozygous_nodes
-            .entry(interval_name.clone())
-            .or_insert(HashSet::new())
-            .insert(node_id.clone());
-    }
-    filtered_heterozygous_nodes
-}
-
-// pub fn assign_unassigned_reads(
-//     node_info: &HashMap<String, NodeInfo>,
-//     haplotype_reads: &HashMap<usize, HashSet<String>>
-// ) -> (
-//     HashMap<usize, HashSet<String>>,
-//     HashMap<usize, HashSet<String>>,
-// ) {
-//     let haplotype_nodes = assign_haplotype_nodes(node_info, haplotype_reads);
-//     let read_to_nodes = assign_node_to_reads(node_info);
-//     let unassigned_reads = find_unassigned_reads(node_info, haplotype_reads);
-//     let mut haplotype_reads_new = haplotype_reads.clone();
-//     let mut haplotype_nodes_new = haplotype_nodes.clone();
-//     for read in unassigned_reads {
-//         let read_nodes = read_to_nodes.get(&read).unwrap();
-//         let mut find_haplotype = false;
-//         for (haplotype, hap_nodes) in haplotype_nodes.iter() {
-//             let overlap_nodes = hap_nodes
-//                 .intersection(read_nodes)
-//                 .cloned()
-//                 .collect::<HashSet<_>>();
-//             if !overlap_nodes.is_empty() {
-//                 haplotype_reads_new
-//                     .entry(*haplotype)
-//                     .or_default()
-//                     .insert(read.clone());
-//                 haplotype_nodes_new
-//                     .entry(*haplotype)
-//                     .or_default()
-//                     .extend(read_nodes.clone());
-//                 find_haplotype = true;
-//             }
-//         }
-//         // homologous reads
-//         if !find_haplotype {
-//             for hap in haplotype_reads_new.clone().keys() {
-//                 haplotype_reads_new
-//                     .entry(*hap)
-//                     .or_default()
-//                     .insert(read.clone());
-//                 haplotype_nodes_new
-//                     .entry(*hap)
-//                     .or_default()
-//                     .extend(read_nodes.clone());
-//             }
-//         }
-//     }
-//     (haplotype_reads_new, haplotype_nodes_new)
-// }
-
-pub fn assign_unassigned_reads(
-    node_info: &HashMap<String, NodeInfo>,
-    haplotype_reads: &HashMap<usize, HashSet<String>>,
-) -> (
-    HashMap<usize, HashSet<String>>,
-    HashMap<usize, HashSet<String>>,
-) {
-    let haplotype_nodes = assign_haplotype_nodes(node_info, haplotype_reads);
-    let read_to_nodes = assign_node_to_reads(node_info);
-    let unassigned_reads = find_unassigned_reads(node_info, haplotype_reads);
-    let mut haplotype_reads_new = haplotype_reads.clone();
-    let mut haplotype_nodes_new = haplotype_nodes.clone();
-    for read in unassigned_reads {
-        let read_nodes = read_to_nodes.get(&read).unwrap();
-        // let mut max_overlap = 0;
-        // let mut max_haplotype = 100;
-        let mut find_haplotype = false;
-        for (haplotype, hap_nodes) in haplotype_nodes.iter() {
-            let overlap_nodes = hap_nodes
-                .intersection(read_nodes)
-                .cloned()
-                .collect::<HashSet<_>>();
-            if !overlap_nodes.is_empty() {
-                haplotype_reads_new
-                    .entry(*haplotype)
-                    .or_default()
-                    .insert(read.clone());
-                haplotype_nodes_new
-                    .entry(*haplotype)
-                    .or_default()
-                    .extend(read_nodes.clone());
-                find_haplotype = true;
-            }
-        }
-        // homologous reads
-        if !find_haplotype {
-            for hap in haplotype_reads_new.clone().keys() {
-                haplotype_reads_new
-                    .entry(*hap)
-                    .or_default()
-                    .insert(read.clone());
-                haplotype_nodes_new
-                    .entry(*hap)
-                    .or_default()
-                    .extend(read_nodes.clone());
-            }
-        }
-    }
-    (haplotype_reads_new, haplotype_nodes_new)
-}
-
-
 pub fn find_most_supported_path(
     node_info: &HashMap<String, NodeInfo>,
 ) -> HashMap<String, HashSet<usize>> {
@@ -971,15 +757,6 @@ pub fn assign_haplotype_to_nodes(
         }
     }
     node_haplotype
-}
-
-pub fn find_all_reads(node_info: &HashMap<String, NodeInfo>) -> HashSet<String> {
-    let mut all_reads = HashSet::new();
-    for (node, node_infomation) in node_info.iter() {
-        let read_names = get_read_name_list(node_info, node.clone());
-        all_reads.extend(read_names.iter().cloned());
-    }
-    all_reads
 }
 
 pub fn get_read_name_list(
@@ -1042,7 +819,6 @@ pub fn enumerate_all_paths_with_haplotype(
     Ok(all_paths)
 }
 
-// /// Recursive DFS to find all paths from a starting node
 fn dfs_traverse_with_haplotype_constrains(
     current_node: &String,
     edge_info: &HashMap<String, Vec<String>>,
@@ -1062,11 +838,6 @@ fn dfs_traverse_with_haplotype_constrains(
         return;
     }
 
-    // if haplotype_index.contains(&1) {
-    //     println!("current_node: {:?}, haplotype_index: {:?}", current_node, haplotype_index);
-    // }
-
-    
     let next_nodes = edge_info.get(current_node).unwrap();
     for next_node in next_nodes {
         let haplotypes_next = if node_haplotype.contains_key(next_node) {
@@ -1087,7 +858,7 @@ fn dfs_traverse_with_haplotype_constrains(
             &mut haplotype_intersection_clone,
             node_haplotype,
         );
-        current_path.pop(); // Backtrack
+        current_path.pop();
     }
 }
 
@@ -1095,7 +866,6 @@ pub fn construct_sequences_from_haplotype_path(
     node_info: &HashMap<String, NodeInfo>,
     all_paths: &Vec<(Vec<String>, HashSet<usize>)>,
 ) -> HashMap<usize, Vec<(Vec<String>, String, HashSet<String>)>> {
-    // Get the sequence of each path
     let mut all_sequences = HashMap::new();
     for (path_index, (path, haplotype_index)) in all_paths.iter().enumerate() {
         let mut sequence = String::new();
@@ -1106,9 +876,7 @@ pub fn construct_sequences_from_haplotype_path(
                 node, path));
             let read_names_list_clone = get_read_name_list(node_info, node.clone());
             read_names.extend(read_names_list_clone.clone());
-            let haplotype_seq = node_info_dict.seq.clone();
-            sequence += &haplotype_seq;
-            // total_supported_reads += supported_reads;
+            sequence += &node_info_dict.seq;
         }
         for hap_ind in haplotype_index.iter() {
             info!(
@@ -1149,7 +917,6 @@ pub fn write_graph_path_fasta(
             path.join("|")
         )?;
 
-        // write the sequence in fasta format
         let seq_len = sequence.len();
         let full_lines = seq_len / chars_per_line;
         for i in 0..full_lines {
@@ -1157,7 +924,6 @@ pub fn write_graph_path_fasta(
             let end = start + chars_per_line;
             writeln!(file, "{}", &sequence[start..end])?;
         }
-        // Write any remaining characters that didn't make up a full line
         if seq_len % chars_per_line != 0 {
             writeln!(file, "{}", &sequence[full_lines * chars_per_line..])?;
         }
@@ -1178,10 +944,8 @@ pub fn find_full_range_haplotypes(
     node_info: &HashMap<String, NodeInfo>,
     all_sequences: &HashMap<usize, Vec<(Vec<String>, String, HashSet<String>)>>,
 ) -> HashMap<usize, (Vec<String>, String, HashSet<String>, usize, usize)> {
-    // let full_range = eval::find_alignment_intervals(node_list.iter().map(|x| x.as_str()).collect::<Vec<_>>()).unwrap();
     let mut best_paths = HashMap::new();
     for (hap_index, path_list) in all_sequences.iter() {
-        // for each haplotype, select the best path
         let mut full_sequences = Vec::new();
         for (index, (path, sequence, supported_reads)) in path_list.iter().enumerate() {
             let (start, end) =
@@ -1204,8 +968,6 @@ pub fn find_full_range_haplotypes(
                 end - start,
             ));
         }
-        // first compare the 4th element, then the 3th element
-        // full_sequences.sort_by(|a, b| b.3.cmp(&a.3).then(b.4.cmp(&a.4)));
         full_sequences.sort_by(|a, b| b.4.cmp(&a.4).then(b.3.cmp(&a.3)));
         best_paths.insert(*hap_index, full_sequences[0].clone());
     }
@@ -1225,120 +987,6 @@ pub fn find_parallele_nodes_from_nodelist(
     }
     interval_node
 }
-
-// pub fn filter_haplotype_nodes(
-//     node_info: &HashMap<String, NodeInfo>,
-//     haplotype_nodes: &HashMap<usize, HashSet<String>>,
-//     haplotype_reads: &HashMap<usize, HashSet<String>>,
-// ) -> HashMap<usize, HashSet<String>> {
-//     let interval_all_nodes = find_parallele_nodes_from_nodelist(
-//         &node_info.keys().cloned().collect::<Vec<_>>(),
-//     );
-
-
-//     let mut filtered_haplotype_nodes = HashMap::new();
-
-//     for (hap, node_list) in haplotype_nodes.iter() {
-//         let interval_node =
-//             find_parallele_nodes_from_nodelist(&node_list.iter().cloned().collect::<Vec<_>>());
-//         let mut interval_list = interval_node.keys().collect::<Vec<_>>();
-//         interval_list.sort_by(|a, b| {
-//             util::split_locus((*a).clone())
-//                 .1
-//                 .cmp(&util::split_locus((*b).clone()).1)
-//         });
-
-//         let read_list = haplotype_reads.get(hap).cloned().unwrap_or_default();
-//         for interval in interval_list.iter() {
-//             let all_nodes = interval_all_nodes.get(*interval).cloned().unwrap_or_default();
-//             let mut all_nodes_list = all_nodes.into_iter().collect::<Vec<_>>();
-//             all_nodes_list.sort_by(|a, b| {
-//                 node_info
-//                     .get(b)
-//                     .unwrap()
-//                     .support_reads
-//                     .cmp(&node_info.get(a).unwrap().support_reads)
-//             });
-//             if all_nodes_list.is_empty() {
-//                 continue;
-//             }
-
-//             let nodes = interval_node.get(*interval).cloned().unwrap_or_default();
-//             if nodes.is_empty() {
-//                 warn!("hap: {:?}, interval: {:?}, nodes: {:?}", hap, interval, nodes.len());
-//                 filtered_haplotype_nodes
-//                     .entry(*hap)
-//                     .or_insert(HashSet::new())
-//                     .insert(all_nodes_list[0].clone());
-//                 continue;
-//             }
-
-//             if nodes.len() == 1 {
-//                 filtered_haplotype_nodes
-//                     .entry(*hap)
-//                     .or_insert(HashSet::new())
-//                     .insert(nodes.iter().next().unwrap().clone());
-//                 continue;
-//             }
-
-//             // More than one node: choose the one with max read agreement for this haplotype.
-//             let minimal_read_count = 1usize;
-//             let mut best_node: Option<String> = None;
-//             let mut best_intersection = 0usize;
-
-//             for node in &nodes {
-//                 let node_read_names = get_read_name_list(node_info, node.clone());
-//                 let intersection_count = read_list.intersection(&node_read_names).count();
-//                 if intersection_count > best_intersection {
-//                     best_intersection = intersection_count;
-//                     best_node = Some(node.clone());
-//                 } else if intersection_count == best_intersection && best_node.is_some() {
-//                     // Deterministic tie-break: higher support, then lexicographically smaller ID.
-//                     let current = best_node.as_ref().unwrap();
-//                     let node_support = node_info.get(node).unwrap().support_reads;
-//                     let current_support = node_info.get(current).unwrap().support_reads;
-//                     if node_support > current_support
-//                         || (node_support == current_support && node < current)
-//                     {
-//                         best_node = Some(node.clone());
-//                     }
-//                 }
-//             }
-
-//             let chosen = if best_intersection >= minimal_read_count {
-//                 best_node.unwrap()
-//             } else {
-//                 warn!(
-//                     "hap: {}, interval: {}, low agreement among nodes: {}",
-//                     hap,
-//                     interval,
-//                     nodes.iter().cloned().collect::<Vec<_>>().join(", ")
-//                 );
-//                 all_nodes_list[0].clone()
-//             };
-//             filtered_haplotype_nodes
-//                 .entry(*hap)
-//                 .or_insert(HashSet::new())
-//                 .insert(chosen);
-//         }
-//     }
-
-//     // validation
-//     for (hap, node_list) in filtered_haplotype_nodes.iter() {
-//         let interval_node = find_parallele_nodes_from_nodelist(
-//             &node_list.iter().cloned().collect::<Vec<_>>(),
-//         );
-//         let mut interval_list = interval_node.keys().collect::<Vec<_>>();
-//         interval_list.sort(); // ascending order a < b
-//         for interval in interval_list.iter() {
-//             let nodes = interval_node.get(*interval).unwrap().clone();
-//             if nodes.len() != 1 {
-//                 warn!("hap: {:?}, interval: {:?}, nodes: {:?}", hap, interval, nodes.len());
-//             }
-//         }
-//     }
-//     filtered_haplotype_nodes
-// }
 
 /// Assign every graph interval at least one node per haplotype.
 ///
@@ -1461,34 +1109,10 @@ pub fn find_node_haplotype(
     }else if hap_number == 2 {
         let heterozygous_nodes = identify_heterozygous_nodes(node_info, hap_number);
         info!("heterozygous_nodes: {:?}", heterozygous_nodes.len());
-        // let filtered_heterozygous_nodes = filter_heterozygous_nodes(node_info, &heterozygous_nodes);
-        // info!(
-        //     "filtered_heterozygous_nodes: {:?}",
-        //     filtered_heterozygous_nodes.len()
-        // );
 
         let haplotype_reads =
             assign_haplotype_reads(node_info, &heterozygous_nodes, hap_number);
 
-        // let (haplotype_reads_new, haplotype_nodes_new) =
-        //     assign_unassigned_reads(node_info, &haplotype_reads);
-        // info!(
-        //     "haplotype_reads: {:?}",
-        //     haplotype_reads
-        //         .iter()
-        //         .map(|(hap, reads)| format!("hap: {}, reads: {}", hap, reads.len()))
-        //         .collect::<Vec<_>>()
-        //         .join(", ")
-        // );
-        // info!(
-        //     "haplotype_reads_new: {:?}",
-        //     haplotype_reads_new
-        //         .iter()
-        //         .map(|(hap, reads)| format!("hap: {}, reads: {}", hap, reads.len()))
-        //         .collect::<Vec<_>>()
-        //         .join(", ")
-        // );
-        // println!("haplotype_reads_new: {}, {}, {:?}", haplotype_reads_new.get(&0).unwrap().len(), haplotype_reads_new.get(&1).unwrap().len(), haplotype_reads_new.get(&0).unwrap().intersection(haplotype_reads_new.get(&1).unwrap()).count());
         let mut total_reads = HashSet::new();
         for node in node_info.keys(){
             let read_names = get_read_name_list(node_info, node.clone());
@@ -1595,18 +1219,14 @@ fn write_methyl_bed(
     let output_file = output_prefix.with_extension(format!("Hap.{}.bed", haplotype_index));
     let mut file = File::create(Path::new(&output_file))?;
 
-    // Write BED header
     writeln!(file, "##fileformat=BED")?;
     writeln!(file, "##haplotype={}", haplotype_index + 1)?;
     writeln!(
         file,
         "#CHROM\tRef_start\tRef_end\tMod_rate\tAsm_start\tAsm_end\tMotif\tCoverage"
     )?;
-    // let min_prob = 0.5;
-    // let mut methylation_signal: HashMap<(usize, Option<usize>), (f64, f64)> = HashMap::new();
     let mut methyl_info_vec = Vec::new();
     for ((ref_pos, asm_pos), (score, coverage)) in methyl_info.iter() {
-        // 1-based coordinates
         let ref_pos_start = ref_pos + 1;
         let ref_pos_end = ref_pos + 2;
         let asm_pos_start = asm_pos + 1;
@@ -1657,7 +1277,6 @@ pub fn call_methylation(
     all_paths: HashMap<usize, (Vec<String>, String, HashSet<String>, usize, usize)>,
     output_prefix: &PathBuf,
 ) {
-    // call methylation
     for (hap_index, (path, sequence, supported_reads, supports, span)) in all_paths.iter() {
         let mut methyl_info_dict = HashMap::new();
         let mut spos = 0;
@@ -1698,10 +1317,6 @@ pub fn start(
 
     let (haplotype_reads, node_haplotype) =
         find_node_haplotype(&node_info, haplotype_number);
-    // print how many nodes in each haplotype in each interval
-
-        
-    // println!("node_haplotype: {:?}", node_haplotype);
     let all_paths = enumerate_all_paths_with_haplotype(
         &node_info,
         &edge_info,
@@ -1715,13 +1330,11 @@ pub fn start(
     let primary_haplotypes =
         find_full_range_haplotypes(&node_info, &allseq);
     info!("All sequences constructed: {}", primary_haplotypes.len());
-    // call methylation
     call_methylation(&node_info, primary_haplotypes.clone(), output_prefix);
     info!(
         "Haplotype specific methylation signals exported: {}",
         primary_haplotypes.len()
     );
-    // write assemblies
     let output_filename = PathBuf::from(format!("{}.fasta", output_prefix.to_string_lossy()));
     let _ = write_graph_path_fasta(&primary_haplotypes, &output_filename);
     info!(

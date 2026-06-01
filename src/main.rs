@@ -123,8 +123,12 @@ enum Commands {
         window_size: usize,
 
         ///if only primary reads are used
-        #[arg(short, long, default_value = "false")]
+        #[arg(short, long, default_value_t = false)]
         primary_only: bool,
+
+        ///if use pileup to extract reads
+        #[arg(long, default_value_t = false)]
+        pileup: bool,
 
         ///output file format, accepted fasta, gfa, vcf
         #[arg(short, long, default_value = "gfa")]
@@ -186,8 +190,12 @@ enum Commands {
         window_size: usize,
 
         ///if only primary reads are used
-        #[arg(short, long, default_value = "false")]
+        #[arg(short, long, default_value_t = false)]
         primary_only: bool,
+
+        ///if use pileup to extract reads
+        #[arg(long, default_value_t = false)]
+        pileup: bool,
 
         /// methylation likelihood threshold, default to 0.5
         #[arg(short, long, default_value_t = 0.5)]
@@ -232,6 +240,9 @@ enum Commands {
         #[arg(short, long, default_value_t = 100)]
         window_size: usize,
 
+        ///if use pileup to extract reads
+        #[arg(long, default_value_t = false)]
+        pileup: bool,
 
         /// Verbose output
         #[arg(short, long)]
@@ -302,35 +313,21 @@ fn main() -> Result<()> {
     let args = Cli::parse();
     match args.command {
         Commands::Haplograph {
-            // Input BAM file
             alignment_bam,
-            // Input FASTA file
             reference_fa,
-            // Sample ID
             sampleid,
-            // Output directory
             output_prefix,
-            // either locus as String (chromo:start-end)
             locus,
-            // Limited size of the region
             var_frequency_min,
-            // Minimal Supported Reads
             min_reads,
-            //window size
             window_size,
-            //if only primary reads are used
             primary_only,
-            //output file format
+            pileup,
             file_format,
-            // haplotype number
             number_of_haplotypes,
-            // methylation likelihood threshold, default to 0.5
             threshold_methyl_likelihood,
-            // Sequencing technology, accepted hifi, nanopore
             detection_technology,
-            //maximal locus size
             maximal_locus_size,
-            // Verbose output
             verbose,
         } => {
             // Validate format
@@ -365,10 +362,8 @@ fn main() -> Result<()> {
             let (reference_seqs, reference_chromosome_seqs) =
                 util::get_ref_seq_from_chromosome(&reference_fa, &chromosome);
 
-            // check if the locus size is larger than the maximal locus size
             if end - start > maximal_locus_size {
-                info!("Locus size is larger than the maximal locus size: {}, skipping analysis", end - start);
-                info!("Splitting the locus into multiple overlapping intervals");
+                info!("Locus size is larger than the maximal locus size: {}, splitting into overlapping intervals", end - start);
                 const OVERLAP_BP: usize = 500;
                 if maximal_locus_size <= OVERLAP_BP {
                     anyhow::bail!(
@@ -395,7 +390,6 @@ fn main() -> Result<()> {
                     let output_prefix = format!("{}_{}", output_prefix, index);
                     let start = locus.1;
                     let end = locus.2;
-                    // // Extract read sequences from BAM file using utility function
                     let mut windows = Vec::new();
                     for i in (start..end).step_by(window_size) {
                         let end_pos = std::cmp::min(i + window_size, end);
@@ -411,6 +405,7 @@ fn main() -> Result<()> {
                         threshold_methyl_likelihood,
                         var_frequency_min,
                         primary_only,
+                        pileup,
                         &output_prefix,
                         MINIMAL_GAP_LENGTH
                     )?;
@@ -435,7 +430,6 @@ fn main() -> Result<()> {
 
                 }
             }
-            // // Extract read sequences from BAM file using utility function
             let mut windows = Vec::new();
             for i in (start..end).step_by(window_size) {
                 let end_pos = std::cmp::min(i + window_size, end);
@@ -451,6 +445,7 @@ fn main() -> Result<()> {
                 threshold_methyl_likelihood,
                 var_frequency_min,
                 primary_only,
+                pileup,
                 &output_prefix,
                 MINIMAL_GAP_LENGTH
             )?;
@@ -474,29 +469,18 @@ fn main() -> Result<()> {
             )?;
         }
         Commands::Haplointervals {
-            // Input BAM file
             alignment_bam,
-            // Input FASTA file
             reference_fa,
-            // Sample ID
             sampleid,
-            // Output directory
             output_prefix,
-            // either locus as String (chromo:start-end) or a bed file
             bed_file,
-            // Limited size of the region
             var_frequency_min,
-            // Minimal Supported Reads
             min_reads,
-            //window size
             window_size,
-            //if only primary reads are used
             primary_only,
-            // methylation likelihood threshold, default to 0.5
+            pileup,
             threshold_methyl_likelihood,
-            // Sequencing technology, accepted hifi, nanopore
             detection_technology,
-            // Verbose output
             verbose,
         } => {
             // Initialize logging
@@ -520,7 +504,6 @@ fn main() -> Result<()> {
             info!("Verbose: {}", verbose);
 
             let reference_seqs = util::get_all_ref_seq(&reference_fa);
-            // // Extract read sequences from BAM file using utility function
             let bed_list = util::import_bed(&bed_file);
             let mut windows = Vec::new();
             for (chromosome, start, end) in bed_list {
@@ -547,6 +530,7 @@ fn main() -> Result<()> {
                 min_reads as usize,
                 var_frequency_min,
                 primary_only,
+                pileup,
                 &output_prefix,
                 &"vcf".to_string(),
                 threshold_methyl_likelihood,
@@ -560,6 +544,7 @@ fn main() -> Result<()> {
             rollingkmer_list,
             sample_id,
             data_technology,
+            pileup,
             //window size
             window_size,
 
@@ -589,7 +574,6 @@ fn main() -> Result<()> {
 
             let reference_seqs = util::get_all_ref_seq(&tmp_fasta_path.display().to_string());
             
-            // // Extract read sequences from BAM file using utility function
             let mut final_fasta_seq = HashMap::new();
             for record in reference_seqs.iter(){
                 let mut windows = Vec::new();
@@ -609,6 +593,7 @@ fn main() -> Result<()> {
                     0.5,
                     0.0,
                     false,
+                    pileup,
                     &format!("{}_{}_tmp", output_prefix, chromosome),
                     MINIMAL_GAP_LENGTH
                 )?;
@@ -626,8 +611,6 @@ fn main() -> Result<()> {
                 }
             }
             util::write_fasta(&final_fasta_seq, &PathBuf::from(format!("{}.final.fasta", output_prefix)))?;
-            // remove the tmp files
-            // std::fs::remove_file(&tmp_fasta_path)?;
         }
 
         Commands::DevTools(dev_tools_cmd) => {

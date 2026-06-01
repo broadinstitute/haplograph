@@ -106,7 +106,6 @@ pub fn get_variants_from_cigar(
                 } else {
                     "-"
                 };
-                // println!("alt_pos: {}, length: {}, alt_seq: {}", alt_pos, length, alt_seq.len());
                 let spos = if alt_pos > 0 { alt_pos - 1 } else { 0 };
                 let alt_allele = match alt_seq.get(spos..alt_pos + length) {
                     Some(allele) => allele,
@@ -305,8 +304,6 @@ fn write_vcf(
     haplotype_number: usize,
     phase_variants: bool,
 ) -> AnyhowResult<()> {
-    // Write VCF header
-    // 1. Create a VCF header
     let mut header = bcf::Header::new();
     for record in reference_seqs.iter() {
         let referencename = record.id().to_string();
@@ -347,14 +344,10 @@ fn write_vcf(
     );
     header.push_sample(sample_id.as_bytes());
 
-    // Write VCF
-    // 2. Open a compressed VCF writer
-    // Create a BCF writer for the compressed VCF.
     let output_file = PathBuf::from(format!("{}.vcf.gz", output_prefix));
     let mut writer = bcf::Writer::from_path(output_file.clone(), &header, false, bcf::Format::Vcf)
         .expect("Failed to create BCF writer");
 
-    // Sort variants by chromosome and position
     let mut sorted_variants = variants.to_vec();
     sorted_variants.sort_by(|a, b| {
         // First compare chromosomes
@@ -368,7 +361,6 @@ fn write_vcf(
             .then(a.alt_allele.cmp(&b.alt_allele))
     });
 
-    // Merge multi-allelic variants
     let mut records_by_pos = HashMap::new();
     for var in sorted_variants {
         let chrom = var.chromosome.clone();
@@ -381,12 +373,9 @@ fn write_vcf(
             .or_insert_with(Vec::new)
             .push(var.clone());
     }
-    //sort records_by_pos by the key
     let mut record_by_pos_keys = records_by_pos.keys().collect::<Vec<_>>();
     record_by_pos_keys.sort_by(|a, b| a.1.cmp(&b.1).then(a.2.cmp(&b.2)));
-    // println!("records_by_pos: {:?}", record_by_pos_keys);
 
-    // vcf_records
     for key in record_by_pos_keys.iter() {
         let mut var_list = records_by_pos.get(key).unwrap().clone();
         var_list.sort_by(|a, b| a.alt_allele.cmp(&b.alt_allele));
@@ -440,11 +429,9 @@ fn write_vcf(
             .push_format_float(b"VAF", &allele_frequency)
             .expect("Failed to set VAF format field");
         let mut genotype_list = Vec::new();
-        // phase variants
         if phase_variants {
             let mut phase = false;
             for haplotype_index in 1..=haplotype_number {
-                // One allele per haplotype to keep GT ploidy == haplotype_number.
                 let matched_allele = var_list.iter().enumerate().find_map(|(index, variant)| {
                     let haplotype_index_list = variant.clone().haplotype_index.unwrap();
                     if haplotype_index_list.contains(&haplotype_index) {
@@ -553,15 +540,12 @@ pub fn get_variants_from_node(
 
 pub fn get_variants_from_path(
     node_info: &HashMap<String, asm::NodeInfo>,
-    // edge_info: &HashMap<String, Vec<String>>,
     primary_haplotypes: &HashMap<usize, (Vec<String>, String, HashSet<String>, usize, usize)>,
     reference_seqs: &fastq::Record,
 ) -> (Vec<Variant>, Vec<Variant>) {
-
-    // Collect all phased nodes from the paths
     let mut phased_nodes = HashSet::new();
-    for (hap_index, Info_list) in primary_haplotypes.clone().iter() {
-        let (path, sequence, read_names, _, _) = Info_list.clone();
+    for (hap_index, info_list) in primary_haplotypes.clone().iter() {
+        let (path, _, _, _, _) = info_list.clone();
         for node in path.iter() {
             phased_nodes.insert(node.clone());
         }
@@ -585,9 +569,8 @@ pub fn get_variants_from_path(
     let mut variant_phase = HashMap::new();
     let mut variant_dict = HashMap::new();
 
-    for (path_haplotypes, Info_list) in primary_haplotypes.clone().iter() {
-        // Determine haplotype indices for this path by checking node_haplotype
-        let (path, sequence, read_names, _, _) = Info_list.clone();
+    for (path_haplotypes, info_list) in primary_haplotypes.clone().iter() {
+        let (path, _, _, _, _) = info_list.clone();
 
         let (start, end) =
             eval::find_alignment_intervals(path.iter().map(|x| x.as_str()).collect::<Vec<_>>())
@@ -661,7 +644,6 @@ pub fn get_variants_from_path(
         phased_variants.push(phased_variant);
     }
 
-    // Process somatic nodes (nodes not assigned to any haplotype)
     let mut somatic_variants = Vec::new();
     let mut somatic_collapsed_variants = HashMap::new();
     for node_id in somatic_nodes.iter() {
@@ -781,8 +763,6 @@ pub fn start(
     let (phased_variants, somatic_variants) = get_variants_from_path(
         &node_info,
         primary_haplotypes,
-        // &node_info,
-        // &edge_info,
         &ref_chromosome_seqs,
     );
     let all_variants = [phased_variants.clone(), somatic_variants.clone()].concat();
@@ -829,7 +809,6 @@ pub fn start(
         .cloned()
         .collect::<Vec<_>>();
 
-    // Write VCF file
     let germline_output = format!("{}.germline", output_prefix);
     write_vcf(
         &p_variants,
@@ -842,11 +821,8 @@ pub fn start(
     )?;
     info!("Germline variants: {}", p_variants.len());
 
-    //filter somatic variants
     let (matrix, var_list, read_list) = construct_var_read_matrix(&node_info, reference_seqs)?;
-    // permutation test for somatic variants
-    
-    let filtered_var_name =  if matrix.shape()[0] > 2000 {
+    let filtered_var_name = if matrix.shape()[0] > 2000 {
         // split the matrix into chunks of 2000 rows
         let chunk_num = matrix.shape()[0] / 2000 as usize;
         let n_rows = matrix.shape()[0];
@@ -871,7 +847,6 @@ pub fn start(
     
     let mut filtered_somatic_variants = Vec::new();
     for var in s_variants.iter() {
-        // println!("var: {:?}, {:?}, {:?}, {:?}, {:?}", var.chromosome.clone(), var.pos, var.ref_allele.clone(), var.alt_allele.clone(), var.variant_type.clone());
         if sequencing_technology == "hifi" {
             if var.variant_type == "SNP" {
                 filtered_somatic_variants.push(var.clone());

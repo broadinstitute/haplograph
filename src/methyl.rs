@@ -11,19 +11,15 @@ pub fn get_methylation_read(
     let mut methyl_pos_dict: HashMap<usize, f32> = HashMap::new();
     let forward_sequence = String::from_utf8_lossy(&r.seq().as_bytes()).to_string();
 
-    // Check for modification data
     if let Ok(mods) = r.basemods_iter() {
-        // Iterate over the modification types
         for res in mods {
             if let Ok((position, m)) = res {
                 if m.modified_base as u8 as char != mod_char {
                     continue;
                 }
-                // let strand = mod_metadata.strand;
                 if position < start as i32 || position > end as i32 {
                     continue;
                 }
-                // println!("position: {}, start: {}, end: {}", position, start, end);
                 let pos_usize = position as usize;
                 let qual = m.qual as f32 / 255.0;
                 let motif: String = if r.is_reverse() {
@@ -93,9 +89,8 @@ pub fn start(
     read_coordinates: &HashMap<String, (u64, u64)>,
 ) -> HashMap<String, HashMap<usize, f32>> {
     debug!("Processing Methylation Signals from BAM file");
-    // println!("Read coordinates: {:?}", read_coordinates);
     let mut read_name_set = HashSet::new();
-    let mut methyl_all_reads: HashMap<String, HashMap<usize, f32>> = HashMap::new(); // extract directly from reference map
+    let mut methyl_all_reads: HashMap<String, HashMap<usize, f32>> = HashMap::new();
     let mut strand_dict: HashMap<String, bool> = HashMap::new();
     for (read_name, r) in bam_records.iter() {
         if r.is_unmapped() {
@@ -104,9 +99,7 @@ pub fn start(
         if r.is_supplementary() {
             continue;
         }
-        // let read_name = String::from_utf8_lossy(&r.qname()).to_string();
         if !read_coordinates.contains_key(read_name) {
-            // warn!("Read name not found in read coordinates: {:?}", read_name);
             continue;
         }
         let (read_start, read_end) = *read_coordinates.get(read_name).unwrap();
