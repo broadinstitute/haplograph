@@ -12,6 +12,10 @@ use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
 
+/// Unique key for one BAM alignment record (qname + 0-based reference start).
+pub fn alignment_bounds_key(qname: &str, align_pos: i64) -> String {
+    format!("{qname}|{align_pos}")
+}
 
 pub fn normalized_read_slice_bounds(
     read_start: usize,
@@ -32,6 +36,79 @@ pub fn normalized_read_slice_bounds(
     Some((pos_start, pos_end))
 }
 
+
+/// Per-alignment query bounds within a reference interval, plus window-edge alignment keys.
+pub struct IntervalQueryBounds {
+    /// First inclusive qpos in `[start, end)` keyed by `alignment_bounds_key`.
+    pub per_align_start: HashMap<String, usize>,
+    /// Last exclusive qpos in `[start, end)` keyed by `alignment_bounds_key`.
+    pub per_align_end: HashMap<String, usize>,
+    /// Alignment keys seen in the window with no valid qpos (fully deleted span).
+    pub deletion_spanning: HashSet<String>,
+    /// Read → alignment key active at the window start column.
+    pub window_start_align: HashMap<String, String>,
+    /// Read → alignment key active at the window end column.
+    pub window_end_align: HashMap<String, String>,
+}
+
+/// Build the in-window read sequence, concatenating across supplementary alignments when
+/// the window start and end fall on different alignment records for the same read.
+pub fn sequence_from_interval_bounds(
+    records: &[BamRecord],
+    qname: &str,
+    bounds: &IntervalQueryBounds,
+) -> Option<String> {
+    let start_key = bounds.window_start_align.get(qname)?;
+    let end_key = bounds.window_end_align.get(qname)?;
+
+    if start_key == end_key {
+        let record = records
+            .iter()
+            .find(|r| alignment_bounds_key(qname, r.pos()) == *start_key)?;
+        let start_pos = bounds.per_align_start.get(start_key)?;
+        let end_pos = bounds.per_align_end.get(end_key)?;
+        let (pos_start, pos_end) =
+            normalized_read_slice_bounds(*start_pos, *end_pos, record.seq().len(), "")?;
+        return Some(String::from_utf8_lossy(&record.seq().as_bytes()[pos_start..pos_end]).to_string());
+    }
+
+    let start_ref_pos: i64 = start_key
+        .rsplit('|')
+        .next()?
+        .parse()
+        .ok()?;
+    let end_ref_pos: i64 = end_key.rsplit('|').next()?.parse().ok()?;
+
+    let mut segments: Vec<(i64, String)> = Vec::new();
+    for record in records {
+        if String::from_utf8_lossy(record.qname()) != qname {
+            continue;
+        }
+        let align_key = alignment_bounds_key(qname, record.pos());
+        let ref_pos = record.pos();
+        if ref_pos < start_ref_pos || ref_pos > end_ref_pos {
+            continue;
+        }
+        let Some(start_pos) = bounds.per_align_start.get(&align_key) else {
+            continue;
+        };
+        let Some(end_pos) = bounds.per_align_end.get(&align_key) else {
+            continue;
+        };
+        let Some((pos_start, pos_end)) =
+            normalized_read_slice_bounds(*start_pos, *end_pos, record.seq().len(), "")
+        else {
+            continue;
+        };
+        let seq = String::from_utf8_lossy(&record.seq().as_bytes()[pos_start..pos_end]).to_string();
+        segments.push((ref_pos, seq));
+    }
+    segments.sort_by_key(|(pos, _)| *pos);
+    if segments.is_empty() {
+        return None;
+    }
+    Some(segments.into_iter().map(|(_, seq)| seq).collect())
+}
 
 /// Single-pass pileup scan over `[start, end)`.
 ///
@@ -55,13 +132,13 @@ pub fn record_interval_query_bounds_range(
     bam: &mut IndexedReader,
     start: u64,
     end: u64,
-) -> AnyhowResult<(HashMap<String, usize>, HashMap<String, usize>, HashSet<String>)> {
-    let mut start_dict: HashMap<String, usize> = HashMap::new();
-    let mut end_dict: HashMap<String, usize> = HashMap::new();
-    // Track every read that appears in any pileup column within [start, end).
-    // Reads here but absent from start_dict have qpos=None for the entire window
-    // (i.e. the window lies completely inside a deletion of that read).
+) -> AnyhowResult<IntervalQueryBounds> {
+    let mut per_align_start: HashMap<String, usize> = HashMap::new();
+    let mut per_align_end: HashMap<String, usize> = HashMap::new();
     let mut seen_in_window: HashSet<String> = HashSet::new();
+    let mut window_start_align: HashMap<String, String> = HashMap::new();
+    let mut window_end_align: HashMap<String, String> = HashMap::new();
+
     for p in bam.pileup() {
         let pileup = p?;
         let ref_pos = pileup.pos() as u64;
@@ -75,30 +152,41 @@ pub fn record_interval_query_bounds_range(
         for alignment in pileup.alignments() {
             let record = alignment.record();
             let qname = String::from_utf8_lossy(record.qname()).into_owned();
-            if seen.contains(&qname) {
+            let align_key = alignment_bounds_key(&qname, record.pos());
+            if seen.contains(&align_key) {
                 continue;
             }
-            seen.insert(qname.clone());
-            seen_in_window.insert(qname.clone());
+            seen.insert(align_key.clone());
+            seen_in_window.insert(align_key.clone());
             if let Some(qpos) = alignment.qpos() {
-                // First valid position → start boundary (keep first, never overwrite)
-                start_dict.entry(qname.clone()).or_insert(qpos);
-                // Last valid exclusive position → end boundary (always overwrite to keep last)
+                per_align_start.entry(align_key.clone()).or_insert(qpos);
                 let excl = match alignment.indel() {
                     bam::pileup::Indel::Ins(len) => qpos + len as usize + 1,
                     bam::pileup::Indel::Del(_) | bam::pileup::Indel::None => qpos + 1,
                 };
-                end_dict.insert(qname, excl);
+                per_align_end.insert(align_key.clone(), excl);
+                if ref_pos == start {
+                    window_start_align
+                        .entry(qname.clone())
+                        .or_insert(align_key.clone());
+                }
+                window_end_align.insert(qname, align_key);
             }
         }
     }
-    // Reads seen in the window but with no valid qpos in any column are entirely
-    // covered by a deletion — return them separately so callers can emit "".
+
     let deletion_spanning: HashSet<String> = seen_in_window
         .into_iter()
-        .filter(|name| !start_dict.contains_key(name))
+        .filter(|key| !per_align_start.contains_key(key))
         .collect();
-    Ok((start_dict, end_dict, deletion_spanning))
+
+    Ok(IntervalQueryBounds {
+        per_align_start,
+        per_align_end,
+        deletion_spanning,
+        window_start_align,
+        window_end_align,
+    })
 }
 
 // extract haplotypes from bam file
@@ -119,49 +207,38 @@ pub fn extract_haplotypes_from_bam(
     // pb.set_message("Processing alignments...");
 
     let _ = bam.fetch((chr.as_bytes(), start, end));
-    let (start_pos_dict, end_pos_dict, deletion_spanning) =
-        record_interval_query_bounds_range(bam, start, end)?;
+    let bounds = record_interval_query_bounds_range(bam, start, end)?;
 
     let mut filtered_sequence_dict = HashMap::new();
-    let mut seen_reads = HashSet::new();
     let _ = bam.fetch((chr.as_bytes(), start, end));
+    let mut records_by_qname: HashMap<String, Vec<BamRecord>> = HashMap::new();
     for record_result in bam.records() {
         let record = record_result?;
-        let read_name = String::from_utf8_lossy(record.qname()).into_owned();
-        if seen_reads.contains(&read_name) {
-            continue;
-        }
-        seen_reads.insert(read_name.clone());
-
         if primary_only && (record.is_secondary() || record.is_supplementary()) {
             continue;
         }
+        let read_name = String::from_utf8_lossy(record.qname()).into_owned();
+        records_by_qname
+            .entry(read_name)
+            .or_default()
+            .push(record);
+    }
 
-        // The entire window lies within a deletion of this read → emit with empty sequence.
-        if deletion_spanning.contains(&read_name) {
+    for (read_name, mut records) in records_by_qname {
+        records.sort_by_key(|r| r.pos());
+        let start_key = match bounds.window_start_align.get(&read_name) {
+            Some(k) => k.clone(),
+            None => continue,
+        };
+        if bounds.deletion_spanning.contains(&start_key) {
             let record_id = format!("{read_name}|{chr}:{start}-{end}|{sampleid}");
             filtered_sequence_dict.insert(record_id, String::new());
             continue;
         }
 
-        let Some(start_pos) = start_pos_dict.get(&read_name) else {
+        let Some(read_seq_final) = sequence_from_interval_bounds(&records, &read_name, &bounds) else {
             continue;
         };
-        let Some(end_pos) = end_pos_dict.get(&read_name) else {
-            continue;
-        };
-
-        let read_seq = record.seq().as_bytes();
-        let read_strand = record.strand().to_string();
-        let read_len = read_seq.len();
-        let Some((pos_start, pos_end)) =
-            normalized_read_slice_bounds(*start_pos, *end_pos, read_len, &read_strand)
-        else {
-            continue;
-        };
-
-        // BAM stores sequences in forward-strand orientation for both strands; no RC needed.
-        let read_seq_final = String::from_utf8_lossy(&read_seq[pos_start..pos_end]).to_string();
 
         let record_id = format!("{read_name}|{chr}:{start}-{end}|{sampleid}");
         filtered_sequence_dict.insert(record_id, read_seq_final);
@@ -203,31 +280,29 @@ pub fn extract_haplotypes_coordinates_from_bam(
     // pb.set_message("Processing alignments...");
 
     let _ = bam.fetch((chr.as_bytes(), start, end));
-    let (start_pos_dict, end_pos_dict, deletion_spanning) =
-        record_interval_query_bounds_range(bam, start, end)?;
+    let bounds = record_interval_query_bounds_range(bam, start, end)?;
 
     let mut read_coordinates_formatted = HashMap::new();
     let mut read_sequence_dict_formatted = HashMap::new();
     let mut read_quality_dict_formatted = HashMap::new();
     let mut read_strand_dict_formatted = HashMap::new();
     let mut bam_records_dict_formatted = HashMap::new();
-    let mut seen_reads = HashSet::new();
     let _ = bam.fetch((chr.as_bytes(), start, end));
     for record_result in bam.records() {
         let record = record_result?;
         let read_name = String::from_utf8_lossy(record.qname()).into_owned();
-        if seen_reads.contains(&read_name) {
-            continue;
-        }
-        seen_reads.insert(read_name.clone());
+        let align_key = alignment_bounds_key(&read_name, record.pos());
 
         if primary_only && (record.is_secondary() || record.is_supplementary()) {
             continue;
         }
 
-        // The entire window lies within a deletion of this read → emit with empty sequence.
-        if deletion_spanning.contains(&read_name) {
-            let record_id = intervals::generate_read_name(&read_name, chr, start, end, sampleid);
+        if bounds.deletion_spanning.contains(&align_key) {
+            let record_id = format!(
+                "{}|{}",
+                intervals::generate_read_name(&read_name, chr, start, end, sampleid),
+                record.pos()
+            );
             read_coordinates_formatted.insert(record_id.clone(), (0u64, 0u64));
             read_sequence_dict_formatted.insert(record_id.clone(), Vec::new());
             read_quality_dict_formatted.insert(record_id.clone(), Vec::new());
@@ -237,10 +312,10 @@ pub fn extract_haplotypes_coordinates_from_bam(
             continue;
         }
 
-        let Some(start_pos) = start_pos_dict.get(&read_name) else {
+        let Some(start_pos) = bounds.per_align_start.get(&align_key) else {
             continue;
         };
-        let Some(end_pos) = end_pos_dict.get(&read_name) else {
+        let Some(end_pos) = bounds.per_align_end.get(&align_key) else {
             continue;
         };
         let read_seq = record.seq().as_bytes();
@@ -252,10 +327,13 @@ pub fn extract_haplotypes_coordinates_from_bam(
             continue;
         };
 
-        // BAM stores sequences in forward-strand orientation for both strands; no RC needed.
         let read_seq_final = String::from_utf8_lossy(&read_seq[pos_start..pos_end]).to_string();
 
-        let record_id = intervals::generate_read_name(&read_name, chr, start, end, sampleid);
+        let record_id = format!(
+            "{}|{}",
+            intervals::generate_read_name(&read_name, chr, start, end, sampleid),
+            record.pos()
+        );
         read_coordinates_formatted.insert(record_id.clone(), (*start_pos as u64, *end_pos as u64));
         read_sequence_dict_formatted.insert(record_id.clone(), read_seq_final.clone().into_bytes());
         read_quality_dict_formatted.insert(record_id.clone(), record.qual().to_vec());

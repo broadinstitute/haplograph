@@ -52,20 +52,18 @@ pub fn extract_haplotypes_coordinates_from_bam_pileup(
     // pb.set_message("Scanning alignments...");
 
     let _ = bam.fetch((chr.as_bytes(), start, end));
+    let bounds = extract::record_interval_query_bounds_range(bam, start, end)?;
+    let _ = bam.fetch((chr.as_bytes(), start, end));
     let mut seen_reads = HashSet::new();
-
-    let _ = bam.fetch((chr.as_bytes(), start, end));
-    let (start_pos_dict, end_pos_dict, deletion_spanning) =
-        extract::record_interval_query_bounds_range(bam, start, end)?;
-    let _ = bam.fetch((chr.as_bytes(), start, end));
 
     for record_result in bam.records() {
         let record = record_result?;
         let qname = String::from_utf8_lossy(record.qname()).into_owned();
-        if seen_reads.contains(&qname) {
+        let align_key = extract::alignment_bounds_key(&qname, record.pos());
+        if seen_reads.contains(&align_key) {
             continue;
         }
-        seen_reads.insert(qname.clone());
+        seen_reads.insert(align_key.clone());
 
         let is_secondary = record.is_secondary();
         let is_supplementary = record.is_supplementary();
@@ -80,28 +78,31 @@ pub fn extract_haplotypes_coordinates_from_bam_pileup(
         let locus_key = format!("{}:{}-{}", chr, start, end);
         let seq_name = format!("{qname}|{locus_key}|{sm}");
 
-        // The entire window lies within a deletion of this read.
-        // Pre-populate bmap with an empty entry so that the pileup loop (where
-        // qpos is None for every column) leaves the entry intact.  The read is
-        // still included in eligible_reads so downstream code emits it with "".
-        if deletion_spanning.contains(&qname) && !start_pos_dict.contains_key(&qname) {
-            eligible_reads.insert(qname.clone(), (seq_name.clone(), 0, 0));
+        if bounds.deletion_spanning.contains(&align_key)
+            && !bounds.per_align_start.contains_key(&align_key)
+        {
+            eligible_reads.insert(align_key.clone(), (seq_name.clone(), 0, 0));
             bmap.insert(seq_name, (String::new(), Vec::new()));
-            read_strand_dict.insert(qname.clone(), record.strand().to_string());
-            bam_records.insert(qname, record.clone());
+            read_strand_dict.insert(align_key.clone(), record.strand().to_string());
+            bam_records.insert(align_key, record.clone());
             continue;
         }
 
-        let Some(query_start) = start_pos_dict.get(&qname) else {
-            continue;
-        };
-        let Some(query_end) = end_pos_dict.get(&qname) else {
+        let window_start_key = bounds.window_start_align.get(&qname);
+        let window_end_key = bounds.window_end_align.get(&qname);
+        let query_start = window_start_key
+            .and_then(|k| bounds.per_align_start.get(k))
+            .copied();
+        let query_end = window_end_key
+            .and_then(|k| bounds.per_align_end.get(k))
+            .copied();
+        let (Some(query_start), Some(query_end)) = (query_start, query_end) else {
             continue;
         };
 
-        eligible_reads.insert(qname.clone(), (seq_name, *query_start, *query_end));
-        read_strand_dict.insert(qname.clone(), record.strand().to_string());
-        bam_records.insert(qname, record.clone());
+        eligible_reads.insert(align_key.clone(), (seq_name, query_start, query_end));
+        read_strand_dict.insert(align_key.clone(), record.strand().to_string());
+        bam_records.insert(align_key, record.clone());
     }
 
     let _ = bam.fetch((chr.as_bytes(), start, end));
@@ -114,12 +115,12 @@ pub fn extract_haplotypes_coordinates_from_bam_pileup(
             for alignment in pileup.alignments() {
                 let record = alignment.record();
                 let qname = String::from_utf8_lossy(record.qname()).into_owned();
-                // skip the alignment from the same read
-                if readnames.contains(&qname) {
+                let align_key = extract::alignment_bounds_key(&qname, record.pos());
+                if readnames.contains(&align_key) {
                     continue;
                 }
-                readnames.insert(qname.clone());
-                let Some((seq_name, _query_start, _query_end)) = eligible_reads.get(&qname) else {
+                readnames.insert(align_key.clone());
+                let Some((seq_name, _query_start, _query_end)) = eligible_reads.get(&align_key) else {
                     continue;
                 };
 
@@ -185,12 +186,14 @@ pub fn extract_haplotypes_coordinates_from_bam_pileup(
         }
     }
 
+    let mut seen_seq_names = HashSet::new();
     let records: Vec<fastq::Record> = eligible_reads
         .iter()
         .filter_map(|(_read_name, (seq_name, _query_start, _query_end))| {
+            if !seen_seq_names.insert(seq_name.clone()) {
+                return None;
+            }
             let (seq, qual) = bmap.get(seq_name)?;
-            // Allow empty sequences: deletion-spanning reads produce a "" node,
-            // which represents the read traversing this window via a large deletion.
             Some(fastq::Record::with_attrs(
                 seq_name.as_str(),
                 None,
