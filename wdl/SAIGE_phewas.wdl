@@ -148,7 +148,7 @@ task RunFitNullGLMM {
                 --sparseGRMSampleIDFile="~{sparseGRM_IDlist}" \
                 --phenoFile="~{phenotype_file}" \
                 --phenoCol="${phecode}" \
-                --covarColList=PC1,PC2,PC3,PC4,PC5,PC6,PC7,PC8,PC9,PC10,PC11,PC12,PC13,PC14,PC15,PC16,mPC1,mPC2,mPC3,mPC4,mPC5,mPC6,mPC7,mPC8,mPC9,mPC10,mPC11,mPC12,mPC13,mPC14,mPC15,mPC16,mPC17,mPC18,mPC19,mPC20,sex,age,age2,age_sex,age2_sex \
+                --covarColList=PC1,PC2,PC3,PC4,PC5,PC6,PC7,PC8,PC9,PC10,PC11,PC12,PC13,PC14,PC15,PC16,sex,age,age2,age_sex,age2_sex \
                 --qCovarColList=sex \
                 --sampleIDColinphenoFile=person_id \
                 --traitType=~{trait_type} \
