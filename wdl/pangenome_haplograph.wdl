@@ -69,18 +69,10 @@ task pangenome_kmer_database {
         RuntimeAttr? runtime_attr_override
     }
 
-
-
-
     command <<<
         set -euxo pipefail
 
-        export GCS_OAUTH_TOKEN=$(gcloud auth application-default print-access-token)
-
-        samtools view -bhX ~{bam} ~{bai} ~{locus} > ~{prefix}.bam
-        samtools index ~{prefix}.bam
-        samtools depth -r ~{locus} ~{prefix}.bam | awk '{sum+=$3} END {print sum/NR}' > coverage.txt
-
+        
     >>>
 
     output {

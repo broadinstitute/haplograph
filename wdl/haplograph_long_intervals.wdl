@@ -11,47 +11,28 @@ workflow Haplograph_full_length {
         String locus
         String truth_sample
         String sample_name
-        Int bin_size
-        Int pad_size
-        Int coverage_threshold = 10
-        Int coverage
 
     }
 
-    call split_into_bed {
+    call CalculateCoverage {
         input:
+            bam = whole_genome_bam,
+            bai = whole_genome_bai,
             locus = locus,
-            bin_size = bin_size,
-            pad_size = pad_size,
-            output_prefix = prefix,
+            prefix = prefix + "_" + locus
     }
 
-    scatter (i in range(length(split_into_bed.locuslist))) {
-        String region = split_into_bed.locuslist[i]
-
-        call CalculateCoverage {
-            input:
-                bam = whole_genome_bam,
-                bai = whole_genome_bai,
-                locus = region,
-                prefix = prefix + "_" + region
-        }
-
-        if (CalculateCoverage.coverage > coverage_threshold) {
-            call haplograph {
-                input:
-                    bam = CalculateCoverage.subsetbam,
-                    bai = CalculateCoverage.subsetbai,
-                    reference_fa = reference_fa,
-                    prefix = prefix + "_" + i,
-                    sample_id = prefix,
-                    locus = region,
-                    windowsize = 100
-            }
-        }
-
+    call haplograph {
+        input:
+            bam = CalculateCoverage.subsetbam,
+            bai = CalculateCoverage.subsetbai,
+            reference_fa = reference_fa,
+            prefix = prefix + "_" + locus,
+            sample_id = prefix,
+            locus = locus,
+            windowsize = 100
     }
-
+        
     call ligate_vcfs as germline_ligate{
         input:
             vcfs = select_all(haplograph.germline_vcf_file),
@@ -72,7 +53,7 @@ workflow Haplograph_full_length {
             truth_vcf = truth_vcf,
             locus = locus,
             reference_fasta = reference_fa,
-            coverage = coverage,
+            coverage = CalculateCoverage.coverage,
             genename = locus,
             extra_args = ""
     }
@@ -98,42 +79,52 @@ task haplograph {
         String sample_id
         String locus
         Int windowsize
-        Int minimal_supported_reads
-        Int fold_threshold
-        Float min_freq
         String extra_arg = ""
+        RuntimeAttr? runtime_attr_override
     }
 
     command <<<
         set -euxo pipefail
+        
         /haplograph/target/release/haplograph haplograph -a ~{bam} \
                                                         -r ~{reference_fa} \
                                                         -s ~{sample_id} \
                                                         -o ~{prefix} \
                                                         -l ~{locus} \
-                                                        -v ~{min_freq} \
-                                                        -m ~{minimal_supported_reads} \
                                                         -w ~{windowsize} \
-                                                        -f gfa \
-                                                        -c ~{fold_threshold}
+                                                        --maximal-locus-size 20000 \
                                                         ~{extra_arg}
         
         ls -l .
     >>>
 
     output {
-        File graph_file = "~{prefix}.gfa"
-        File asm_file = "~{prefix}.fasta"
-        File germline_vcf_file = "~{prefix}.germline.vcf.gz"
-        File somatic_vcf_file = "~{prefix}.somatic.vcf.gz"
-        Array[File] methyl_bed = glob("*.bed")
+        Array[File] graph_file = glob("~{prefix}*.gfa")
+        Array[File] asm_file =glob("~{prefix}*.fasta")
+        Array[File] germline_vcf_file = glob("~{prefix}*.germline.vcf.gz")
+        Array[File] somatic_vcf_file = glob("~{prefix}*.somatic.vcf.gz")
+        Array[File] methyl_bed = glob("~{prefix}*.bed")
     }
 
+    #########################
+    RuntimeAttr default_attr = object {
+        cpu_cores:          1,
+        mem_gb:             4,
+        disk_gb:            100,
+        boot_disk_gb:       10,
+        preemptible_tries:  2,
+        max_retries:        1,
+        docker:             "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograph:dev"
+    }
+    RuntimeAttr runtime_attr = select_first([runtime_attr_override, default_attr])
     runtime {
-        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograph:v3"
-        memory: "16 GB"
-        cpu: 4
-        disks: "local-disk 100 SSD"
+        cpu:                    select_first([runtime_attr.cpu_cores,         default_attr.cpu_cores])
+        memory:                 select_first([runtime_attr.mem_gb,            default_attr.mem_gb]) + " GiB"
+        disks: "local-disk " +  select_first([runtime_attr.disk_gb,           default_attr.disk_gb]) + " HDD"
+        bootDiskSizeGb:         select_first([runtime_attr.boot_disk_gb,      default_attr.boot_disk_gb])
+        preemptible:            select_first([runtime_attr.preemptible_tries, default_attr.preemptible_tries])
+        maxRetries:             select_first([runtime_attr.max_retries,       default_attr.max_retries])
+        docker:                 select_first([runtime_attr.docker,            default_attr.docker])
     }
 }
 
@@ -202,9 +193,9 @@ task CalculateCoverage {
 
     #########################
     RuntimeAttr default_attr = object {
-        cpu_cores:          4,
-        mem_gb:             16,
-        disk_gb:            disk_size,
+        cpu_cores:          1,
+        mem_gb:             4,
+        disk_gb:            10,
         boot_disk_gb:       10,
         preemptible_tries:  2,
         max_retries:        1,
@@ -355,8 +346,8 @@ task ligate_vcfs {
         Array[File] vcfs
         String prefix
         Int disk_size_gb = 100
-        Int mem_gb = 16
-        Int cpu = 4
+        Int mem_gb = 4
+        Int cpu = 1
         Int preemptible = 1
     }
 
@@ -420,8 +411,8 @@ task Vcfdist {
         Int verbosity = 1
 
         Int disk_size_gb = ceil(size(truth_vcf, "GiB") + 10)
-        Int mem_gb = 16
-        Int cpu = 2
+        Int mem_gb = 4
+        Int cpu = 1
         Int preemptible = 1
     }
 
