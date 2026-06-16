@@ -14,8 +14,8 @@ workflow SAIGE_phewas {
         File phenotype_file 
         File homoplasmic_vcf
         File homoplasmic_vcf_csi
-        File heteroplasmic_vcf
-        File heteroplasmic_vcf_csi
+        File? heteroplasmic_vcf
+        File? heteroplasmic_vcf_csi
         File GroupFile
         String chromosome
         File phecode_list_file # phecode list should be sorted alphabetically
@@ -75,31 +75,34 @@ workflow SAIGE_phewas {
     }
 
     # Step 2b: gene-set test (heteroplasmic VCF) for all phecodes
-    call RunStep2_geneset {
-        input:
-            vcf              = heteroplasmic_vcf,
-            vcf_csi          = heteroplasmic_vcf_csi,
-            variance_ratios  = RunFitNullGLMM.variance_ratio_txts,
-            GMMATmodelFiles  = RunFitNullGLMM.null_model_rdas,
-            vcffield         = vcffield,
-            chromo           = chromosome,
-            phecode_list     = phecode_list,
-            output_prefix    = output_prefix,
-            minimal_af       = gene_set_minimal_af,
-            min_mac          = gene_set_min_mac,
-            GroupFile        = GroupFile,
-            memory           = memory,
-            saige_docker     = saige_docker,
-            cpu              = cpu,
-            disk             = disk_size,
-            preemptible      = preemptible
+    if (defined(heteroplasmic_vcf)){
+        call RunStep2_geneset {
+            input:
+                vcf              = select_first([heteroplasmic_vcf, ""]),
+                vcf_csi          = select_first([heteroplasmic_vcf_csi, ""]),
+                variance_ratios  = RunFitNullGLMM.variance_ratio_txts,
+                GMMATmodelFiles  = RunFitNullGLMM.null_model_rdas,
+                vcffield         = vcffield,
+                chromo           = chromosome,
+                phecode_list     = phecode_list,
+                output_prefix    = output_prefix,
+                minimal_af       = gene_set_minimal_af,
+                min_mac          = gene_set_min_mac,
+                GroupFile        = GroupFile,
+                memory           = memory,
+                saige_docker     = saige_docker,
+                cpu              = cpu,
+                disk             = disk_size,
+                preemptible      = preemptible
+        }
     }
+
 
     output {
         Array[File] null_model_rdas        = RunFitNullGLMM.null_model_rdas
         Array[File] variance_ratio_txts    = RunFitNullGLMM.variance_ratio_txts
         Array[File] singlevariant_outputs  = RunStep2_singlevariant.outputfiles
-        Array[File] geneset_outputs        = RunStep2_geneset.outputfiles
+        Array[File]? geneset_outputs        = RunStep2_geneset.outputfiles
     }
 }
 
