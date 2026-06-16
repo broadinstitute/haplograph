@@ -16,7 +16,7 @@ workflow SAIGE_phewas {
         File homoplasmic_vcf_csi
         File? heteroplasmic_vcf
         File? heteroplasmic_vcf_csi
-        File GroupFile
+        File? GroupFile
         String chromosome
         File phecode_list_file # phecode list should be sorted alphabetically
         String trait_type
@@ -88,7 +88,7 @@ workflow SAIGE_phewas {
                 output_prefix    = output_prefix,
                 minimal_af       = gene_set_minimal_af,
                 min_mac          = gene_set_min_mac,
-                GroupFile        = GroupFile,
+                GroupFile        = select_first([GroupFile, ""]),
                 memory           = memory,
                 saige_docker     = saige_docker,
                 cpu              = cpu,
