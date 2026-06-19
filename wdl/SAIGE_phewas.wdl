@@ -62,7 +62,7 @@ workflow SAIGE_phewas {
             GMMATmodelFiles  = RunFitNullGLMM.null_model_rdas,
             vcffield         = vcffield,
             chromo           = chromosome,
-            phecode_list     = phecode_list,
+            phecode_list     = RunFitNullGLMM.successful_phecode_list,
             trait_type       = trait_type,
             output_prefix    = output_prefix,
             minimal_af       = single_variant_minimal_af,
@@ -84,7 +84,7 @@ workflow SAIGE_phewas {
                 GMMATmodelFiles  = RunFitNullGLMM.null_model_rdas,
                 vcffield         = vcffield,
                 chromo           = chromosome,
-                phecode_list     = phecode_list,
+                phecode_list     = RunFitNullGLMM.successful_phecode_list,
                 output_prefix    = output_prefix,
                 minimal_af       = gene_set_minimal_af,
                 min_mac          = gene_set_min_mac,
@@ -134,12 +134,13 @@ task RunFitNullGLMM {
     String inv_norm_arg = if (trait_type == "quantitative") then "--invNormalize=TRUE" else ""
 
     command <<<
-        set -euxo pipefail
+        set -uxo pipefail
 
         phecodes=(~{sep=' ' phecode_list})
+        successful_phecodes=()
 
         for phecode in "${phecodes[@]}"; do
-            step1_fitNULLGLMM.R \
+            if step1_fitNULLGLMM.R \
                 --bedFile="~{plink_bed_file}" \
                 --bimFile="~{plink_bim_file}" \
                 --famFile="~{plink_fam_file}" \
@@ -157,13 +158,20 @@ task RunFitNullGLMM {
                 --cateVarRatioMaxMACVecInclude=500,1000000 \
                 --IsOverwriteVarianceRatioFile=TRUE \
                 --outputPrefix="~{output_prefix}_step1Out_${phecode}" \
-                ~{inv_norm_arg}
+                ~{inv_norm_arg}; then
+                successful_phecodes+=("${phecode}")
+            else
+                echo "WARNING: phecode ${phecode} failed, skipping" >&2
+            fi
         done
+
+        printf '%s\n' "${successful_phecodes[@]}" > successful_phecodes.txt
     >>>
 
     output {
-        Array[File] null_model_rdas     = glob("~{output_prefix}_step1Out_*.rda")
-        Array[File] variance_ratio_txts = glob("~{output_prefix}_step1Out_*.varianceRatio.txt")
+        File        successful_phecode_list = "successful_phecodes.txt"
+        Array[File] null_model_rdas         = glob("~{output_prefix}_step1Out_*.rda")
+        Array[File] variance_ratio_txts     = glob("~{output_prefix}_step1Out_*.varianceRatio.txt")
     }
 
     runtime {
