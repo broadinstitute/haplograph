@@ -28,9 +28,15 @@ pub struct EdgeInfo {
     pub overlapping_reads: String,
 }
 
+/// graph connectivity based on reference alignment order
 pub fn get_node_edge_info(
     windows: &Vec<(String, usize, usize)>,
-    final_hap_list: &Vec<HashMap<String, (String, HashMap<String, HashMap<usize, f32>>, f64)>>,
+    final_hap_list: &Vec<(
+        HashMap<String, (String, HashMap<String, HashMap<usize, f32>>, f64)>,
+        HashMap<String, (u64, u64)>,
+        HashMap<String, Vec<u8>>,
+        HashMap<String, String>,
+    )>,
     min_reads: usize
 ) -> (
     HashMap<String, NodeInfo>,
@@ -40,7 +46,12 @@ pub fn get_node_edge_info(
     let mut edge_info = HashMap::new();
 
     for (index, window) in windows.iter().enumerate() {
-        let final_hap_list_index = final_hap_list[index].clone();
+        let (
+            final_hap_list_index,
+            coordinate_list_index,
+            _read_sequence_dict_index,
+            _read_strand_dict_index,
+        ) = final_hap_list[index].clone();
 
         for (i, (final_haplotype_seq, (cigar, read_dict, allele_frequency))) in
             final_hap_list_index.iter().enumerate()
@@ -51,7 +62,6 @@ pub fn get_node_edge_info(
                 .map(|x| x.split("|").collect::<Vec<_>>()[0].to_string())
                 .collect::<HashSet<_>>();
             let node_id = format!("H.{}:{}-{}.{}", window.0, window.1, window.2, i);
-            // let cigar = cigar_dict_list[index].get(final_haplotype_seq).unwrap();
             let read_vector_len = read_vector.len();
             node_info.insert(
                 node_id.clone(),
@@ -67,23 +77,20 @@ pub fn get_node_edge_info(
                 },
             );
 
-            // add edge information
             if index < windows.len() - 1 {
                 let next_window = windows[index + 1].clone();
-                // every node only have one choice for the next window
                 for (
                     j,
                     (
                         next_final_haplotype_seq,
                         (next_cigar, next_methyl_dict, next_allele_frequency),
                     ),
-                ) in final_hap_list[index + 1].iter().enumerate()
+                ) in final_hap_list[index + 1].0.iter().enumerate()
                 {
                     let next_node_id = format!(
                         "H.{}:{}-{}.{}",
                         next_window.0, next_window.1, next_window.2, j
                     );
-                    // let next_cigar = cigar_dict_list[index + 1].get(next_final_haplotype_seq).unwrap();
                     let next_read_vector = next_methyl_dict.keys().cloned().collect::<Vec<_>>();
                     let next_read_vector_len = next_read_vector.len();
                     let next_read_vector_clone = next_read_vector
@@ -96,7 +103,6 @@ pub fn get_node_edge_info(
                         .collect::<Vec<_>>();
                     let overlap_ratio = overlapping_reads.len() as f64
                         / (read_vector_len as f64).max(next_read_vector_len as f64);
-                    // println!("readset1: {}, readset2: {}, overlap_ratio: {}", read_vector.len(), next_read_vector.len(), overlap_ratio);
                     if overlapping_reads.len() >= min_reads - 1 {
                         edge_info.insert(
                             (node_id.clone(), next_node_id.clone()),
@@ -133,7 +139,6 @@ pub fn write_gfa_output(
         let read_num = node_info.support_reads;
         let allele_frequency = node_info.allele_frequency;
         let methyl_info = node_info.methyl_info.clone();
-        // println!("methylation_info, {:?}", methyl_info);
         let read_names = node_info
             .methyl_info
             .keys()
@@ -146,19 +151,21 @@ pub fn write_gfa_output(
             .map(|(pos, score)| format!("{}:{}", pos, score))
             .collect::<Vec<_>>()
             .join(",");
-        let average_mod_score = mod_score_dict.values().sum::<f32>() / mod_score_dict.len() as f32;
-        // println!("mod_score_dict: {:?}", mod_score_dict);
-
+        let average_mod_score = if mod_score_dict.is_empty() {
+            0.0
+        } else {
+            mod_score_dict.values().sum::<f32>() / mod_score_dict.len() as f32
+        };
         let mut node_info_clone = BTreeMap::new();
         node_info_clone.insert("pos".to_string(), start.to_string());
-        // node_info_clone.insert("seq".to_string(), haplotype_seq);
         node_info_clone.insert("cigar".to_string(), haplotype_cigar.to_string());
         node_info_clone.insert("support_reads".to_string(), read_num.to_string());
-        node_info_clone.insert("allele_frequency".to_string(), allele_frequency.to_string());
+        node_info_clone.insert(
+            "allele_frequency".to_string(),
+            format!("{:.4}", allele_frequency),
+        );
         node_info_clone.insert("read_names".to_string(), read_names.to_string());
         node_info_clone.insert("mod_score_dict".to_string(), mod_score_dict_string);
-        // node_info_clone.insert("read_names".to_string(), read_names);
-        // anchor_info_clone.seq = String::new();
         let json_string =
             serde_json::to_string(&node_info_clone).unwrap_or_else(|_| "{}".to_string());
         let formatted_string = format!(
@@ -195,7 +202,9 @@ pub fn start(
     methyl_threshold: f32,
     frequency_min: f64,
     primary_only: bool,
+    pileup:bool,
     output_prefix: &String,
+    minimal_gap_length: usize,
 ) -> AnyhowResult<()> {
     // Parallelize window processing - each thread gets its own BAM reader
     info!("Processing {} windows in parallel", windows.len());
@@ -216,21 +225,69 @@ pub fn start(
                 min_reads,
                 frequency_min,
                 primary_only,
-                false,
+                pileup,
+                false
             )
             .with_context(|| format!("Failed to process window {}:{}-{}", chromosome, start, end))
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    let (node_info, edge_info) = get_node_edge_info(
-        windows,
-        &final_hap_list,
-        1_usize,
-    );
-
+    let (node_info, edge_info) = get_node_edge_info(windows, &final_hap_list, 1_usize);
+    println!("node_info: {:?}", node_info.len());
+    println!("edge_info: {:?}", edge_info.len());
     let gfa_output = PathBuf::from(format!("{}.gfa", output_prefix));
     let _ = write_gfa_output(&node_info, &edge_info, &gfa_output, methyl_threshold);
 
     info!("Graph reconstruction completed");
     Ok(())
+}
+
+#[cfg(test)]
+mod graph_e2e_tests {
+    use super::start as graph_start;
+    use bio::io::fastq;
+    use std::path::Path;
+
+    #[test]
+    fn graph_build_produces_gfa_nodes_on_tp53_window() {
+        let bam_path = "HG00097_tp53_test.bam";
+        if !Path::new(bam_path).exists() {
+            return;
+        }
+
+        let reference = vec![fastq::Record::with_attrs(
+            "chr17",
+            None,
+            vec![b'N'; 10_000_000].as_slice(),
+            &[],
+        )];
+        let windows = vec![("chr17".to_string(), 7668752_usize, 7668828_usize)];
+        let output_prefix = "test_tp53_graph_e2e";
+
+        graph_start(
+            &bam_path.to_string(),
+            &windows,
+            &reference,
+            &"HG00097".to_string(),
+            2,
+            0.5,
+            0.0,
+            false,
+            true,
+            &output_prefix.to_string(),
+            1,
+        )
+        .expect("graph build should succeed");
+
+        let gfa_path = format!("{output_prefix}.gfa");
+        let gfa = std::fs::read_to_string(&gfa_path).expect("GFA should be written");
+        let s_line_count = gfa.lines().filter(|line| line.starts_with('S')).count();
+
+        let _ = std::fs::remove_file(&gfa_path);
+
+        assert!(
+            s_line_count > 0,
+            "expected GFA segment lines after pileup sequence fix, got {s_line_count}"
+        );
+    }
 }

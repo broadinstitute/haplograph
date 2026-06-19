@@ -1,4 +1,3 @@
-use adjustp::{adjust, Procedure};
 use anyhow::Result as AnyhowResult;
 use bio::alignment::pairwise::*;
 use bio::alignment::AlignmentOperation;
@@ -6,7 +5,7 @@ use bio::io::fasta::Reader as FastaReader;
 use bio::io::fastq;
 use flate2::read::GzDecoder;
 use indicatif::ProgressBar;
-use log::{debug, warn};
+use log::debug;
 use ndarray::s;
 use ndarray::{Array1, Array2};
 use rand::seq::SliceRandom;
@@ -47,8 +46,7 @@ pub fn write_fasta(
     let mut file = File::create(output_filename)?;
     let chars_per_line = 60;
     for (header, sequence) in all_sequences.iter() {
-       writeln!(file, ">{}", header)?;
-        // write the sequence in fasta format
+        writeln!(file, ">{}", header)?;
         let seq_len = sequence.len();
         let full_lines = seq_len / chars_per_line;
         for i in 0..full_lines {
@@ -56,7 +54,6 @@ pub fn write_fasta(
             let end = start + chars_per_line;
             writeln!(file, "{}", &sequence[start..end])?;
         }
-        // Write any remaining characters that didn't make up a full line
         if seq_len % chars_per_line != 0 {
             writeln!(file, "{}", &sequence[full_lines * chars_per_line..])?;
         }
@@ -156,59 +153,9 @@ pub fn open_bam_file(alignment_bam: &String) -> IndexedReader {
     bam
 }
 
-pub fn get_chromosome_ref_seq(reference_fa: &String, chromosome: &str) -> Vec<fastq::Record> {
-    debug!("Opening FASTA file: {}", reference_fa);
-
-    // Open FASTA file (supports both regular and gzipped files)
-    let file = File::open(reference_fa).expect("Failed to open FASTA file");
-    let reader: Box<dyn BufRead> = if reference_fa.ends_with(".gz") {
-        let gz_decoder = GzDecoder::new(file);
-        Box::new(BufReader::new(gz_decoder))
-    } else {
-        Box::new(BufReader::new(file))
-    };
-    let fasta_reader = FastaReader::new(reader);
-
-    let mut reference_seqs = Vec::new();
-
-    for result in fasta_reader.records() {
-        let record = result.expect("Failed to read FASTA record");
-        let seq_id = record.id().to_string();
-        let sequence = String::from_utf8_lossy(record.seq()).to_string();
-
-        // Check if this sequence matches the target chromosome
-        if seq_id == chromosome {
-            debug!(
-                "Extracting region {} from chromosome {}",
-                chromosome, seq_id
-            );
-            let chromosome_seq = sequence;
-            let record_id = seq_id;
-            let fastq_record = fastq::Record::with_attrs(
-                &record_id,
-                None,
-                chromosome_seq.as_bytes(),
-                vec![30; chromosome_seq.len()].as_slice(), // Default quality score
-            );
-            reference_seqs.push(fastq_record);
-            debug!("Extracted reference sequence: {} bp", chromosome_seq.len());
-        }
-    }
-
-    if reference_seqs.is_empty() {
-        warn!(
-            "No matching chromosome '{}' found in FASTA file",
-            chromosome
-        );
-    }
-
-    reference_seqs
-}
-
 pub fn get_all_ref_seq(reference_fa: &String) -> Vec<fastq::Record> {
     debug!("Opening FASTA file: {}", reference_fa);
 
-    // Open FASTA file (supports both regular and gzipped files)
     let file = File::open(reference_fa).expect("Failed to open FASTA file");
     let reader: Box<dyn BufRead> = if reference_fa.ends_with(".gz") {
         let gz_decoder = GzDecoder::new(file);
@@ -229,10 +176,9 @@ pub fn get_all_ref_seq(reference_fa: &String) -> Vec<fastq::Record> {
             &seq_id,
             None,
             sequence.as_bytes(),
-            vec![30; sequence.len()].as_slice(), // Default quality score
+            vec![30; sequence.len()].as_slice(),
         );
         reference_seqs.push(fastq_record);
-        // info!("Extracted {} reference sequences", reference_seqs.len());
     }
 
     reference_seqs
@@ -271,19 +217,6 @@ pub fn split_locus(locus: String) -> (String, usize, usize) {
     (chromosome, start, end)
 }
 
-pub fn mask_ns(seq: &str) -> String {
-    seq.chars()
-        .map(|c| {
-            let upper_c = c.to_ascii_uppercase();
-            if !['A', 'G', 'C', 'T'].contains(&upper_c) {
-                c.to_ascii_lowercase()
-            } else {
-                upper_c
-            }
-        })
-        .collect()
-}
-
 pub fn alignment_to_cigar(operations: &[AlignmentOperation]) -> String {
     let mut cigar: Vec<(usize, char)> = Vec::new();
 
@@ -317,27 +250,7 @@ pub fn gap_open_aligner(reference: &str, sequence: &str) -> String {
 
     // Perform the alignment
     let alignment = aligner.global(sequence.as_bytes(), reference.as_bytes());
-
-    // Get the aligned sequences
-    
-    // println!("{:?}", cigar);
-
     alignment_to_cigar(&alignment.operations)
-}
-
-/// Find overlapping reads between two read vectors
-pub fn find_overlapping_reads(read_vector1: &[String], read_vector2: &[String]) -> Vec<String> {
-    let set1: std::collections::HashSet<String> = read_vector1
-        .iter()
-        .map(|s| s.split('|').next().unwrap().to_string())
-        .collect();
-    let set2: std::collections::HashSet<String> = read_vector2
-        .iter()
-        .map(|s| s.split('|').next().unwrap().to_string())
-        .collect();
-
-    set1.intersection(&set2).cloned()
-        .collect()
 }
 
 pub fn import_bed(bed_file: &String) -> Vec<(String, usize, usize)> {
@@ -411,7 +324,7 @@ pub fn combine_cigar(cigar: &str) -> String {
     out
 }
 
-fn jaccard_distance(vector1: &[bool], vector2: &[bool]) -> f64 {
+pub fn jaccard_distance(vector1: &[bool], vector2: &[bool]) -> f64 {
     assert_eq!(
         vector1.len(),
         vector2.len(),
@@ -515,7 +428,7 @@ fn calculate_observation_statistics(
 }
 
 /// Calculate p-value using z-score approach
-fn calculate_p_value(statistics: &[f64], observation: f64) -> f64 {
+pub fn calculate_p_value(statistics: &[f64], observation: f64) -> f64 {
     let n = statistics.len() as f64;
 
     // Calculate mean
@@ -524,8 +437,6 @@ fn calculate_p_value(statistics: &[f64], observation: f64) -> f64 {
     // Calculate standard deviation
     let variance = statistics.iter().map(|&x| (x - mu).powi(2)).sum::<f64>() / n;
     let sigma = variance.sqrt();
-    // println!("{:?}, {}", statistics, observation);
-
     let z_score = (observation - mu) / sigma;
 
     // Calculate p-value using normal distribution CDF
@@ -541,7 +452,6 @@ pub fn permutation_test(
 ) -> Vec<String> {
     let bar = ProgressBar::new(node_list.len() as u64);
     let statistics = get_null_distribution(&node_list, matrix, permutation_round);
-    // Replace par_iter().enumerate() with this pattern
     let (indices, collected_values): (Vec<_>, Vec<_>) = (0..node_list.len())
         .into_par_iter()
         .map(|i| {
@@ -564,18 +474,16 @@ pub fn permutation_test(
         }
     }
 
-    // adjust pvalues, create excluded_index list
     let mut excluded_index = Vec::new();
-    // println!("raw_p_values: {:?}", raw_p_values);
+
     if !raw_p_values.is_empty() {
-        let qvalues = adjust(&raw_p_values, Procedure::BenjaminiHochberg);
-        for (qi, q_value) in qvalues.iter().enumerate() {
-            let test_index_value = &test_index[qi];
-            if q_value > &p_value_threshold {
+        for (pi, p_value) in raw_p_values.iter().enumerate() {
+            let test_index_value = &test_index[pi];
+            if p_value > &p_value_threshold {
                 excluded_index.push(test_index_value);
                 debug!(
                     "excluded_index: {:?}, q_value: {:?}",
-                    test_index_value, q_value
+                    test_index_value, p_value
                 );
             }
         }
@@ -583,10 +491,8 @@ pub fn permutation_test(
 
     bar.finish();
 
-    // filter variants
     let mut index_list = Vec::new();
     let mut f_node: Vec<String> = Vec::new();
-    // get index list and var_list
     for (r, rindex) in node_list.iter().enumerate() {
         if !excluded_index.contains(&rindex) {
             index_list.push(r);

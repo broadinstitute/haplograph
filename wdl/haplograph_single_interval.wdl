@@ -80,7 +80,6 @@ task haplograph {
                                                         -m ~{minimal_supported_reads} \
                                                         -w ~{windowsize} \
                                                         -f gfa \
-                                                        -c ~{fold_threshold}
                                                         ~{extra_arg}
         
         ls -l .

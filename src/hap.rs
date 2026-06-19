@@ -5,7 +5,6 @@ use anyhow::{Context, Result as AnyhowResult};
 use bio::io::fastq;
 use log::{debug, info};
 use rayon::prelude::*;
-use rust_htslib::bam::Read as BamRead;
 use rust_htslib::bcf::{self};
 use std::path::PathBuf;
 
@@ -17,6 +16,7 @@ pub fn start(
     min_reads: usize,
     frequency_min: f64,
     primary_only: bool,
+    pileup:bool,
     output_prefix: &String,
     default_file_format: &String,
     methyl_threshold: f32,
@@ -27,9 +27,7 @@ pub fn start(
             .par_iter()
             .map(|window| {
                 let (chromosome, start, end) = window;
-                // Create a new BAM reader for this thread
                 let mut bam = util::open_bam_file(bam_path);
-                // Process this window
                 intervals::start(
                     &mut bam,
                     reference_fa,
@@ -40,6 +38,7 @@ pub fn start(
                     min_reads,
                     frequency_min,
                     primary_only,
+                    pileup,
                     false,
                 )
                 .with_context(|| {
@@ -61,7 +60,6 @@ pub fn start(
                 .as_bytes(),
             );
         }
-        // header.push_record(format!("##INFO=<ID=SOMATIC,Number=0,Type=Flag,Description=\"Somatic mutation\">\n").as_bytes());
         header.push_record(
             "##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Read Depth\">\n".to_string()
                 .as_bytes(),
@@ -102,7 +100,7 @@ pub fn start(
             let mut record = writer.empty_record();
             let reference_seq = reference_sequence[*start..*end].to_string();
             let mut bam = util::open_bam_file(&bam_path.clone());
-            let haplotype_info = intervals::start(
+            let (haplotype_info, _,_, _) = intervals::start(
                 &mut bam,
                 reference_fa,
                 chromosome,
@@ -112,6 +110,7 @@ pub fn start(
                 min_reads,
                 frequency_min,
                 primary_only,
+                true,
                 false,
             )
             .unwrap();
@@ -136,7 +135,7 @@ pub fn start(
                 continue;
             }
             let mut record_list = ref_record_list;
-            record_list.extend(alt_record_list); // first element is the reference record
+            record_list.extend(alt_record_list);
 
             record.set_rid(Some(reference_id as u32));
             record.set_pos(*start as i64);
