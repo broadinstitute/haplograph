@@ -274,10 +274,9 @@ fn collapse_identical_records(variants: Vec<Variant>) -> Vec<Variant> {
     collapsed_variants
 }
 
-fn find_coverage_from_gfa(gfa_filename: &PathBuf) -> HashMap<usize, usize> {
+fn find_coverage_from_node_info(node_info: &HashMap<String, asm::NodeInfo>) -> HashMap<usize, usize> {
     let mut coverage = HashMap::new();
-    let (node_info, edge_info) = asm::load_graph(gfa_filename).unwrap();
-    let interval_node = asm::find_parallele_nodes(&node_info);
+    let interval_node = asm::find_parallele_nodes(node_info);
     for (interval, nodes) in interval_node.iter() {
         let mut allele_count = 0;
         for node in nodes.iter() {
@@ -291,11 +290,12 @@ fn find_coverage_from_gfa(gfa_filename: &PathBuf) -> HashMap<usize, usize> {
         for pos in startpos..endpos {
             *coverage.entry(pos + 1).or_insert(0) += allele_count;
         }
+        let _ = interval;
     }
     coverage
 }
 
-fn write_vcf(
+pub fn write_vcf(
     variants: &[Variant],
     coverage: &HashMap<usize, usize>,
     output_prefix: String,
@@ -737,13 +737,17 @@ pub fn start(
     output_prefix: &String,
     haplotype_number: usize,
     sequencing_technology: &String,
+    preloaded_graph: Option<(HashMap<String, asm::NodeInfo>, HashMap<String, Vec<String>>)>,
 ) -> AnyhowResult<()> {
-    let (node_info, edge_info) = asm::load_graph(graph_filename).unwrap();
+    let (node_info, _edge_info) = match preloaded_graph {
+        Some((node_info, edge_info)) => (node_info, edge_info),
+        None => asm::load_graph(graph_filename).unwrap(),
+    };
     if node_info.is_empty() {
         warn!("No nodes found in the graph");
         return Err(anyhow::anyhow!("No nodes found in the graph"));
     }
-    let coverage = find_coverage_from_gfa(graph_filename);
+    let coverage = find_coverage_from_node_info(&node_info);
     let chromosome = node_info
         .keys()
         .collect::<Vec<_>>()

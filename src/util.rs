@@ -6,11 +6,15 @@ use bio::io::fastq;
 use flate2::read::GzDecoder;
 use indicatif::ProgressBar;
 use log::debug;
+use log::info;
 use ndarray::s;
 use ndarray::{Array1, Array2};
 use rand::seq::SliceRandom;
 use rayon::prelude::*;
 use rust_htslib::bam::{self, record::Aux, IndexedReader, Read as BamRead};
+use rust_htslib::faidx;
+use std::cell::RefCell;
+use std::path::Path;
 use statrs::distribution::ContinuousCDF;
 use statrs::distribution::Normal;
 use std::collections::HashMap;
@@ -136,6 +140,31 @@ pub fn get_sm_name_from_rg(
     }
 }
 
+/// Step size for sampled mean-depth estimation on large intervals.
+pub const MEAN_DEPTH_SAMPLE_STEP: usize = 1024;
+
+thread_local! {
+    static THREAD_BAM: RefCell<Option<(String, IndexedReader)>> = const { RefCell::new(None) };
+}
+
+/// Reuse one `IndexedReader` per rayon worker thread instead of opening per window.
+pub fn with_thread_local_bam<F, R>(bam_path: &str, f: F) -> R
+where
+    F: FnOnce(&mut IndexedReader) -> R,
+{
+    THREAD_BAM.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let need_open = slot
+            .as_ref()
+            .map(|(path, _)| path != bam_path)
+            .unwrap_or(true);
+        if need_open {
+            *slot = Some((bam_path.to_string(), open_bam_file(&bam_path.to_string())));
+        }
+        f(&mut slot.as_mut().unwrap().1)
+    })
+}
+
 pub fn open_bam_file(alignment_bam: &String) -> IndexedReader {
     // Open BAM file
     if alignment_bam.starts_with("gs://") && std::env::var("GCS_OAUTH_TOKEN").is_err() {
@@ -153,47 +182,173 @@ pub fn open_bam_file(alignment_bam: &String) -> IndexedReader {
     bam
 }
 
-pub fn get_all_ref_seq(reference_fa: &String) -> Vec<fastq::Record> {
-    debug!("Opening FASTA file: {}", reference_fa);
+/// Mean read depth over `[start, end)` on `chromosome`, counting uncovered positions as zero.
+/// Large intervals use position sampling every [`MEAN_DEPTH_SAMPLE_STEP`] bp.
+pub fn mean_depth(
+    bam: &mut IndexedReader,
+    chromosome: &str,
+    start: usize,
+    end: usize,
+) -> AnyhowResult<f64> {
+    let region_len = end.saturating_sub(start);
+    if region_len == 0 {
+        return Ok(0.0);
+    }
+    if bam.header().tid(chromosome.as_bytes()).is_none() {
+        anyhow::bail!("Chromosome {chromosome} not found in BAM header");
+    }
+    bam.fetch((chromosome.as_bytes(), start as u64, end as u64))?;
 
+    let mean = if region_len <= MEAN_DEPTH_SAMPLE_STEP * 2 {
+        let mut depth_at = vec![0u32; region_len];
+        for pileup_result in bam.pileup() {
+            let pileup = pileup_result?;
+            let pos = pileup.pos() as usize;
+            if pos >= start && pos < end {
+                depth_at[pos - start] = pileup.depth();
+            }
+        }
+        depth_at.iter().map(|d| *d as u64).sum::<u64>() as f64 / region_len as f64
+    } else {
+        let sample_count = region_len.div_ceil(MEAN_DEPTH_SAMPLE_STEP);
+        let mut depth_samples = vec![0u32; sample_count];
+        for pileup_result in bam.pileup() {
+            let pileup = pileup_result?;
+            let pos = pileup.pos() as usize;
+            if pos < start || pos >= end {
+                continue;
+            }
+            let offset = pos - start;
+            if offset.is_multiple_of(MEAN_DEPTH_SAMPLE_STEP) {
+                depth_samples[offset / MEAN_DEPTH_SAMPLE_STEP] = pileup.depth();
+            }
+        }
+        depth_samples.iter().map(|d| *d as u64).sum::<u64>() as f64 / sample_count as f64
+    };
+
+    info!(
+        "Mean depth for {}:{}-{} = {:.2}x",
+        chromosome, start, end, mean
+    );
+    Ok(mean)
+}
+
+fn read_fasta_streaming(reference_fa: &str) -> Vec<fastq::Record> {
+    debug!("Opening FASTA file (streaming): {}", reference_fa);
     let file = File::open(reference_fa).expect("Failed to open FASTA file");
     let reader: Box<dyn BufRead> = if reference_fa.ends_with(".gz") {
-        let gz_decoder = GzDecoder::new(file);
-        Box::new(BufReader::new(gz_decoder))
+        Box::new(BufReader::new(GzDecoder::new(file)))
     } else {
         Box::new(BufReader::new(file))
     };
     let fasta_reader = FastaReader::new(reader);
-
     let mut reference_seqs = Vec::new();
-
     for result in fasta_reader.records() {
         let record = result.expect("Failed to read FASTA record");
         let seq_id = record.id().to_string();
         let sequence = String::from_utf8_lossy(record.seq()).to_string();
-
-        let fastq_record = fastq::Record::with_attrs(
+        reference_seqs.push(fastq::Record::with_attrs(
             &seq_id,
             None,
             sequence.as_bytes(),
             vec![30; sequence.len()].as_slice(),
-        );
-        reference_seqs.push(fastq_record);
+        ));
+    }
+    reference_seqs
+}
+
+/// FASTA accessor backed by faidx (one chromosome at a time).
+pub struct ReferenceFasta {
+    reader: faidx::Reader,
+}
+
+impl ReferenceFasta {
+    pub fn open(reference_fa: &str) -> AnyhowResult<Self> {
+        if reference_fa.ends_with(".gz") {
+            anyhow::bail!(
+                "indexed FASTA access requires an uncompressed FASTA with a .fai index; got {reference_fa}"
+            );
+        }
+        let path = Path::new(reference_fa);
+        let fai_path = format!("{reference_fa}.fai");
+        if !Path::new(&fai_path).exists() {
+            faidx::build(path).map_err(|err| anyhow::anyhow!("failed to build FASTA index: {err}"))?;
+        }
+        let reader = faidx::Reader::from_path(path)
+            .map_err(|err| anyhow::anyhow!("failed to open indexed FASTA {reference_fa}: {err}"))?;
+        Ok(Self { reader })
     }
 
-    reference_seqs
+    pub fn sequence_names(&self) -> AnyhowResult<Vec<String>> {
+        self.reader
+            .seq_names()
+            .map_err(|err| anyhow::anyhow!("failed to read FASTA sequence names: {err}"))
+    }
+
+    pub fn fetch_chromosome_record(&self, chromosome: &str) -> AnyhowResult<fastq::Record> {
+        let seq_len = self.reader.fetch_seq_len(chromosome) as usize;
+        let sequence = self
+            .reader
+            .fetch_seq_string(chromosome, 0, seq_len)
+            .map_err(|err| anyhow::anyhow!("failed to fetch {chromosome}: {err}"))?;
+        Ok(fastq::Record::with_attrs(
+            chromosome,
+            None,
+            sequence.as_bytes(),
+            vec![30; sequence.len()].as_slice(),
+        ))
+    }
+
+    pub fn fetch_all_chromosome_records(&self) -> AnyhowResult<Vec<fastq::Record>> {
+        self.sequence_names()?
+            .into_iter()
+            .map(|chrom| self.fetch_chromosome_record(&chrom))
+            .collect()
+    }
+}
+
+pub fn get_all_ref_seq(reference_fa: &String) -> Vec<fastq::Record> {
+    if reference_fa.ends_with(".gz") {
+        return read_fasta_streaming(reference_fa);
+    }
+    match ReferenceFasta::open(reference_fa) {
+        Ok(genome) => genome
+            .fetch_all_chromosome_records()
+            .unwrap_or_else(|_| read_fasta_streaming(reference_fa)),
+        Err(_) => read_fasta_streaming(reference_fa),
+    }
 }
 
 pub fn get_ref_seq_from_chromosome(
     reference_fa: &String,
     chromosome: &str,
 ) -> (Vec<fastq::Record>, Vec<fastq::Record>) {
-    let reference_seqs = get_all_ref_seq(reference_fa);
-    let reference_seqs_chromosome = reference_seqs
-        .iter()
-        .filter(|r| r.id() == chromosome).cloned()
-        .collect::<Vec<fastq::Record>>();
+    if reference_fa.ends_with(".gz") {
+        let reference_seqs = get_all_ref_seq(reference_fa);
+        let reference_seqs_chromosome = reference_seqs
+            .iter()
+            .filter(|r| r.id() == chromosome)
+            .cloned()
+            .collect();
+        return (reference_seqs, reference_seqs_chromosome);
+    }
 
+    let genome = ReferenceFasta::open(reference_fa)
+        .unwrap_or_else(|_| panic!("Failed to open reference FASTA: {reference_fa}"));
+    let reference_seqs = genome
+        .fetch_all_chromosome_records()
+        .unwrap_or_else(|_| get_all_ref_seq(reference_fa));
+    let reference_seqs_chromosome = vec![
+        genome
+            .fetch_chromosome_record(chromosome)
+            .unwrap_or_else(|_| {
+                reference_seqs
+                    .iter()
+                    .find(|r| r.id() == chromosome)
+                    .cloned()
+                    .expect("chromosome not found in reference")
+            }),
+    ];
     (reference_seqs, reference_seqs_chromosome)
 }
 

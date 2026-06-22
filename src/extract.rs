@@ -1,4 +1,5 @@
 use crate::intervals;
+use crate::methyl;
 use crate::util;
 use anyhow::{Context, Result as AnyhowResult};
 use indicatif::ProgressBar;
@@ -207,10 +208,6 @@ pub fn extract_haplotypes_from_bam(
     // pb.set_message("Processing alignments...");
 
     let _ = bam.fetch((chr.as_bytes(), start, end));
-    let bounds = record_interval_query_bounds_range(bam, start, end)?;
-
-    let mut filtered_sequence_dict = HashMap::new();
-    let _ = bam.fetch((chr.as_bytes(), start, end));
     let mut records_by_qname: HashMap<String, Vec<BamRecord>> = HashMap::new();
     for record_result in bam.records() {
         let record = record_result?;
@@ -218,12 +215,13 @@ pub fn extract_haplotypes_from_bam(
             continue;
         }
         let read_name = String::from_utf8_lossy(record.qname()).into_owned();
-        records_by_qname
-            .entry(read_name)
-            .or_default()
-            .push(record);
+        records_by_qname.entry(read_name).or_default().push(record);
     }
 
+    let _ = bam.fetch((chr.as_bytes(), start, end));
+    let bounds = record_interval_query_bounds_range(bam, start, end)?;
+
+    let mut filtered_sequence_dict = HashMap::new();
     for (read_name, mut records) in records_by_qname {
         records.sort_by_key(|r| r.pos());
         let start_key = match bounds.window_start_align.get(&read_name) {
@@ -269,7 +267,7 @@ pub fn extract_haplotypes_coordinates_from_bam(
     HashMap<String, Vec<u8>>,
     HashMap<String, Vec<u8>>,
     HashMap<String, String>,
-    HashMap<String, BamRecord>,
+    HashMap<String, HashMap<usize, f32>>,
 )> {
     let pb = ProgressBar::new_spinner();
     pb.set_style(
@@ -277,7 +275,16 @@ pub fn extract_haplotypes_coordinates_from_bam(
             .template("{spinner:.green} [{elapsed_precise}] {msg}")
             .unwrap(),
     );
-    // pb.set_message("Processing alignments...");
+
+    let _ = bam.fetch((chr.as_bytes(), start, end));
+    let mut collected_records: Vec<BamRecord> = Vec::new();
+    for record_result in bam.records() {
+        let record = record_result?;
+        if primary_only && (record.is_secondary() || record.is_supplementary()) {
+            continue;
+        }
+        collected_records.push(record);
+    }
 
     let _ = bam.fetch((chr.as_bytes(), start, end));
     let bounds = record_interval_query_bounds_range(bam, start, end)?;
@@ -286,16 +293,10 @@ pub fn extract_haplotypes_coordinates_from_bam(
     let mut read_sequence_dict_formatted = HashMap::new();
     let mut read_quality_dict_formatted = HashMap::new();
     let mut read_strand_dict_formatted = HashMap::new();
-    let mut bam_records_dict_formatted = HashMap::new();
-    let _ = bam.fetch((chr.as_bytes(), start, end));
-    for record_result in bam.records() {
-        let record = record_result?;
+    let mut read_methyl_dict_formatted = HashMap::new();
+    for record in collected_records {
         let read_name = String::from_utf8_lossy(record.qname()).into_owned();
         let align_key = alignment_bounds_key(&read_name, record.pos());
-
-        if primary_only && (record.is_secondary() || record.is_supplementary()) {
-            continue;
-        }
 
         if bounds.deletion_spanning.contains(&align_key) {
             let record_id = format!(
@@ -308,7 +309,7 @@ pub fn extract_haplotypes_coordinates_from_bam(
             read_quality_dict_formatted.insert(record_id.clone(), Vec::new());
             read_strand_dict_formatted
                 .insert(record_id.clone(), record.strand().to_string());
-            bam_records_dict_formatted.insert(record_id, record.clone());
+            read_methyl_dict_formatted.insert(record_id, HashMap::new());
             continue;
         }
 
@@ -338,7 +339,10 @@ pub fn extract_haplotypes_coordinates_from_bam(
         read_sequence_dict_formatted.insert(record_id.clone(), read_seq_final.clone().into_bytes());
         read_quality_dict_formatted.insert(record_id.clone(), record.qual().to_vec());
         read_strand_dict_formatted.insert(record_id.clone(), read_strand);
-        bam_records_dict_formatted.insert(record_id.clone(), record.clone());
+        read_methyl_dict_formatted.insert(
+            record_id.clone(),
+            methyl::get_methylation_read(&record, *start_pos, *end_pos, 'm'),
+        );
 
         if read_coordinates_formatted.len() % 100 == 0 {
             pb.set_message(format!(
@@ -359,7 +363,7 @@ pub fn extract_haplotypes_coordinates_from_bam(
         read_quality_dict_formatted,
         read_sequence_dict_formatted,
         read_strand_dict_formatted,
-        bam_records_dict_formatted,
+        read_methyl_dict_formatted,
     ))
 }
 
@@ -374,7 +378,7 @@ pub fn start(
     pileup: bool,
 ) -> AnyhowResult<()> {
     if pileup {
-        let (reads, read_coordinates, read_sequence_dictionary, bam_records, read_strand_dictionary) =
+        let (reads, _read_coordinates, _read_sequence_dictionary, _read_methyl, _read_strand_dictionary) =
             intervals::extract_haplotypes_coordinates_from_bam_pileup(
                 bam,
                 chromosome,
