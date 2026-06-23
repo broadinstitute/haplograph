@@ -940,6 +940,170 @@ pub fn get_supports(node_info: &HashMap<String, NodeInfo>, path: &Vec<String>) -
     supports
 }
 
+#[derive(Clone)]
+struct PathState {
+    path: Vec<String>,
+    sequence: String,
+    read_names: HashSet<String>,
+    supports: usize,
+    span: usize,
+}
+
+fn path_state_from_node(node_info: &HashMap<String, NodeInfo>, node: &str) -> Option<PathState> {
+    let info = node_info.get(node)?;
+    let read_names = get_read_name_list(node_info, node.to_string());
+    let (start, end) =
+        eval::find_alignment_intervals([node.to_string()].iter().map(|x| x.as_str()).collect())
+            .ok()?;
+    Some(PathState {
+        path: vec![node.to_string()],
+        sequence: info.seq.clone(),
+        read_names,
+        supports: info.support_reads,
+        span: end.saturating_sub(start),
+    })
+}
+
+fn extend_path_state(
+    node_info: &HashMap<String, NodeInfo>,
+    prev: &PathState,
+    node: &str,
+) -> Option<PathState> {
+    let info = node_info.get(node)?;
+    let mut path = prev.path.clone();
+    path.push(node.to_string());
+    let mut read_names = prev.read_names.clone();
+    read_names.extend(get_read_name_list(node_info, node.to_string()));
+    let sequence = format!("{}{}", prev.sequence, info.seq);
+    let (start, end) = eval::find_alignment_intervals(path.iter().map(|x| x.as_str()).collect()).ok()?;
+    Some(PathState {
+        path: path.clone(),
+        sequence,
+        read_names,
+        supports: get_supports(node_info, &path),
+        span: end.saturating_sub(start),
+    })
+}
+
+fn path_state_better(a: &PathState, b: &PathState) -> bool {
+    a.span > b.span || (a.span == b.span && a.supports > b.supports)
+}
+
+/// Layer-wise DP over the window graph: one best path per haplotype (max span, then supports).
+pub fn find_best_haplotype_paths_dp(
+    node_info: &HashMap<String, NodeInfo>,
+    edge_info: &HashMap<String, Vec<String>>,
+    node_haplotype: &HashMap<String, HashSet<usize>>,
+    haplotype_number: usize,
+) -> HashMap<usize, (Vec<String>, String, HashSet<String>, usize, usize)> {
+    let mut pred_map: HashMap<String, Vec<String>> = HashMap::new();
+    for (src, dsts) in edge_info.iter() {
+        for dst in dsts {
+            pred_map.entry(dst.clone()).or_default().push(src.clone());
+        }
+    }
+
+    let parallel_nodes = find_parallele_nodes(node_info);
+    let mut interval_list: Vec<String> = parallel_nodes.keys().cloned().collect();
+    interval_list.sort_by(|a, b| {
+        util::split_locus(a.clone())
+            .1
+            .cmp(&util::split_locus(b.clone()).1)
+    });
+
+    let mut node_interval: HashMap<String, String> = HashMap::new();
+    for (interval, nodes) in &parallel_nodes {
+        for node in nodes {
+            node_interval.insert(node.clone(), interval.clone());
+        }
+    }
+
+    let mut best_by_hap: HashMap<usize, (Vec<String>, String, HashSet<String>, usize, usize)> =
+        HashMap::new();
+
+    for hap in 0..haplotype_number {
+        let mut dp: HashMap<String, PathState> = HashMap::new();
+
+        for (interval_idx, interval) in interval_list.iter().enumerate() {
+            let Some(nodes) = parallel_nodes.get(interval) else {
+                continue;
+            };
+            let prev_interval = interval_idx.checked_sub(1).map(|i| &interval_list[i]);
+            for node in nodes {
+                let Some(tags) = node_haplotype.get(node) else {
+                    continue;
+                };
+                if !tags.contains(&hap) {
+                    continue;
+                }
+
+                let preds = pred_map.get(node).map(|v| v.as_slice()).unwrap_or(&[]);
+                let mut best: Option<PathState> = None;
+
+                for pred in preds {
+                    if let Some(prev_int) = prev_interval {
+                        if node_interval.get(pred) != Some(prev_int) {
+                            continue;
+                        }
+                    }
+                    if let Some(prev) = dp.get(pred) {
+                        if let Some(extended) = extend_path_state(node_info, prev, node) {
+                            if best.as_ref().map_or(true, |b| path_state_better(&extended, b)) {
+                                best = Some(extended);
+                            }
+                        }
+                    }
+                }
+
+                if best.is_none() {
+                    if let Some(start) = path_state_from_node(node_info, node) {
+                        best = Some(start);
+                    }
+                }
+
+                if let Some(state) = best {
+                    dp.entry(node.clone())
+                        .and_modify(|existing| {
+                            if path_state_better(&state, existing) {
+                                *existing = state.clone();
+                            }
+                        })
+                        .or_insert(state);
+                }
+            }
+        }
+
+        let mut hap_best: Option<PathState> = None;
+        for (node, state) in &dp {
+            if !node_haplotype
+                .get(node)
+                .map(|t| t.contains(&hap))
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            if hap_best.as_ref().map_or(true, |b| path_state_better(state, b)) {
+                hap_best = Some(state.clone());
+            }
+        }
+
+        if let Some(state) = hap_best {
+            best_by_hap.insert(
+                hap,
+                (
+                    state.path,
+                    state.sequence,
+                    state.read_names,
+                    state.supports,
+                    state.span,
+                ),
+            );
+        }
+    }
+
+    best_by_hap
+}
+
 pub fn find_full_range_haplotypes(
     node_info: &HashMap<String, NodeInfo>,
     all_sequences: &HashMap<usize, Vec<(Vec<String>, String, HashSet<String>)>>,
@@ -1315,21 +1479,15 @@ pub fn start(
 ) -> AnyhowResult<(HashMap<usize, (Vec<String>, String, HashSet<String>, usize, usize)>, HashMap<String, NodeInfo>, HashMap<String, Vec<String>>)> {
     let (node_info, edge_info) = load_graph(graph_filename).unwrap();
 
-    let (haplotype_reads, node_haplotype) =
+    let (_haplotype_reads, node_haplotype) =
         find_node_haplotype(&node_info, haplotype_number);
-    let all_paths = enumerate_all_paths_with_haplotype(
+    let primary_haplotypes = find_best_haplotype_paths_dp(
         &node_info,
         &edge_info,
         &node_haplotype,
         haplotype_number,
-    )
-    .expect("Failed to enumerate all paths");
-    info!("All paths enumerated: {}", all_paths.len());
-
-    let allseq = construct_sequences_from_haplotype_path(&node_info, &all_paths);
-    let primary_haplotypes =
-        find_full_range_haplotypes(&node_info, &allseq);
-    info!("All sequences constructed: {}", primary_haplotypes.len());
+    );
+    info!("Best haplotype paths (DP): {}", primary_haplotypes.len());
     call_methylation(&node_info, primary_haplotypes.clone(), output_prefix);
     info!(
         "Haplotype specific methylation signals exported: {}",
@@ -1342,4 +1500,72 @@ pub fn start(
         output_prefix.to_str().unwrap()
     );
     Ok((primary_haplotypes, node_info.clone(), edge_info.clone()))
+}
+
+#[cfg(test)]
+mod path_dp_tests {
+    use super::{
+        find_best_haplotype_paths_dp, find_full_range_haplotypes, enumerate_all_paths_with_haplotype,
+        construct_sequences_from_haplotype_path, NodeInfo,
+    };
+    use std::collections::{HashMap, HashSet};
+
+    fn test_node(id: &str, seq: &str, reads: &str, support: usize) -> NodeInfo {
+        NodeInfo {
+            seq: seq.to_string(),
+            cigar: format!("{}M", seq.len()),
+            support_reads: support,
+            allele_frequency: "0.5".to_string(),
+            read_names: reads.to_string(),
+            methyl_info: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn dp_matches_longest_dfs_path_on_linear_graph() {
+        let mut node_info = HashMap::new();
+        node_info.insert(
+            "H.chr1:1-10.0".to_string(),
+            test_node("H.chr1:1-10.0", "AAAAAAAAAA", "r1,r2", 2),
+        );
+        node_info.insert(
+            "H.chr1:10-20.0".to_string(),
+            test_node("H.chr1:10-20.0", "CCCCCCCCCC", "r1,r2", 2),
+        );
+        node_info.insert(
+            "H.chr1:20-30.0".to_string(),
+            test_node("H.chr1:20-30.0", "GGGGGGGGGG", "r1,r2", 2),
+        );
+
+        let mut edge_info = HashMap::new();
+        edge_info.insert(
+            "H.chr1:1-10.0".to_string(),
+            vec!["H.chr1:10-20.0".to_string()],
+        );
+        edge_info.insert(
+            "H.chr1:10-20.0".to_string(),
+            vec!["H.chr1:20-30.0".to_string()],
+        );
+
+        let mut node_haplotype = HashMap::new();
+        for id in node_info.keys() {
+            node_haplotype.insert(id.clone(), HashSet::from([0]));
+        }
+
+        let dp = find_best_haplotype_paths_dp(&node_info, &edge_info, &node_haplotype, 1);
+        assert_eq!(dp.len(), 1);
+        assert_eq!(dp[&0].0.len(), 3);
+        assert_eq!(dp[&0].1.len(), 30);
+
+        let all_paths = enumerate_all_paths_with_haplotype(
+            &node_info,
+            &edge_info,
+            &node_haplotype,
+            1,
+        )
+        .unwrap();
+        let allseq = construct_sequences_from_haplotype_path(&node_info, &all_paths);
+        let dfs_best = find_full_range_haplotypes(&node_info, &allseq);
+        assert_eq!(dp[&0].1, dfs_best[&0].1);
+    }
 }

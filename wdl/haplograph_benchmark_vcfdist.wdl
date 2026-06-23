@@ -40,20 +40,18 @@ workflow haplograph_benchmark_vcfdist {
 
 
     if (!skip_haplograph) {
-        call localize_bam {
+        call CalculateCoverage {
             input:
                 bam = alignment_bam,
                 bai = alignment_bai,
                 locus = locus,
-                sample = sample,
-                locus_tag = "",
-                docker = samtools_docker
+                prefix = output_prefix + "_" + locus
         }
 
         call run_haplograph_benchmark {
             input:
-                bam = localize_bam.local_bam,
-                bai = localize_bam.local_bai,
+                bam = CalculateCoverage.subsetbam,
+                bai = CalculateCoverage.subsetbai,
                 reference_fa = reference_fa,
                 sample = sample,
                 output_prefix = output_prefix,
@@ -89,8 +87,6 @@ workflow haplograph_benchmark_vcfdist {
     output {
         Int locus_len = parse_locus.locus_len
         Boolean merged = parse_locus.needs_merge
-        File? localized_bam = localize_bam.local_bam
-        File? localized_bai = localize_bam.local_bai
         File query_germline_vcf = final_query_vcf
         File? query_germline_vcf_index = run_haplograph_benchmark.germline_vcf_tbi
         VcfdistOutputs vcfdist = run_vcfdist.outputs
@@ -159,48 +155,92 @@ task parse_locus {
     }
 }
 
-task localize_bam {
+
+struct RuntimeAttr {
+    Float? mem_gb
+    Int? cpu_cores
+    Int? disk_gb
+    Int? boot_disk_gb
+    Int? preemptible_tries
+    Int? max_retries
+    String? docker
+}
+
+struct DataTypeParameters {
+    Int num_shards
+    String map_preset
+}
+
+task CalculateCoverage {
+
     meta {
-        description: "Subset BAM to the benchmark locus (samtools view -bhX) for safe parallel haplograph reads."
+        description : "Subset a BAM file to a specified locus."
+    }
+
+    parameter_meta {
+        bam: {
+            description: "bam to subset",
+            localization_optional: true
+        }
+        bai:    "index for bam file"
+        locus:  "genomic locus to select"
+        prefix: "prefix for output bam and bai file names"
+        runtime_attr_override: "Override the default runtime attributes."
     }
 
     input {
         File bam
         File bai
         String locus
-        String sample
-        String locus_tag
-        String docker
+        String prefix = "subset"
+
+        RuntimeAttr? runtime_attr_override
     }
 
-    String local_prefix = sample + "_" + locus_tag + ".local"
-    Int disk_gb = 4 + ceil(size([bam, bai], "GiB"))
+
+
+    Int disk_size = 4*ceil(size([bam, bai], "GB"))
 
     command <<<
         set -euxo pipefail
 
-        export GCS_OAUTH_TOKEN="$(gcloud auth application-default print-access-token 2>/dev/null || true)"
-        export TMPDIR="${PWD}"
-        mkdir -p "${TMPDIR}"
+        export GCS_OAUTH_TOKEN=$(gcloud auth application-default print-access-token)
 
-        samtools view -bhX ~{bam} ~{bai} ~{locus} > ~{local_prefix}.bam
-        samtools index ~{local_prefix}.bam
-        samtools quickcheck -v ~{local_prefix}.bam
+        samtools view -bhX ~{bam} ~{bai} ~{locus} > ~{prefix}.bam
+        samtools index ~{prefix}.bam
+        samtools depth -r ~{locus} ~{prefix}.bam | awk '{sum+=$3} END {print sum/NR}' > coverage.txt
+
     >>>
 
     output {
-        File local_bam = "~{local_prefix}.bam"
-        File local_bai = "~{local_prefix}.bam.bai"
+        Float coverage = read_float("coverage.txt")
+        File subsetbam =  "~{prefix}.bam"
+        File subsetbai = " ~{prefix}.bam.bai"
     }
 
+    #########################
+    RuntimeAttr default_attr = object {
+        cpu_cores:          1,
+        mem_gb:             10,
+        disk_gb:            disk_size,
+        boot_disk_gb:       10,
+        preemptible_tries:  2,
+        max_retries:        1,
+        docker:             "us.gcr.io/broad-dsp-lrma/lr-utils:0.1.9"
+    }
+    RuntimeAttr runtime_attr = select_first([runtime_attr_override, default_attr])
     runtime {
-        docker: docker
-        memory: "4 GiB"
-        cpu: 2
-        disks: "local-disk " + disk_gb + " HDD"
-        preemptible: 2
+        cpu:                    select_first([runtime_attr.cpu_cores,         default_attr.cpu_cores])
+        memory:                 select_first([runtime_attr.mem_gb,            default_attr.mem_gb]) + " GiB"
+        disks: "local-disk " +  select_first([runtime_attr.disk_gb,           default_attr.disk_gb]) + " HDD"
+        bootDiskSizeGb:         select_first([runtime_attr.boot_disk_gb,      default_attr.boot_disk_gb])
+        preemptible:            select_first([runtime_attr.preemptible_tries, default_attr.preemptible_tries])
+        maxRetries:             select_first([runtime_attr.max_retries,       default_attr.max_retries])
+        docker:                 select_first([runtime_attr.docker,            default_attr.docker])
     }
 }
+
+
 
 task run_haplograph_benchmark {
     meta {

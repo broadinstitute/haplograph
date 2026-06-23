@@ -1,4 +1,5 @@
 use crate::intervals;
+use crate::extract;
 use crate::methyl;
 use crate::util;
 use anyhow::{Context, Result as AnyhowResult};
@@ -10,6 +11,7 @@ use std::error::Error;
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 pub struct NodeInfo {
     pub nodename: String,
@@ -230,26 +232,67 @@ pub fn start(
 ) -> AnyhowResult<()> {
     info!("Processing {} windows in parallel", windows.len());
     let bam_path_str = bam_path.as_str();
+
+    if pileup {
+        let mut indexed_results: Vec<(usize, WindowHapResult)> = windows
+            .par_iter()
+            .enumerate()
+            .map(|(index, window)| -> AnyhowResult<(usize, WindowHapResult)> {
+                let (chromosome, start, end) = window;
+                let result = util::with_thread_local_bam(bam_path_str, |bam| {
+                    intervals::start(
+                        bam,
+                        reference_fa,
+                        chromosome,
+                        *start,
+                        *end,
+                        sampleid,
+                        min_reads,
+                        frequency_min,
+                        primary_only,
+                        true,
+                        false,
+                    )
+                })
+                .with_context(|| {
+                    format!("Failed to process window {}:{}-{}", chromosome, start, end)
+                })?;
+                Ok((index, result))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        indexed_results.sort_by_key(|(index, _)| *index);
+        let final_hap_list: Vec<WindowHapResult> =
+            indexed_results.into_iter().map(|(_, result)| result).collect();
+        return write_graph_from_windows(
+            windows,
+            &final_hap_list,
+            min_reads,
+            methyl_threshold,
+            output_prefix,
+        );
+    }
+
+    let prefetch = Arc::new(util::with_thread_local_bam(bam_path_str, |bam| {
+        extract::build_locus_prefetch(bam, windows, sampleid, primary_only)
+    })?);
+
     let mut indexed_results: Vec<(usize, WindowHapResult)> = windows
         .par_iter()
         .enumerate()
         .map(|(index, window)| -> AnyhowResult<(usize, WindowHapResult)> {
             let (chromosome, start, end) = window;
-            let result = util::with_thread_local_bam(bam_path_str, |bam| {
-                intervals::start(
-                    bam,
-                    reference_fa,
-                    chromosome,
-                    *start,
-                    *end,
-                    sampleid,
-                    min_reads,
-                    frequency_min,
-                    primary_only,
-                    pileup,
-                    false,
-                )
-            })
+            let result = intervals::start_with_prefetch(
+                &prefetch,
+                index,
+                reference_fa,
+                chromosome,
+                *start,
+                *end,
+                sampleid,
+                min_reads,
+                frequency_min,
+                false,
+            )
             .with_context(|| format!("Failed to process window {}:{}-{}", chromosome, start, end))?;
             Ok((index, result))
         })
@@ -258,7 +301,23 @@ pub fn start(
     let final_hap_list: Vec<WindowHapResult> =
         indexed_results.into_iter().map(|(_, result)| result).collect();
 
-    let (node_info, edge_info) = build_node_edge_info(windows, &final_hap_list, 1_usize);
+    write_graph_from_windows(
+        windows,
+        &final_hap_list,
+        min_reads,
+        methyl_threshold,
+        output_prefix,
+    )
+}
+
+fn write_graph_from_windows(
+    windows: &[(String, usize, usize)],
+    final_hap_list: &[WindowHapResult],
+    _min_reads: usize,
+    methyl_threshold: f32,
+    output_prefix: &String,
+) -> AnyhowResult<()> {
+    let (node_info, edge_info) = build_node_edge_info(windows, final_hap_list, 1_usize);
     info!(
         "Graph reconstruction: {} nodes, {} edges",
         node_info.len(),

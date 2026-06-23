@@ -363,6 +363,84 @@ pub fn collapse_haplotypes(
     Ok(final_hap)
 }
 
+pub fn start_with_prefetch(
+    prefetch: &extract::LocusPrefetch,
+    window_index: usize,
+    reference_fa: &Vec<fastq::Record>,
+    chromosome: &str,
+    start: usize,
+    end: usize,
+    sampleid: &String,
+    min_reads: usize,
+    frequency_min: f64,
+    write_output: bool,
+) -> AnyhowResult<(
+    HashMap<String, (String, HashMap<String, HashMap<usize, f32>>, f64)>,
+    HashMap<String, (u64, u64)>,
+    HashMap<String, Vec<u8>>,
+    HashMap<String, String>,
+)> {
+    let (
+        read_coordinates,
+        read_quality_dict,
+        read_sequence_dict,
+        read_strand_dict,
+        read_methyl_dict,
+    ) = extract::extract_window_coordinates_from_prefetch(
+        prefetch,
+        window_index,
+        start as u64,
+        end as u64,
+    )?;
+
+    let unique_local_sequences = read_sequence_dict.values().collect::<HashSet<_>>().len();
+    debug!(
+        "Window {}:{}-{} extracted reads (prefetch): {}, unique local sequences: {}",
+        chromosome,
+        start,
+        end,
+        read_sequence_dict.len(),
+        unique_local_sequences
+    );
+    let _ = read_quality_dict;
+    debug!("Extracted {} reads from region", read_coordinates.len());
+
+    let reference = process_fasta_file(reference_fa, chromosome, start, end, sampleid);
+    let reference = reference.first().unwrap().clone();
+    let final_hap = collapse_haplotypes(
+        &read_sequence_dict,
+        &read_methyl_dict,
+        &reference,
+        min_reads,
+        frequency_min,
+    )?;
+    debug!(
+        "Window {}:{}-{} retained haplotypes after filtering: {} (min_reads={}, frequency_min={})",
+        chromosome,
+        start,
+        end,
+        final_hap.len(),
+        min_reads,
+        frequency_min
+    );
+    debug!("Haplotype reconstruction completed");
+
+    if write_output {
+        let final_hap_output = PathBuf::from(format!(
+            "{}/{}_{}_{}_{}_haplograph.fasta",
+            ".", sampleid, chromosome, start, end
+        ));
+        write_fasta_output(final_hap.clone(), &final_hap_output)?;
+    }
+
+    Ok((
+        final_hap,
+        read_coordinates,
+        read_sequence_dict,
+        read_strand_dict,
+    ))
+}
+
 pub fn start(
     bam: &mut IndexedReader,
     reference_fa: &Vec<fastq::Record>,
@@ -391,8 +469,7 @@ pub fn start(
             end as u64,
             sampleid,
             primary_only,
-        )
-        .unwrap()
+        )?
     } else {
         let (reads, read_coordinates, read_sequence_dict, read_methyl_dict, read_strand_dict) =
             extract_haplotypes_coordinates_from_bam_pileup(
@@ -401,8 +478,7 @@ pub fn start(
                 start as u64,
                 end as u64,
                 primary_only,
-            )
-            .unwrap();
+            )?;
         let _ = reads;
         (
             read_coordinates,

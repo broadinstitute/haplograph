@@ -6,6 +6,7 @@ use indicatif::ProgressBar;
 use indicatif::ProgressStyle;
 use log::info;
 use rust_htslib::bam::{IndexedReader, Read as BamRead, Record as BamRecord};
+use rust_htslib::bam::ext::BamRecordExtensions;
 use rust_htslib::bam;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -50,6 +51,252 @@ pub struct IntervalQueryBounds {
     pub window_start_align: HashMap<String, String>,
     /// Read → alignment key active at the window end column.
     pub window_end_align: HashMap<String, String>,
+}
+
+/// One BAM fetch + pileup pass for an entire sub-locus; windows slice into this cache.
+pub struct LocusPrefetch {
+    pub chromosome: String,
+    pub region_start: u64,
+    pub region_end: u64,
+    pub sampleid: String,
+    records: Vec<BamRecord>,
+    window_bounds: Vec<IntervalQueryBounds>,
+}
+
+struct BoundsBuilder {
+    window_start: u64,
+    window_end: u64,
+    per_align_start: HashMap<String, usize>,
+    per_align_end: HashMap<String, usize>,
+    seen_in_window: HashSet<String>,
+    window_start_align: HashMap<String, String>,
+    window_end_align: HashMap<String, String>,
+}
+
+impl BoundsBuilder {
+    fn new(window_start: u64, window_end: u64) -> Self {
+        Self {
+            window_start,
+            window_end,
+            per_align_start: HashMap::new(),
+            per_align_end: HashMap::new(),
+            seen_in_window: HashSet::new(),
+            window_start_align: HashMap::new(),
+            window_end_align: HashMap::new(),
+        }
+    }
+
+    fn update_column(
+        &mut self,
+        ref_pos: u64,
+        qname: &str,
+        align_key: &str,
+        qpos: Option<usize>,
+        indel: bam::pileup::Indel,
+    ) {
+        self.seen_in_window.insert(align_key.to_string());
+        if let Some(qpos) = qpos {
+            self.per_align_start
+                .entry(align_key.to_string())
+                .or_insert(qpos);
+            let excl = match indel {
+                bam::pileup::Indel::Ins(len) => qpos + len as usize + 1,
+                bam::pileup::Indel::Del(_) | bam::pileup::Indel::None => qpos + 1,
+            };
+            self.per_align_end.insert(align_key.to_string(), excl);
+            if ref_pos == self.window_start {
+                self.window_start_align
+                    .entry(qname.to_string())
+                    .or_insert_with(|| align_key.to_string());
+            }
+            self.window_end_align
+                .insert(qname.to_string(), align_key.to_string());
+        }
+    }
+
+    fn finish(self) -> IntervalQueryBounds {
+        let deletion_spanning: HashSet<String> = self
+            .seen_in_window
+            .into_iter()
+            .filter(|key| !self.per_align_start.contains_key(key))
+            .collect();
+        IntervalQueryBounds {
+            per_align_start: self.per_align_start,
+            per_align_end: self.per_align_end,
+            deletion_spanning,
+            window_start_align: self.window_start_align,
+            window_end_align: self.window_end_align,
+        }
+    }
+}
+
+fn record_overlaps_interval(record: &BamRecord, start: u64, end: u64) -> bool {
+    let ref_start = record.pos();
+    let ref_end = record.reference_end();
+    ref_start < end as i64 && ref_end > start as i64
+}
+
+/// Fetch all alignments and pileup bounds for every window in one indexed BAM pass.
+pub fn build_locus_prefetch(
+    bam: &mut IndexedReader,
+    windows: &[(String, usize, usize)],
+    sampleid: &String,
+    primary_only: bool,
+) -> AnyhowResult<LocusPrefetch> {
+    anyhow::ensure!(!windows.is_empty(), "build_locus_prefetch requires at least one window");
+
+    let chromosome = windows[0].0.clone();
+    let region_start = windows.first().unwrap().1 as u64;
+    let region_end = windows.last().unwrap().2 as u64;
+
+    bam.fetch((chromosome.as_bytes(), region_start, region_end))?;
+    let mut records = Vec::new();
+    for record_result in bam.records() {
+        let record = record_result?;
+        if primary_only && (record.is_secondary() || record.is_supplementary()) {
+            continue;
+        }
+        records.push(record);
+    }
+
+    let mut builders: Vec<BoundsBuilder> = windows
+        .iter()
+        .map(|(_, ws, we)| BoundsBuilder::new(*ws as u64, *we as u64))
+        .collect();
+
+    bam.fetch((chromosome.as_bytes(), region_start, region_end))?;
+    for pileup_result in bam.pileup() {
+        let pileup = pileup_result?;
+        let ref_pos = pileup.pos() as u64;
+        if ref_pos < region_start || ref_pos >= region_end {
+            continue;
+        }
+        let mut seen: HashSet<String> = HashSet::new();
+        for alignment in pileup.alignments() {
+            let record = alignment.record();
+            let qname = String::from_utf8_lossy(record.qname()).into_owned();
+            let align_key = alignment_bounds_key(&qname, record.pos());
+            if seen.contains(&align_key) {
+                continue;
+            }
+            seen.insert(align_key.clone());
+            let qpos = alignment.qpos();
+            let indel = alignment.indel();
+            for (builder, (_, ws, we)) in builders.iter_mut().zip(windows.iter()) {
+                if ref_pos >= *ws as u64 && ref_pos < *we as u64 {
+                    builder.update_column(ref_pos, &qname, &align_key, qpos, indel);
+                }
+            }
+        }
+    }
+
+    let window_bounds = builders.into_iter().map(|b| b.finish()).collect();
+
+    info!(
+        "Prefetched locus {}:{}-{} ({} records, {} windows)",
+        chromosome,
+        region_start,
+        region_end,
+        records.len(),
+        windows.len()
+    );
+
+    Ok(LocusPrefetch {
+        chromosome,
+        region_start,
+        region_end,
+        sampleid: sampleid.clone(),
+        records,
+        window_bounds,
+    })
+}
+
+/// Extract read sequences/coordinates for one window using a [`LocusPrefetch`] cache.
+pub fn extract_window_coordinates_from_prefetch(
+    prefetch: &LocusPrefetch,
+    window_index: usize,
+    window_start: u64,
+    window_end: u64,
+) -> AnyhowResult<(
+    HashMap<String, (u64, u64)>,
+    HashMap<String, Vec<u8>>,
+    HashMap<String, Vec<u8>>,
+    HashMap<String, String>,
+    HashMap<String, HashMap<usize, f32>>,
+)> {
+    let bounds = prefetch
+        .window_bounds
+        .get(window_index)
+        .with_context(|| format!("window index {window_index} out of range"))?;
+
+    let chr = prefetch.chromosome.as_str();
+    let sampleid = &prefetch.sampleid;
+
+    let mut read_coordinates_formatted = HashMap::new();
+    let mut read_sequence_dict_formatted = HashMap::new();
+    let mut read_quality_dict_formatted = HashMap::new();
+    let mut read_strand_dict_formatted = HashMap::new();
+    let mut read_methyl_dict_formatted = HashMap::new();
+
+    for record in &prefetch.records {
+        if !record_overlaps_interval(record, window_start, window_end) {
+            continue;
+        }
+        let read_name = String::from_utf8_lossy(record.qname()).into_owned();
+        let align_key = alignment_bounds_key(&read_name, record.pos());
+
+        if bounds.deletion_spanning.contains(&align_key) {
+            let record_id = format!(
+                "{}|{}",
+                intervals::generate_read_name(&read_name, chr, window_start, window_end, sampleid),
+                record.pos()
+            );
+            read_coordinates_formatted.insert(record_id.clone(), (0u64, 0u64));
+            read_sequence_dict_formatted.insert(record_id.clone(), Vec::new());
+            read_quality_dict_formatted.insert(record_id.clone(), Vec::new());
+            read_strand_dict_formatted.insert(record_id.clone(), record.strand().to_string());
+            read_methyl_dict_formatted.insert(record_id, HashMap::new());
+            continue;
+        }
+
+        let Some(start_pos) = bounds.per_align_start.get(&align_key) else {
+            continue;
+        };
+        let Some(end_pos) = bounds.per_align_end.get(&align_key) else {
+            continue;
+        };
+        let read_seq = record.seq().as_bytes();
+        let read_strand = record.strand().to_string();
+        let read_len = read_seq.len();
+        let Some((pos_start, pos_end)) =
+            normalized_read_slice_bounds(*start_pos, *end_pos, read_len, &read_strand)
+        else {
+            continue;
+        };
+
+        let read_seq_final = String::from_utf8_lossy(&read_seq[pos_start..pos_end]).to_string();
+        let record_id = format!(
+            "{}|{}",
+            intervals::generate_read_name(&read_name, chr, window_start, window_end, sampleid),
+            record.pos()
+        );
+        read_coordinates_formatted.insert(record_id.clone(), (*start_pos as u64, *end_pos as u64));
+        read_sequence_dict_formatted.insert(record_id.clone(), read_seq_final.clone().into_bytes());
+        read_quality_dict_formatted.insert(record_id.clone(), record.qual().to_vec());
+        read_strand_dict_formatted.insert(record_id.clone(), read_strand);
+        read_methyl_dict_formatted.insert(
+            record_id.clone(),
+            methyl::get_methylation_read(record, *start_pos, *end_pos, 'm'),
+        );
+    }
+
+    Ok((
+        read_coordinates_formatted,
+        read_quality_dict_formatted,
+        read_sequence_dict_formatted,
+        read_strand_dict_formatted,
+        read_methyl_dict_formatted,
+    ))
 }
 
 /// Build the in-window read sequence, concatenating across supplementary alignments when
@@ -134,11 +381,7 @@ pub fn record_interval_query_bounds_range(
     start: u64,
     end: u64,
 ) -> AnyhowResult<IntervalQueryBounds> {
-    let mut per_align_start: HashMap<String, usize> = HashMap::new();
-    let mut per_align_end: HashMap<String, usize> = HashMap::new();
-    let mut seen_in_window: HashSet<String> = HashSet::new();
-    let mut window_start_align: HashMap<String, String> = HashMap::new();
-    let mut window_end_align: HashMap<String, String> = HashMap::new();
+    let mut builder = BoundsBuilder::new(start, end);
 
     for p in bam.pileup() {
         let pileup = p?;
@@ -158,36 +401,17 @@ pub fn record_interval_query_bounds_range(
                 continue;
             }
             seen.insert(align_key.clone());
-            seen_in_window.insert(align_key.clone());
-            if let Some(qpos) = alignment.qpos() {
-                per_align_start.entry(align_key.clone()).or_insert(qpos);
-                let excl = match alignment.indel() {
-                    bam::pileup::Indel::Ins(len) => qpos + len as usize + 1,
-                    bam::pileup::Indel::Del(_) | bam::pileup::Indel::None => qpos + 1,
-                };
-                per_align_end.insert(align_key.clone(), excl);
-                if ref_pos == start {
-                    window_start_align
-                        .entry(qname.clone())
-                        .or_insert(align_key.clone());
-                }
-                window_end_align.insert(qname, align_key);
-            }
+            builder.update_column(
+                ref_pos,
+                &qname,
+                &align_key,
+                alignment.qpos(),
+                alignment.indel(),
+            );
         }
     }
 
-    let deletion_spanning: HashSet<String> = seen_in_window
-        .into_iter()
-        .filter(|key| !per_align_start.contains_key(key))
-        .collect();
-
-    Ok(IntervalQueryBounds {
-        per_align_start,
-        per_align_end,
-        deletion_spanning,
-        window_start_align,
-        window_end_align,
-    })
+    Ok(builder.finish())
 }
 
 // extract haplotypes from bam file
@@ -451,5 +675,39 @@ mod extract_tests {
         )
         .unwrap();
         assert_eq!(reads.len(), 34);
+    }
+
+    #[test]
+    fn prefetch_matches_per_window_extraction() {
+        let bam_path = "HG00097_tp53_test.bam";
+        if !std::path::Path::new(bam_path).exists() {
+            return;
+        }
+        let mut bam = IndexedReader::from_path(bam_path).unwrap();
+        let sampleid = "HG00097".to_string();
+        let chr = "chr17";
+        let start = 7668752_usize;
+        let end = 7668828_usize;
+        let windows = vec![(chr.to_string(), start, end)];
+
+        let prefetch =
+            super::build_locus_prefetch(&mut bam, &windows, &sampleid, false).unwrap();
+        let (coords_p, _, seqs_p, _, _) =
+            super::extract_window_coordinates_from_prefetch(&prefetch, 0, start as u64, end as u64)
+                .unwrap();
+
+        let mut bam2 = IndexedReader::from_path(bam_path).unwrap();
+        let (coords_w, _, seqs_w, _, _) = super::extract_haplotypes_coordinates_from_bam(
+            &mut bam2,
+            chr,
+            start as u64,
+            end as u64,
+            &sampleid,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(coords_p.len(), coords_w.len());
+        assert_eq!(seqs_p.len(), seqs_w.len());
     }
 }
