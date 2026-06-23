@@ -21,6 +21,7 @@ workflow haplograph_benchmark_vcfdist {
         Float min_mean_depth = 2.0
         Int window_size = 100
         Int vcfdist_verbosity = 1
+        Int haplograph_threads = 4
         String extra_vcfdist_args = ""
         Boolean skip_haplograph = false
         Boolean verbose = false
@@ -62,7 +63,8 @@ workflow haplograph_benchmark_vcfdist {
                 overlap_bp = overlap_bp,
                 min_mean_depth = min_mean_depth,
                 verbose = verbose,
-                haplograph_docker = haplograph_docker
+                haplograph_docker = haplograph_docker,
+                thread = haplograph_threads
         }
     }
 
@@ -258,9 +260,12 @@ task run_haplograph_benchmark {
         Int window_size
         Int maximal_locus_size
         Int overlap_bp
+        Int thread
         Float min_mean_depth
         Boolean verbose
         String haplograph_docker
+
+        RuntimeAttr? runtime_attr_override
     }
 
     String verbose_flag = if (verbose) then "--verbose" else ""
@@ -284,6 +289,7 @@ task run_haplograph_benchmark {
             --maximal-locus-size ~{maximal_locus_size} \
             --overlap-bp ~{overlap_bp} \
             --min-mean-depth ~{min_mean_depth} \
+            --threads ~{thread} \
             ~{verbose_flag}
 
         if [ "~{needs_merge}" = "true" ]; then
@@ -305,13 +311,25 @@ task run_haplograph_benchmark {
         Array[File] segment_outputs = glob("~{output_prefix}_*")
     }
 
+    #########################
+    RuntimeAttr default_attr = object {
+        cpu_cores:          8,
+        mem_gb:             32,
+        disk_gb:            disk_gb,
+        boot_disk_gb:       10,
+        preemptible_tries:  1,
+        max_retries:        1,
+        docker:             haplograph_docker
+    }
+    RuntimeAttr runtime_attr = select_first([runtime_attr_override, default_attr])
     runtime {
-        docker: haplograph_docker
-        memory: "16 GiB"
-        cpu: 8
-        disks: "local-disk " + disk_gb + " HDD"
-        preemptible: 1
-        maxRetries: 1
+        cpu:                    select_first([runtime_attr.cpu_cores,         default_attr.cpu_cores])
+        memory:                 select_first([runtime_attr.mem_gb,            default_attr.mem_gb]) + " GiB"
+        disks: "local-disk " +  select_first([runtime_attr.disk_gb,           default_attr.disk_gb]) + " HDD"
+        bootDiskSizeGb:         select_first([runtime_attr.boot_disk_gb,      default_attr.boot_disk_gb])
+        preemptible:            select_first([runtime_attr.preemptible_tries, default_attr.preemptible_tries])
+        maxRetries:             select_first([runtime_attr.max_retries,       default_attr.max_retries])
+        docker:                 select_first([runtime_attr.docker,            default_attr.docker])
     }
 }
 
@@ -329,6 +347,8 @@ task run_vcfdist {
         Int verbosity
         String extra_args
         String docker
+
+        RuntimeAttr? runtime_attr_override
     }
 
     String out_tag = sample + "." + locus_tag + "." + coverage_tag
@@ -378,12 +398,26 @@ task run_vcfdist {
             "phase_blocks_tsv": "~{out_tag}.phase-blocks.tsv"
         }
     }
-
-    runtime {
-        docker: docker
-        memory: "16 GiB"
-        cpu: 4
-        disks: "local-disk " + disk_gb + " HDD"
-        preemptible: 1
+    #########################
+    RuntimeAttr default_attr = object {
+        cpu_cores:          4,
+        mem_gb:             16,
+        disk_gb:            disk_gb,
+        boot_disk_gb:       10,
+        preemptible_tries:  1,
+        max_retries:        1,
+        docker:             docker
     }
+
+    RuntimeAttr runtime_attr = select_first([runtime_attr_override, default_attr])
+    runtime {
+        cpu:                    select_first([runtime_attr.cpu_cores,         default_attr.cpu_cores])
+        memory:                 select_first([runtime_attr.mem_gb,            default_attr.mem_gb]) + " GiB"
+        disks: "local-disk " +  select_first([runtime_attr.disk_gb,           default_attr.disk_gb]) + " HDD"
+        bootDiskSizeGb:         select_first([runtime_attr.boot_disk_gb,      default_attr.boot_disk_gb])
+        preemptible:            select_first([runtime_attr.preemptible_tries, default_attr.preemptible_tries])
+        maxRetries:             select_first([runtime_attr.max_retries,       default_attr.max_retries])
+        docker:                 select_first([runtime_attr.docker,            default_attr.docker])
+    }
+
 }

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use log::{info, warn};
 use rayon::prelude::*;
 use std::path::PathBuf;
@@ -82,8 +82,18 @@ enum DevToolsCommands {
 #[command(about = "A bioinformatics tool for haplotype analysis")]
 #[command(version)]
 pub struct Cli {
+    #[command(flatten)]
+    global: GlobalOpts,
+
     #[clap(subcommand)]
     command: Commands,
+}
+
+#[derive(Args, Debug)]
+pub struct GlobalOpts {
+    /// Rayon worker threads for parallel sub-loci / windows (overrides RAYON_NUM_THREADS)
+    #[arg(long, global = true)]
+    pub threads: Option<usize>,
 }
 
 const MINIMAL_GAP_LENGTH: usize = 50;
@@ -424,8 +434,8 @@ enum Commands {
 }
 
 fn main() -> Result<()> {
-    // Parse command line arguments
     let args = Cli::parse();
+    util::init_rayon_threads(args.global.threads)?;
     match args.command {
         Commands::Haplograph {
             alignment_bam,

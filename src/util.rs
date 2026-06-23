@@ -1,4 +1,4 @@
-use anyhow::Result as AnyhowResult;
+use anyhow::{Context, Result as AnyhowResult};
 use bio::alignment::pairwise::*;
 use bio::alignment::AlignmentOperation;
 use bio::io::fasta::Reader as FastaReader;
@@ -142,6 +142,21 @@ pub fn get_sm_name_from_rg(
 
 /// Step size for sampled mean-depth estimation on large intervals.
 pub const MEAN_DEPTH_SAMPLE_STEP: usize = 1024;
+
+/// Configure the global rayon thread pool (`--threads`). Must run before any `par_iter`.
+/// When `threads` is `None`, rayon uses `RAYON_NUM_THREADS` or the machine default.
+pub fn init_rayon_threads(threads: Option<usize>) -> AnyhowResult<()> {
+    let Some(n) = threads else {
+        return Ok(());
+    };
+    anyhow::ensure!(n >= 1, "--threads must be at least 1 (got {n})");
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(n)
+        .build_global()
+        .context("failed to initialize rayon thread pool (already initialized?)")?;
+    info!("Rayon thread pool: {n} worker(s)");
+    Ok(())
+}
 
 thread_local! {
     static THREAD_BAM: RefCell<Option<(String, IndexedReader)>> = const { RefCell::new(None) };
