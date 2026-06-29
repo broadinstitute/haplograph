@@ -10,6 +10,8 @@ use log::info;
 use ndarray::s;
 use ndarray::{Array1, Array2};
 use rand::seq::SliceRandom;
+use rand::SeedableRng;
+use rand::rngs::SmallRng;
 use rayon::prelude::*;
 use rust_htslib::bam::{self, record::Aux, IndexedReader, Read as BamRead};
 use rust_htslib::faidx;
@@ -532,7 +534,7 @@ fn get_null_distribution(
         .flat_map(|_| {
             bar.inc(1);
             let mut local_stats = Vec::new();
-            let mut rng = rand::rng();
+            let mut rng = SmallRng::from_os_rng();
 
             for (i, index) in records.iter().enumerate() {
                 let vector = matrix.slice(s![i, ..]);
