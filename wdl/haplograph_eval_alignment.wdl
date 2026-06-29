@@ -50,8 +50,6 @@ workflow Haplograph_eval_regular_genes {
                 prefix = prefix + "_" + gene_name
         }
 
-
-
         scatter (desiredCoverage in desiredCoverages) {
             
             call downsampleBam {input:
@@ -63,14 +61,22 @@ workflow Haplograph_eval_regular_genes {
                 preemptible_tries = 0
             }
 
-            call haplograph {
+            call run_haplograph_benchmark {
                 input:
                     bam = downsampleBam.downsampled_bam,
                     bai = downsampleBam.downsampled_bai,
                     reference_fa = reference_fa,
-                    prefix = prefix + "_" + gene_name + "_" + desiredCoverage,
+                    sample = sample,
+                    output_prefix = output_prefix+ "_" + gene_name + "_" + desiredCoverage,
                     locus = locus,
-                    windowsize = windowsize
+                    needs_merge = parse_locus.needs_merge,
+                    window_size = window_size,
+                    maximal_locus_size = maximal_locus_size,
+                    overlap_bp = overlap_bp,
+                    min_mean_depth = min_mean_depth,
+                    verbose = verbose,
+                    haplograph_docker = haplograph_docker,
+                    thread = haplograph_threads
             }
 
             call haplograph_eval {
@@ -121,6 +127,100 @@ workflow Haplograph_eval_regular_genes {
         Array[Array[VcfdistOutputs]] vcfdist_summary = VCFdist_germline.outputs
     }
 }
+
+task run_haplograph_benchmark {
+    meta {
+        description: "Run haplograph haplograph; call haplograph merge when the locus exceeds maximal_locus_size."
+    }
+
+    input {
+        File bam
+        File bai
+        File reference_fa
+        String sample
+        String output_prefix
+        String locus
+        Boolean needs_merge
+        Int window_size
+        Int maximal_locus_size
+        Int overlap_bp
+        Int thread
+        Float min_mean_depth
+        Boolean verbose
+        String haplograph_docker
+
+        RuntimeAttr? runtime_attr_override
+    }
+
+    String verbose_flag = if (verbose) then "--verbose" else ""
+    Int disk_gb = 20 + ceil(size([bam, reference_fa], "GiB"))
+
+    command <<<
+        set -euxo pipefail
+
+        export TMPDIR="${PWD}"
+        mkdir -p "${TMPDIR}"
+
+        HAPLOGRAPH=/haplograph/target/release/haplograph
+
+        ${HAPLOGRAPH} haplograph \
+            --alignment-bam ~{bam} \
+            --reference-fa ~{reference_fa} \
+            --sampleid ~{sample} \
+            --output-prefix ~{output_prefix} \
+            --locus ~{locus} \
+            --window-size ~{window_size} \
+            --maximal-locus-size ~{maximal_locus_size} \
+            --overlap-bp ~{overlap_bp} \
+            --min-mean-depth ~{min_mean_depth} \
+            --threads ~{thread} \
+            ~{verbose_flag}
+
+        if [ "~{needs_merge}" = "true" ]; then
+            ${HAPLOGRAPH} merge \
+                --output-prefix ~{output_prefix} \
+                --locus ~{locus} \
+                --reference-fa ~{reference_fa} \
+                --sampleid ~{sample} \
+                --maximal-locus-size ~{maximal_locus_size} \
+                --overlap-bp ~{overlap_bp} \
+                ~{verbose_flag}
+        fi
+
+    >>>
+
+    output {
+        File graph_file = "~{prefix}.gfa"
+        File asm_file = "~{prefix}.fasta"
+        File germline_vcf = "~{output_prefix}.germline.vcf.gz"
+        File? germline_vcf_tbi = "~{output_prefix}.germline.vcf.gz.tbi"
+        File somatic_vcf_file = "~{prefix}.somatic.vcf.gz"
+        File? somatic_vcf_tbi = "~{output_prefix}.somatic.vcf.gz.tbi"
+        Array[File] methyl_bed = glob("~{output_prefix}.Hap.*.bed")
+    }
+
+    #########################
+    RuntimeAttr default_attr = object {
+        cpu_cores:          8,
+        mem_gb:             32,
+        disk_gb:            disk_gb,
+        boot_disk_gb:       10,
+        preemptible_tries:  1,
+        max_retries:        1,
+        docker:             haplograph_docker
+    }
+    RuntimeAttr runtime_attr = select_first([runtime_attr_override, default_attr])
+    runtime {
+        cpu:                    select_first([runtime_attr.cpu_cores,         default_attr.cpu_cores])
+        memory:                 select_first([runtime_attr.mem_gb,            default_attr.mem_gb]) + " GiB"
+        disks: "local-disk " +  select_first([runtime_attr.disk_gb,           default_attr.disk_gb]) + " HDD"
+        bootDiskSizeGb:         select_first([runtime_attr.boot_disk_gb,      default_attr.boot_disk_gb])
+        preemptible:            select_first([runtime_attr.preemptible_tries, default_attr.preemptible_tries])
+        maxRetries:             select_first([runtime_attr.max_retries,       default_attr.max_retries])
+        docker:                 select_first([runtime_attr.docker,            default_attr.docker])
+    }
+}
+
 
 task haplograph {
     input {

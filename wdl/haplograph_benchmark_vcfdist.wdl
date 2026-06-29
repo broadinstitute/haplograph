@@ -90,6 +90,8 @@ workflow haplograph_benchmark_vcfdist {
         Int locus_len = parse_locus.locus_len
         Boolean merged = parse_locus.needs_merge
         File query_germline_vcf = final_query_vcf
+        File? query_fasta = run_haplograph_benchmark.fasta
+        File? query_somatic_vcf = run_haplograph_benchmark.somatic_vcf
         File? query_germline_vcf_index = run_haplograph_benchmark.germline_vcf_tbi
         VcfdistOutputs vcfdist = run_vcfdist.outputs
         File precision_recall_summary = run_vcfdist.outputs.precision_recall_summary_tsv
@@ -308,6 +310,8 @@ task run_haplograph_benchmark {
     output {
         File germline_vcf = "~{output_prefix}.germline.vcf.gz"
         File? germline_vcf_tbi = "~{output_prefix}.germline.vcf.gz.tbi"
+        File fasta = "~{output_prefix}.fasta"
+        File somatic_vcf = "~{output_prefix}.somatic.vcf.gz"
         Array[File] segment_outputs = glob("~{output_prefix}_*")
     }
 

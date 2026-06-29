@@ -290,10 +290,6 @@ enum Commands {
         #[arg(short, long, default_value_t = 0.5)]
         threshold_methyl_likelihood: f32,
 
-        /// Sequencing technology, accepted hifi, nanopore
-        #[arg(short, long, default_value = "hifi")]
-        detection_technology: String,
-
         /// Verbose output
         #[arg(long)]
         verbose: bool,
@@ -465,8 +461,6 @@ fn main() -> Result<()> {
                 );
             }
 
-           
-
             // Initialize logging
             env_logger::Builder::from_default_env()
                 .filter_level(if verbose {
@@ -596,7 +590,6 @@ fn main() -> Result<()> {
             primary_only,
             pileup,
             threshold_methyl_likelihood,
-            detection_technology,
             verbose,
         } => {
             // Initialize logging
