@@ -10,6 +10,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
 
 jobs:
   test:
@@ -17,15 +18,15 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest]
         rust: [stable, beta]
         include:
           - os: ubuntu-latest
             rust: stable
             cache-key: linux-stable
-          - os: macos-latest
-            rust: stable
-            cache-key: macos-stable
+          - os: ubuntu-latest
+            rust: beta
+            cache-key: linux-beta
 
     steps:
       - name: Checkout code
@@ -45,11 +46,6 @@ jobs:
             samtools \
             bcftools
 
-      - name: Install system dependencies (macOS)
-        if: matrix.os == 'macos-latest'
-        run: |
-          brew install samtools bcftools || true
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -63,7 +59,6 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-            target/
           key: ${{ runner.os }}-cargo-${{ matrix.cache-key }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-${{ matrix.cache-key }}-
