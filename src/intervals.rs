@@ -32,14 +32,14 @@ pub fn extract_haplotypes_coordinates_from_bam_pileup(
     Vec<fastq::Record>,
     HashMap<String, (u64, u64)>,
     HashMap<String, Vec<u8>>,
-    HashMap<String, Record>,
+    HashMap<String, HashMap<usize, f32>>,
     HashMap<String, String>,
 )> {
     let rg_sm_map = util::get_rg_to_sm_mapping(bam);
     let mut bmap: HashMap<String, (String, Vec<u8>)> = HashMap::new();
     let mut read_coordinates: HashMap<String, (u64, u64)> = HashMap::new(); // Track read coordinates
     let mut read_sequence_dict: HashMap<String, Vec<u8>> = HashMap::new();
-    let mut bam_records: HashMap<String, Record> = HashMap::new();
+    let mut read_methyl_dict: HashMap<String, HashMap<usize, f32>> = HashMap::new();
     let mut read_strand_dict: HashMap<String, String> = HashMap::new();
     let mut eligible_reads: HashMap<String, (String, usize, usize)> = HashMap::new();
     // Create progress bar
@@ -52,10 +52,8 @@ pub fn extract_haplotypes_coordinates_from_bam_pileup(
     // pb.set_message("Scanning alignments...");
 
     let _ = bam.fetch((chr.as_bytes(), start, end));
-    let bounds = extract::record_interval_query_bounds_range(bam, start, end)?;
-    let _ = bam.fetch((chr.as_bytes(), start, end));
+    let mut collected_records: Vec<Record> = Vec::new();
     let mut seen_reads = HashSet::new();
-
     for record_result in bam.records() {
         let record = record_result?;
         let qname = String::from_utf8_lossy(record.qname()).into_owned();
@@ -64,13 +62,18 @@ pub fn extract_haplotypes_coordinates_from_bam_pileup(
             continue;
         }
         seen_reads.insert(align_key.clone());
-
-        let is_secondary = record.is_secondary();
-        let is_supplementary = record.is_supplementary();
-        if primary_only && (is_secondary || is_supplementary) {
+        if primary_only && (record.is_secondary() || record.is_supplementary()) {
             continue;
         }
+        collected_records.push(record);
+    }
 
+    let _ = bam.fetch((chr.as_bytes(), start, end));
+    let bounds = extract::record_interval_query_bounds_range(bam, start, end)?;
+
+    for record in collected_records {
+        let qname = String::from_utf8_lossy(record.qname()).into_owned();
+        let align_key = extract::alignment_bounds_key(&qname, record.pos());
         let sm = match util::get_sm_name_from_rg(&record, &rg_sm_map) {
             Ok(a) => a,
             Err(_) => String::from("unknown"),
@@ -84,7 +87,7 @@ pub fn extract_haplotypes_coordinates_from_bam_pileup(
             eligible_reads.insert(align_key.clone(), (seq_name.clone(), 0, 0));
             bmap.insert(seq_name, (String::new(), Vec::new()));
             read_strand_dict.insert(align_key.clone(), record.strand().to_string());
-            bam_records.insert(align_key, record.clone());
+            read_methyl_dict.insert(align_key, HashMap::new());
             continue;
         }
 
@@ -102,7 +105,10 @@ pub fn extract_haplotypes_coordinates_from_bam_pileup(
 
         eligible_reads.insert(align_key.clone(), (seq_name, query_start, query_end));
         read_strand_dict.insert(align_key.clone(), record.strand().to_string());
-        bam_records.insert(align_key, record.clone());
+        read_methyl_dict.insert(
+            align_key,
+            methyl::get_methylation_read(&record, query_start, query_end, 'm'),
+        );
     }
 
     let _ = bam.fetch((chr.as_bytes(), start, end));
@@ -209,7 +215,7 @@ pub fn extract_haplotypes_coordinates_from_bam_pileup(
         read_sequence_dict.len()
     );
 
-    Ok((records, read_coordinates, read_sequence_dict, bam_records, read_strand_dict))
+    Ok((records, read_coordinates, read_sequence_dict, read_methyl_dict, read_strand_dict))
 }
 
 pub fn process_fasta_file(
@@ -357,6 +363,84 @@ pub fn collapse_haplotypes(
     Ok(final_hap)
 }
 
+pub fn start_with_prefetch(
+    prefetch: &extract::LocusPrefetch,
+    window_index: usize,
+    reference_fa: &Vec<fastq::Record>,
+    chromosome: &str,
+    start: usize,
+    end: usize,
+    sampleid: &String,
+    min_reads: usize,
+    frequency_min: f64,
+    write_output: bool,
+) -> AnyhowResult<(
+    HashMap<String, (String, HashMap<String, HashMap<usize, f32>>, f64)>,
+    HashMap<String, (u64, u64)>,
+    HashMap<String, Vec<u8>>,
+    HashMap<String, String>,
+)> {
+    let (
+        read_coordinates,
+        read_quality_dict,
+        read_sequence_dict,
+        read_strand_dict,
+        read_methyl_dict,
+    ) = extract::extract_window_coordinates_from_prefetch(
+        prefetch,
+        window_index,
+        start as u64,
+        end as u64,
+    )?;
+
+    let unique_local_sequences = read_sequence_dict.values().collect::<HashSet<_>>().len();
+    debug!(
+        "Window {}:{}-{} extracted reads (prefetch): {}, unique local sequences: {}",
+        chromosome,
+        start,
+        end,
+        read_sequence_dict.len(),
+        unique_local_sequences
+    );
+    let _ = read_quality_dict;
+    debug!("Extracted {} reads from region", read_coordinates.len());
+
+    let reference = process_fasta_file(reference_fa, chromosome, start, end, sampleid);
+    let reference = reference.first().unwrap().clone();
+    let final_hap = collapse_haplotypes(
+        &read_sequence_dict,
+        &read_methyl_dict,
+        &reference,
+        min_reads,
+        frequency_min,
+    )?;
+    debug!(
+        "Window {}:{}-{} retained haplotypes after filtering: {} (min_reads={}, frequency_min={})",
+        chromosome,
+        start,
+        end,
+        final_hap.len(),
+        min_reads,
+        frequency_min
+    );
+    debug!("Haplotype reconstruction completed");
+
+    if write_output {
+        let final_hap_output = PathBuf::from(format!(
+            "{}/{}_{}_{}_{}_haplograph.fasta",
+            ".", sampleid, chromosome, start, end
+        ));
+        write_fasta_output(final_hap.clone(), &final_hap_output)?;
+    }
+
+    Ok((
+        final_hap,
+        read_coordinates,
+        read_sequence_dict,
+        read_strand_dict,
+    ))
+}
+
 pub fn start(
     bam: &mut IndexedReader,
     reference_fa: &Vec<fastq::Record>,
@@ -377,34 +461,32 @@ pub fn start(
 )> {
     // if pileup is true, use extract_haplotypes_coordinates_from_bam_pileup
     // if pileup is false, use  extract::extract_haplotypes_coordinates_from_bam
-    let (read_coordinates, read_quality_dict, read_sequence_dict, read_strand_dict, bam_records_dict) = if !pileup {
-        let (
-            read_coordinates,
-            read_quality_dict,
-            read_sequence_dict,
-            read_strand_dict,
-            bam_records_dict,
-        ) = extract::extract_haplotypes_coordinates_from_bam(
+    let (read_coordinates, read_quality_dict, read_sequence_dict, read_strand_dict, read_methyl_dict) = if !pileup {
+        extract::extract_haplotypes_coordinates_from_bam(
             bam,
             chromosome,
             start as u64,
             end as u64,
             sampleid,
             primary_only,
+        )?
+    } else {
+        let (reads, read_coordinates, read_sequence_dict, read_methyl_dict, read_strand_dict) =
+            extract_haplotypes_coordinates_from_bam_pileup(
+                bam,
+                chromosome,
+                start as u64,
+                end as u64,
+                primary_only,
+            )?;
+        let _ = reads;
+        (
+            read_coordinates,
+            HashMap::<String, Vec<u8>>::new(),
+            read_sequence_dict,
+            read_strand_dict,
+            read_methyl_dict,
         )
-        .unwrap();
-    (read_coordinates, read_quality_dict, read_sequence_dict, read_strand_dict, bam_records_dict)
-    }else{
-        let (reads, read_coordinates, read_sequence_dict, bam_records_dict, read_strand_dict) =
-        extract_haplotypes_coordinates_from_bam_pileup(
-            bam,
-            chromosome,
-            start as u64,
-            end as u64,
-            primary_only,
-        )
-        .unwrap();
-    (read_coordinates, HashMap::<String, Vec<u8>>::new(), read_sequence_dict, read_strand_dict, bam_records_dict)
     };
     // let (reads, read_coordinates, read_sequence_dict, bam_records_dict, read_strand_dict) =
     // extract_haplotypes_coordinates_from_bam_pileup(
@@ -424,7 +506,7 @@ pub fn start(
         read_sequence_dict.len(),
         unique_local_sequences
     );
-    let read_methyl_dict = methyl::start(bam_records_dict, &read_coordinates);
+    let _ = read_quality_dict;
     debug!("Extracted {} reads from region", read_coordinates.len());
 
     // let reads_list = process_bam_file_by_coordinates(bam, chromosome, start, end, primary_only, sampleid);
@@ -493,7 +575,7 @@ mod pileup_extract_tests {
         let sampleid = "HG00097".to_string();
 
         let mut bam = IndexedReader::from_path(bam_path).unwrap();
-        let (records, _coords, read_seq_dict, bam_records, _strand) =
+        let (records, _coords, read_seq_dict, read_methyl, _strand) =
             extract_haplotypes_coordinates_from_bam_pileup(&mut bam, chr, start, end, false)
                 .unwrap();
 
@@ -515,7 +597,6 @@ mod pileup_extract_tests {
                 .first()
                 .unwrap()
                 .clone();
-        let read_methyl = crate::methyl::start(bam_records, &_coords);
         let final_hap = collapse_haplotypes(&read_seq_dict, &read_methyl, &reference, 2, 0.0).unwrap();
 
         assert!(

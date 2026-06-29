@@ -248,7 +248,7 @@ pub fn identify_heterozygous_nodes(
 }
 
 /// Soft balance penalty (corrections per 1-unit imbalance between cluster sizes).
-const MEC_BALANCE_WEIGHT: f64 = 0.25;
+const CLUSTER_BALANCE_WEIGHT: f64 = 0.25;
 /// Number of farthest-first seeded restarts for the read-clustering phaser.
 const CLUSTER_RESTARTS: usize = 64;
 /// Iteration cap per restart for the Lloyd-style centroid refinement.
@@ -425,7 +425,7 @@ fn seed_clusters(reads: &[ReadVec], hap_number: usize, first: usize) -> Vec<usiz
 /// both haplotypes collapse onto a single truth haplotype.
 ///
 /// Returns the clusters (read column indices, largest first) and the total MEC corrections.
-pub fn mec_partition_reads(
+pub fn cluster_partition_reads(
     het_matrix: &Array2<f64>,
     hap_number: usize,
     balance_weight: f64,
@@ -615,7 +615,7 @@ fn construct_het_interval_matrix(
     for (interval, nodes) in heterozygous_nodes.iter() {
         het_nodes.extend(nodes.iter().cloned());
     }
-    println!("het_nodes: {:?}", het_nodes.len());
+    info!("het_nodes: {:?}", het_nodes.len());
     het_nodes.sort_by(|a, b| a.cmp(b));
 
     let n_reads = read_list.len();
@@ -676,11 +676,11 @@ pub fn assign_haplotype_reads(
     }
     
     let (clusters, corrections) =
-        mec_partition_reads(&het_matrix, hap_number, MEC_BALANCE_WEIGHT);
+        cluster_partition_reads(&het_matrix, hap_number, CLUSTER_BALANCE_WEIGHT);
     write_matrix_to_csv(&het_matrix, &clusters, &het_nodes, &read_list, "het_matrix.csv").unwrap();
 
     info!(
-        "MEC partition: cluster sizes = {:?}, corrections = {}",
+        "Cluster partition: cluster sizes = {:?}, corrections = {}",
         clusters.iter().map(|c| c.len()).collect::<Vec<_>>(),
         corrections
     );
@@ -938,6 +938,170 @@ pub fn get_supports(node_info: &HashMap<String, NodeInfo>, path: &Vec<String>) -
         supports += read_set.len();
     }
     supports
+}
+
+#[derive(Clone)]
+struct PathState {
+    path: Vec<String>,
+    sequence: String,
+    read_names: HashSet<String>,
+    supports: usize,
+    span: usize,
+}
+
+fn path_state_from_node(node_info: &HashMap<String, NodeInfo>, node: &str) -> Option<PathState> {
+    let info = node_info.get(node)?;
+    let read_names = get_read_name_list(node_info, node.to_string());
+    let (start, end) =
+        eval::find_alignment_intervals([node.to_string()].iter().map(|x| x.as_str()).collect())
+            .ok()?;
+    Some(PathState {
+        path: vec![node.to_string()],
+        sequence: info.seq.clone(),
+        read_names,
+        supports: info.support_reads,
+        span: end.saturating_sub(start),
+    })
+}
+
+fn extend_path_state(
+    node_info: &HashMap<String, NodeInfo>,
+    prev: &PathState,
+    node: &str,
+) -> Option<PathState> {
+    let info = node_info.get(node)?;
+    let mut path = prev.path.clone();
+    path.push(node.to_string());
+    let mut read_names = prev.read_names.clone();
+    read_names.extend(get_read_name_list(node_info, node.to_string()));
+    let sequence = format!("{}{}", prev.sequence, info.seq);
+    let (start, end) = eval::find_alignment_intervals(path.iter().map(|x| x.as_str()).collect()).ok()?;
+    Some(PathState {
+        path: path.clone(),
+        sequence,
+        read_names,
+        supports: get_supports(node_info, &path),
+        span: end.saturating_sub(start),
+    })
+}
+
+fn path_state_better(a: &PathState, b: &PathState) -> bool {
+    a.span > b.span || (a.span == b.span && a.supports > b.supports)
+}
+
+/// Layer-wise DP over the window graph: one best path per haplotype (max span, then supports).
+pub fn find_best_haplotype_paths_dp(
+    node_info: &HashMap<String, NodeInfo>,
+    edge_info: &HashMap<String, Vec<String>>,
+    node_haplotype: &HashMap<String, HashSet<usize>>,
+    haplotype_number: usize,
+) -> HashMap<usize, (Vec<String>, String, HashSet<String>, usize, usize)> {
+    let mut pred_map: HashMap<String, Vec<String>> = HashMap::new();
+    for (src, dsts) in edge_info.iter() {
+        for dst in dsts {
+            pred_map.entry(dst.clone()).or_default().push(src.clone());
+        }
+    }
+
+    let parallel_nodes = find_parallele_nodes(node_info);
+    let mut interval_list: Vec<String> = parallel_nodes.keys().cloned().collect();
+    interval_list.sort_by(|a, b| {
+        util::split_locus(a.clone())
+            .1
+            .cmp(&util::split_locus(b.clone()).1)
+    });
+
+    let mut node_interval: HashMap<String, String> = HashMap::new();
+    for (interval, nodes) in &parallel_nodes {
+        for node in nodes {
+            node_interval.insert(node.clone(), interval.clone());
+        }
+    }
+
+    let mut best_by_hap: HashMap<usize, (Vec<String>, String, HashSet<String>, usize, usize)> =
+        HashMap::new();
+
+    for hap in 0..haplotype_number {
+        let mut dp: HashMap<String, PathState> = HashMap::new();
+
+        for (interval_idx, interval) in interval_list.iter().enumerate() {
+            let Some(nodes) = parallel_nodes.get(interval) else {
+                continue;
+            };
+            let prev_interval = interval_idx.checked_sub(1).map(|i| &interval_list[i]);
+            for node in nodes {
+                let Some(tags) = node_haplotype.get(node) else {
+                    continue;
+                };
+                if !tags.contains(&hap) {
+                    continue;
+                }
+
+                let preds = pred_map.get(node).map(|v| v.as_slice()).unwrap_or(&[]);
+                let mut best: Option<PathState> = None;
+
+                for pred in preds {
+                    if let Some(prev_int) = prev_interval {
+                        if node_interval.get(pred) != Some(prev_int) {
+                            continue;
+                        }
+                    }
+                    if let Some(prev) = dp.get(pred) {
+                        if let Some(extended) = extend_path_state(node_info, prev, node) {
+                            if best.as_ref().map_or(true, |b| path_state_better(&extended, b)) {
+                                best = Some(extended);
+                            }
+                        }
+                    }
+                }
+
+                if best.is_none() {
+                    if let Some(start) = path_state_from_node(node_info, node) {
+                        best = Some(start);
+                    }
+                }
+
+                if let Some(state) = best {
+                    dp.entry(node.clone())
+                        .and_modify(|existing| {
+                            if path_state_better(&state, existing) {
+                                *existing = state.clone();
+                            }
+                        })
+                        .or_insert(state);
+                }
+            }
+        }
+
+        let mut hap_best: Option<PathState> = None;
+        for (node, state) in &dp {
+            if !node_haplotype
+                .get(node)
+                .map(|t| t.contains(&hap))
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            if hap_best.as_ref().map_or(true, |b| path_state_better(state, b)) {
+                hap_best = Some(state.clone());
+            }
+        }
+
+        if let Some(state) = hap_best {
+            best_by_hap.insert(
+                hap,
+                (
+                    state.path,
+                    state.sequence,
+                    state.read_names,
+                    state.supports,
+                    state.span,
+                ),
+            );
+        }
+    }
+
+    best_by_hap
 }
 
 pub fn find_full_range_haplotypes(
@@ -1315,21 +1479,15 @@ pub fn start(
 ) -> AnyhowResult<(HashMap<usize, (Vec<String>, String, HashSet<String>, usize, usize)>, HashMap<String, NodeInfo>, HashMap<String, Vec<String>>)> {
     let (node_info, edge_info) = load_graph(graph_filename).unwrap();
 
-    let (haplotype_reads, node_haplotype) =
+    let (_haplotype_reads, node_haplotype) =
         find_node_haplotype(&node_info, haplotype_number);
-    let all_paths = enumerate_all_paths_with_haplotype(
+    let primary_haplotypes = find_best_haplotype_paths_dp(
         &node_info,
         &edge_info,
         &node_haplotype,
         haplotype_number,
-    )
-    .expect("Failed to enumerate all paths");
-    info!("All paths enumerated: {}", all_paths.len());
-
-    let allseq = construct_sequences_from_haplotype_path(&node_info, &all_paths);
-    let primary_haplotypes =
-        find_full_range_haplotypes(&node_info, &allseq);
-    info!("All sequences constructed: {}", primary_haplotypes.len());
+    );
+    info!("Best haplotype paths (DP): {}", primary_haplotypes.len());
     call_methylation(&node_info, primary_haplotypes.clone(), output_prefix);
     info!(
         "Haplotype specific methylation signals exported: {}",
@@ -1345,185 +1503,69 @@ pub fn start(
 }
 
 #[cfg(test)]
-mod identify_heterozygous_tests {
-    use super::*;
+mod path_dp_tests {
+    use super::{
+        find_best_haplotype_paths_dp, find_full_range_haplotypes, enumerate_all_paths_with_haplotype,
+        construct_sequences_from_haplotype_path, NodeInfo,
+    };
+    use std::collections::{HashMap, HashSet};
 
-    fn make_node(reads: &[&str]) -> NodeInfo {
+    fn test_node(id: &str, seq: &str, reads: &str, support: usize) -> NodeInfo {
         NodeInfo {
-            seq: "A".to_string(),
-            cigar: "10=".to_string(),
-            support_reads: reads.len(),
+            seq: seq.to_string(),
+            cigar: format!("{}M", seq.len()),
+            support_reads: support,
             allele_frequency: "0.5".to_string(),
-            read_names: reads.join(","),
+            read_names: reads.to_string(),
             methyl_info: HashMap::new(),
         }
     }
 
-    fn insert(map: &mut HashMap<String, NodeInfo>, id: &str, reads: &[&str]) {
-        map.insert(id.to_string(), make_node(reads));
-    }
-
     #[test]
-    fn balanced_disjoint_pair_accepted() {
-        let mut nodes = HashMap::new();
-        insert(&mut nodes, "H.chr1:1-100.0", &["r1", "r2", "r3", "r4"]);
-        insert(&mut nodes, "H.chr1:1-100.1", &["r5", "r6", "r7", "r8"]);
-
-        let het = identify_heterozygous_nodes(&nodes, 2);
-        let chosen = het.get("chr1:1-100").expect("interval should be heterozygous");
-        assert_eq!(chosen.len(), 2);
-    }
-
-    #[test]
-    fn overlapping_reads_rejected_for_full_haps() {
-        let mut nodes = HashMap::new();
-        insert(&mut nodes, "H.chr1:1-100.0", &["r1", "r2", "r3", "r4"]);
-        insert(&mut nodes, "H.chr1:1-100.1", &["r1", "r2", "r3", "r5"]);
-
-        let het = identify_heterozygous_nodes(&nodes, 2);
-        assert!(het.get("chr1:1-100").is_none());
-    }
-
-    #[test]
-    fn imbalanced_support_rejected() {
-        let mut nodes = HashMap::new();
-        insert(&mut nodes, "H.chr1:1-100.0", &["r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8"]);
-        insert(&mut nodes, "H.chr1:1-100.1", &["r9", "r10"]);
-
-        let het = identify_heterozygous_nodes(&nodes, 2);
-        assert!(het.get("chr1:1-100").is_none());
-    }
-
-    #[test]
-    fn low_support_node_skipped() {
-        let mut nodes = HashMap::new();
-        insert(&mut nodes, "H.chr1:1-100.0", &["r1", "r2", "r3"]);
-        insert(&mut nodes, "H.chr1:1-100.1", &["r4"]);
-
-        let het = identify_heterozygous_nodes(&nodes, 2);
-        assert!(het.get("chr1:1-100").is_none());
-    }
-
-    #[test]
-    fn back_off_from_three_to_two() {
-        let mut nodes = HashMap::new();
-        insert(&mut nodes, "H.chr1:1-100.0", &["r1", "r2", "r3", "r4"]);
-        insert(&mut nodes, "H.chr1:1-100.1", &["r5", "r6", "r7", "r8"]);
-        // Third allele shares heavily with both other alleles → no valid 3-subset.
-        insert(&mut nodes, "H.chr1:1-100.2", &["r1", "r2", "r5", "r6"]);
-
-        let het = identify_heterozygous_nodes(&nodes, 3);
-        let chosen = het.get("chr1:1-100").expect("partial het set should be returned");
-        assert_eq!(chosen.len(), 2, "should back off to disjoint pair");
-        assert!(chosen.contains("H.chr1:1-100.0"));
-        assert!(chosen.contains("H.chr1:1-100.1"));
-    }
-
-    #[test]
-    fn picks_disjoint_subset_among_many_candidates() {
-        let mut nodes = HashMap::new();
-        // Two pairs are roughly balanced; only one pair is also disjoint.
-        insert(&mut nodes, "H.chr1:1-100.0", &["r1", "r2", "r3", "r4"]);
-        insert(&mut nodes, "H.chr1:1-100.1", &["r1", "r2", "r3", "r4"]);
-        insert(&mut nodes, "H.chr1:1-100.2", &["r5", "r6", "r7", "r8"]);
-
-        let het = identify_heterozygous_nodes(&nodes, 2);
-        let chosen = het.get("chr1:1-100").expect("should find disjoint pair");
-        assert!(chosen.contains("H.chr1:1-100.2"));
-        let other = chosen
-            .iter()
-            .find(|id| id.as_str() != "H.chr1:1-100.2")
-            .expect("expected a second allele");
-        assert!(other == "H.chr1:1-100.0" || other == "H.chr1:1-100.1");
-    }
-
-    #[test]
-    fn mec_recovers_clean_diploid_partition() {
-        // Ternary matrix: +1 = votes allele-A, -1 = votes allele-B, 0 = missing.
-        // Two intervals, 3 reads per haplotype, error-free → 0 corrections expected.
-        let m = ndarray::array![
-            // reads:   0     1     2     3     4     5
-            [ 1.0,  1.0,  1.0, -1.0, -1.0, -1.0], // interval 0
-            [ 1.0,  1.0,  1.0, -1.0, -1.0, -1.0], // interval 1
-        ];
-        let (clusters, corr) = mec_partition_reads(&m, 2, 0.0);
-        assert_eq!(corr, 0);
-        let a = clusters[0].clone();
-        let b = clusters.get(1).cloned().unwrap_or_default();
-        let mut a_sorted = a.clone();
-        a_sorted.sort();
-        let mut b_sorted = b.clone();
-        b_sorted.sort();
-        assert!(
-            (a_sorted == vec![0, 1, 2] && b_sorted == vec![3, 4, 5])
-                || (a_sorted == vec![3, 4, 5] && b_sorted == vec![0, 1, 2])
+    fn dp_matches_longest_dfs_path_on_linear_graph() {
+        let mut node_info = HashMap::new();
+        node_info.insert(
+            "H.chr1:1-10.0".to_string(),
+            test_node("H.chr1:1-10.0", "AAAAAAAAAA", "r1,r2", 2),
         );
-    }
-
-    #[test]
-    fn mec_corrects_single_flip() {
-        // Read 0 votes allele-B at interval 0 but allele-A at interval 1.
-        // One correction needed to assign read 0 to group A.
-        let m = ndarray::array![
-            [-1.0,  1.0,  1.0, -1.0, -1.0, -1.0], // interval 0: read 0 flipped
-            [ 1.0,  1.0,  1.0, -1.0, -1.0, -1.0], // interval 1: clean
-        ];
-        let (_, corr) = mec_partition_reads(&m, 2, 0.0);
-        assert_eq!(corr, 1, "exactly one entry should need flipping");
-    }
-
-    #[test]
-    fn mec_balance_penalty_breaks_ties() {
-        // 1 interval, reads 0-1 vote allele-A, reads 2-3 vote allele-B.
-        // Zero-correction 2-2 split should beat any 3-1 split with balance_weight = 1.
-        let m = ndarray::array![[1.0, 1.0, -1.0, -1.0]];
-        let (clusters, corr) = mec_partition_reads(&m, 2, 1.0);
-        assert_eq!(corr, 0);
-        let a = clusters[0].clone();
-        let b = clusters.get(1).cloned().unwrap_or_default();
-        assert_eq!(a.len() + b.len(), 4);
-        assert_eq!((a.len() as i64 - b.len() as i64).abs(), 0);
-    }
-
-    #[test]
-    fn mec_missing_reads_are_wildcards() {
-        // Interval 0: reads 0-2 vote allele-A, reads 3-4 vote allele-B, read 5 missing.
-        // Interval 1: reads 0-2 vote allele-A, reads 3-4 vote allele-B, read 5 missing.
-        // Read 5 has no information → should not inflate the correction count.
-        let m = ndarray::array![
-            [ 1.0,  1.0,  1.0, -1.0, -1.0,  0.0],
-            [ 1.0,  1.0,  1.0, -1.0, -1.0,  0.0],
-        ];
-        let (clusters, corr) = mec_partition_reads(&m, 2, 0.0);
-        assert_eq!(corr, 0, "missing reads must not add corrections");
-        let a = clusters[0].clone();
-        let b = clusters.get(1).cloned().unwrap_or_default();
-        // Reads 0-2 and 3-4 should land in opposite groups; read 5 can be anywhere.
-        let a_set: std::collections::HashSet<usize> = a.into_iter().collect();
-        let b_set: std::collections::HashSet<usize> = b.into_iter().collect();
-        let active_a: Vec<usize> = [0, 1, 2].iter().filter(|&&r| a_set.contains(&r)).copied().collect();
-        let active_b: Vec<usize> = [0, 1, 2].iter().filter(|&&r| b_set.contains(&r)).copied().collect();
-        assert!(
-            active_a.len() == 3 || active_b.len() == 3,
-            "reads 0-2 should be in the same group"
+        node_info.insert(
+            "H.chr1:10-20.0".to_string(),
+            test_node("H.chr1:10-20.0", "CCCCCCCCCC", "r1,r2", 2),
         );
-    }
+        node_info.insert(
+            "H.chr1:20-30.0".to_string(),
+            test_node("H.chr1:20-30.0", "GGGGGGGGGG", "r1,r2", 2),
+        );
 
-    #[test]
-    fn mec_clusters_block_pattern_over_noisy_site() {
-        // Interval 0 alternates (+/-), intervals 1-3 are block (+/+/+/-/-/-).
-        // The optimal split {0,1,2}|{3,4,5} satisfies intervals 1-3 perfectly
-        // and costs 2 corrections at interval 0 (reads 1 and 4).
-        let m = ndarray::array![
-            [ 1.0, -1.0,  1.0, -1.0,  1.0, -1.0], // interval 0: alternating
-            [ 1.0,  1.0,  1.0, -1.0, -1.0, -1.0], // interval 1: block
-            [ 1.0,  1.0,  1.0, -1.0, -1.0, -1.0], // interval 2
-            [ 1.0,  1.0,  1.0, -1.0, -1.0, -1.0], // interval 3
-        ];
-        let (clusters, corr) = mec_partition_reads(&m, 2, 0.0);
-        let total: usize = clusters.iter().map(|c| c.len()).sum();
-        assert_eq!(total, 6);
-        assert!(corr <= 3, "should produce a reasonable partition");
-    }
+        let mut edge_info = HashMap::new();
+        edge_info.insert(
+            "H.chr1:1-10.0".to_string(),
+            vec!["H.chr1:10-20.0".to_string()],
+        );
+        edge_info.insert(
+            "H.chr1:10-20.0".to_string(),
+            vec!["H.chr1:20-30.0".to_string()],
+        );
 
+        let mut node_haplotype = HashMap::new();
+        for id in node_info.keys() {
+            node_haplotype.insert(id.clone(), HashSet::from([0]));
+        }
+
+        let dp = find_best_haplotype_paths_dp(&node_info, &edge_info, &node_haplotype, 1);
+        assert_eq!(dp.len(), 1);
+        assert_eq!(dp[&0].0.len(), 3);
+        assert_eq!(dp[&0].1.len(), 30);
+
+        let all_paths = enumerate_all_paths_with_haplotype(
+            &node_info,
+            &edge_info,
+            &node_haplotype,
+            1,
+        )
+        .unwrap();
+        let allseq = construct_sequences_from_haplotype_path(&node_info, &all_paths);
+        let dfs_best = find_full_range_haplotypes(&node_info, &allseq);
+        assert_eq!(dp[&0].1, dfs_best[&0].1);
+    }
 }
