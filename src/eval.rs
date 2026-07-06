@@ -2,17 +2,16 @@ use crate::util;
 use anyhow::Result as AnyhowResult;
 use bio::io::fasta::Reader as FastaReader;
 use bio::io::fasta::Record;
+use flate2::read::GzDecoder;
 use itertools::Itertools;
-use log::{info, debug};
+use log::{debug, info};
 use minimap2::Aligner;
 use rayon::prelude::*;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
-use std::path::PathBuf;
-use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
-use flate2::read::GzDecoder;
-
+use std::path::PathBuf;
 
 pub fn find_alignment_intervals(interval_list: Vec<&str>) -> AnyhowResult<(usize, usize)> {
     //
@@ -93,7 +92,7 @@ pub fn calculate_qv_score(truth_seqs: Record, query_seqs: Record) -> AnyhowResul
     // let qv_score2 = -10 as f64* (editdistance.max(0.5) / block_length as f64).log10();
     // println!("version1: {:?}, version2: {}", qv_score1, qv_score2);
 
-    Ok((editdistance, alignment_length,qv_score1))
+    Ok((editdistance, alignment_length, qv_score1))
 }
 
 pub fn start(
@@ -134,7 +133,14 @@ pub fn start(
             query_seqs.iter().enumerate().map(move |(j, q_seq)| {
                 let (editdistance, alignment_length, qv_score) =
                     calculate_qv_score(t_seq.clone(), q_seq.clone()).unwrap();
-                    debug!("{} {} qv_score: {} editdistance: {} alignment_length: {}", i, j, qv_score.clone(), editdistance, alignment_length);
+                debug!(
+                    "{} {} qv_score: {} editdistance: {} alignment_length: {}",
+                    i,
+                    j,
+                    qv_score.clone(),
+                    editdistance,
+                    alignment_length
+                );
                 (i, j, qv_score, editdistance, alignment_length)
             })
         })
@@ -164,23 +170,58 @@ pub fn start(
 
     let mut optimal_sequence_pairs = Vec::new();
     for (i, j, score, editdistance, alignment_length) in optimal_perm.iter() {
-        optimal_sequence_pairs.push((truth_seqs[*i].clone(), query_seqs[*j].clone(), *score, *editdistance, *alignment_length));
+        optimal_sequence_pairs.push((
+            truth_seqs[*i].clone(),
+            query_seqs[*j].clone(),
+            *score,
+            *editdistance,
+            *alignment_length,
+        ));
     }
 
     // write the evaluation results to a file
     let mut file = File::create(output_prefix)?;
     if as_genotyper {
-        writeln!(file, "{} {} {} {} {} {}", "Truth_id", "Truth_allele", "Query_id", "QV_score", "Edit_distance", "Alignment_length")?;
+        writeln!(
+            file,
+            "{} {} {} {} {} {}",
+            "Truth_id", "Truth_allele", "Query_id", "QV_score", "Edit_distance", "Alignment_length"
+        )?;
         let seq_info = load_pangenome_description(truth_fasta)?;
         for (i, j, score, editdistance, alignment_length) in optimal_sequence_pairs.iter() {
             let truth_seq_id = i.id().to_string();
-            let truth_seq_allele = seq_info.get(&truth_seq_id).or(None).unwrap_or(&"Unknown".to_string()).clone();
-            writeln!(file, "{} {} {} {} {} {}", i.id(), truth_seq_allele, j.id(), score, editdistance, alignment_length)?;
+            let truth_seq_allele = seq_info
+                .get(&truth_seq_id)
+                .or(None)
+                .unwrap_or(&"Unknown".to_string())
+                .clone();
+            writeln!(
+                file,
+                "{} {} {} {} {} {}",
+                i.id(),
+                truth_seq_allele,
+                j.id(),
+                score,
+                editdistance,
+                alignment_length
+            )?;
         }
     } else {
-        writeln!(file, "{} {} {} {} {}", "Truth_id", "Query_id", "QV_score", "Edit_distance", "Alignment_length")?;
+        writeln!(
+            file,
+            "{} {} {} {} {}",
+            "Truth_id", "Query_id", "QV_score", "Edit_distance", "Alignment_length"
+        )?;
         for (i, j, score, editdistance, alignment_length) in optimal_sequence_pairs.iter() {
-            writeln!(file, "{} {} {} {} {}", i.id(), j.id(), score, editdistance, alignment_length)?;
+            writeln!(
+                file,
+                "{} {} {} {} {}",
+                i.id(),
+                j.id(),
+                score,
+                editdistance,
+                alignment_length
+            )?;
         }
     }
 

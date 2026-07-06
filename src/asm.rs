@@ -1,11 +1,12 @@
 use crate::eval;
 use crate::util;
 use anyhow::Result as AnyhowResult;
+use csv::Writer;
 use flate2::read::GzDecoder;
+use itertools::Itertools;
 use log::{info, warn};
 use ndarray::Array2;
 use serde_json::Value;
-use itertools::Itertools;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs::File;
@@ -13,7 +14,6 @@ use std::io::Write;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::path::PathBuf;
-use csv::Writer;
 
 #[derive(Debug, Clone)]
 pub struct NodeInfo {
@@ -72,9 +72,12 @@ pub fn load_graph(
                     .to_string()
                     .trim_matches('"')
                     .parse::<usize>()
-                    .unwrap_or_else(|_| panic!("Support reads not found for node: {}, {}",
-                        name,
-                        value["support_reads"])),
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "Support reads not found for node: {}, {}",
+                            name, value["support_reads"]
+                        )
+                    }),
                 allele_frequency: value["allele_frequency"].to_string(),
                 read_names: value["read_names"].to_string(),
                 methyl_info: methyl_info_dict,
@@ -179,7 +182,7 @@ pub fn identify_heterozygous_nodes(
     });
 
     for interval_name in interval_list.iter() {
-        let (chromo, start, end )= util::split_locus(interval_name.to_string());
+        let (chromo, start, end) = util::split_locus(interval_name.to_string());
         let node_vec = all_nodes.get(*interval_name).unwrap();
 
         let mut candidates: Vec<(String, HashSet<String>)> = node_vec
@@ -206,12 +209,10 @@ pub fn identify_heterozygous_nodes(
 
                 let balance = min_max_support_ratio(&supports);
 
-                let reads_owned: Vec<HashSet<String>> =
-                    reads.iter().map(|&r| r.clone()).collect();
+                let reads_owned: Vec<HashSet<String>> = reads.iter().map(|&r| r.clone()).collect();
                 let max_jac = max_pairwise_jaccard(&reads_owned);
 
-                let union_reads: HashSet<&String> =
-                    reads.iter().flat_map(|r| r.iter()).collect();
+                let union_reads: HashSet<&String> = reads.iter().flat_map(|r| r.iter()).collect();
                 let disjointness = 1.0 - max_jac;
                 let total_unique = union_reads.len();
 
@@ -220,8 +221,7 @@ pub fn identify_heterozygous_nodes(
                 let is_better = match &best {
                     None => true,
                     Some((d, b, t, _)) => {
-                        (candidate_score.0, candidate_score.1, candidate_score.2)
-                            > (*d, *b, *t)
+                        (candidate_score.0, candidate_score.1, candidate_score.2) > (*d, *b, *t)
                     }
                 };
                 if is_better {
@@ -626,17 +626,22 @@ fn construct_het_interval_matrix(
         // let vote = if allele_idx == 0 { 1.0_f64 } else { -1.0_f64 };
         // get all read in the interval
         let interval = node.split(".").collect::<Vec<_>>()[1];
-        let interval_nodes = heterozygous_nodes.get(interval).unwrap().iter().cloned().collect::<Vec<_>>();
+        let interval_nodes = heterozygous_nodes
+            .get(interval)
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
         let mut total_reads = HashSet::new();
-        for node in interval_nodes.iter(){
+        for node in interval_nodes.iter() {
             let read_names = get_read_name_list(node_info, node.clone());
             total_reads.extend(read_names);
         }
 
         let current_read_list = get_read_name_list(node_info, node.clone());
-        for read in  read_list.iter(){
-            let vote = if total_reads.contains(read){
-                if current_read_list.contains(read){
+        for read in read_list.iter() {
+            let vote = if total_reads.contains(read) {
+                if current_read_list.contains(read) {
                     1.0
                 } else {
                     -1.0
@@ -644,12 +649,11 @@ fn construct_het_interval_matrix(
             } else {
                 0.0
             };
-            
+
             if let Some(&col) = read_index.get(read.as_str()) {
                 matrix[[row, col]] = vote;
             }
         }
-        
     }
 
     (matrix, read_list, het_nodes)
@@ -674,10 +678,17 @@ pub fn assign_haplotype_reads(
     if read_list.is_empty() {
         return haplotype_reads;
     }
-    
+
     let (clusters, corrections) =
         cluster_partition_reads(&het_matrix, hap_number, CLUSTER_BALANCE_WEIGHT);
-    write_matrix_to_csv(&het_matrix, &clusters, &het_nodes, &read_list, "het_matrix.csv").unwrap();
+    write_matrix_to_csv(
+        &het_matrix,
+        &clusters,
+        &het_nodes,
+        &read_list,
+        "het_matrix.csv",
+    )
+    .unwrap();
 
     info!(
         "Cluster partition: cluster sizes = {:?}, corrections = {}",
@@ -717,7 +728,7 @@ pub fn find_most_supported_path(
     let all_nodes = find_parallele_nodes(node_info);
     let mut interval_list = all_nodes.keys().collect::<Vec<_>>();
     interval_list.sort(); // ascending order a < b
-                                            // should also consider the edge connectivity
+                          // should also consider the edge connectivity
     let haplotype = 0;
     for (interval_name, node_vec) in all_nodes.iter() {
         if node_vec.len() < 2 {
@@ -872,8 +883,12 @@ pub fn construct_sequences_from_haplotype_path(
         let mut read_names = HashSet::new();
 
         for node in path.iter() {
-            let node_info_dict = node_info.get(node).unwrap_or_else(|| panic!("Node {} not found in node_info, path Number: {:?}",
-                node, path));
+            let node_info_dict = node_info.get(node).unwrap_or_else(|| {
+                panic!(
+                    "Node {} not found in node_info, path Number: {:?}",
+                    node, path
+                )
+            });
             let read_names_list_clone = get_read_name_list(node_info, node.clone());
             read_names.extend(read_names_list_clone.clone());
             sequence += &node_info_dict.seq;
@@ -885,10 +900,11 @@ pub fn construct_sequences_from_haplotype_path(
                 hap_ind,
                 sequence.len()
             );
-            all_sequences
-                .entry(*hap_ind)
-                .or_insert(Vec::new())
-                .push((path.clone(), sequence.clone(), read_names.clone()));
+            all_sequences.entry(*hap_ind).or_insert(Vec::new()).push((
+                path.clone(),
+                sequence.clone(),
+                read_names.clone(),
+            ));
         }
     }
     all_sequences
@@ -975,7 +991,8 @@ fn extend_path_state(
     let mut read_names = prev.read_names.clone();
     read_names.extend(get_read_name_list(node_info, node.to_string()));
     let sequence = format!("{}{}", prev.sequence, info.seq);
-    let (start, end) = eval::find_alignment_intervals(path.iter().map(|x| x.as_str()).collect()).ok()?;
+    let (start, end) =
+        eval::find_alignment_intervals(path.iter().map(|x| x.as_str()).collect()).ok()?;
     Some(PathState {
         path: path.clone(),
         sequence,
@@ -1048,7 +1065,10 @@ pub fn find_best_haplotype_paths_dp(
                     }
                     if let Some(prev) = dp.get(pred) {
                         if let Some(extended) = extend_path_state(node_info, prev, node) {
-                            if best.as_ref().map_or(true, |b| path_state_better(&extended, b)) {
+                            if best
+                                .as_ref()
+                                .map_or(true, |b| path_state_better(&extended, b))
+                            {
                                 best = Some(extended);
                             }
                         }
@@ -1082,7 +1102,10 @@ pub fn find_best_haplotype_paths_dp(
             {
                 continue;
             }
-            if hap_best.as_ref().map_or(true, |b| path_state_better(state, b)) {
+            if hap_best
+                .as_ref()
+                .map_or(true, |b| path_state_better(state, b))
+            {
                 hap_best = Some(state.clone());
             }
         }
@@ -1180,9 +1203,8 @@ pub fn filter_haplotype_nodes(
         filtered_haplotype_nodes.entry(*hap).or_default();
     }
 
-    let support_of = |node: &String| -> usize {
-        node_info.get(node).map(|n| n.support_reads).unwrap_or(0)
-    };
+    let support_of =
+        |node: &String| -> usize { node_info.get(node).map(|n| n.support_reads).unwrap_or(0) };
 
     for (interval, nodes_set) in interval_all_nodes.iter() {
         let nodes: Vec<String> = nodes_set.iter().cloned().collect();
@@ -1259,7 +1281,6 @@ pub fn filter_haplotype_nodes(
     filtered_haplotype_nodes
 }
 
-
 pub fn find_node_haplotype(
     node_info: &HashMap<String, NodeInfo>,
     hap_number: usize,
@@ -1270,42 +1291,42 @@ pub fn find_node_haplotype(
     if hap_number == 1 {
         let node_haplotype = find_most_supported_path(node_info);
         return (HashMap::new(), node_haplotype);
-    }else if hap_number == 2 {
+    } else if hap_number == 2 {
         let heterozygous_nodes = identify_heterozygous_nodes(node_info, hap_number);
         info!("heterozygous_nodes: {:?}", heterozygous_nodes.len());
 
-        let haplotype_reads =
-            assign_haplotype_reads(node_info, &heterozygous_nodes, hap_number);
+        let haplotype_reads = assign_haplotype_reads(node_info, &heterozygous_nodes, hap_number);
 
         let mut total_reads = HashSet::new();
-        for node in node_info.keys(){
+        for node in node_info.keys() {
             let read_names = get_read_name_list(node_info, node.clone());
             total_reads.extend(read_names);
         }
-        info!(
-            "total reads: {:?}",
-            total_reads.len()
-        );        
+        info!("total reads: {:?}", total_reads.len());
         if haplotype_reads.is_empty() {
             let node_haplotype = find_most_supported_path(node_info);
-            return (haplotype_reads, node_haplotype)
+            return (haplotype_reads, node_haplotype);
         } else {
             let mut haplotype_nodes = HashMap::new();
             let read_to_nodes = assign_node_to_reads(node_info);
-            
+
             for (hap, reads) in haplotype_reads.iter() {
                 for read in reads.iter() {
                     let nodes_on_read = read_to_nodes.get(read).unwrap().clone();
-                    haplotype_nodes.entry(*hap).or_insert(HashSet::new()).extend(nodes_on_read);
+                    haplotype_nodes
+                        .entry(*hap)
+                        .or_insert(HashSet::new())
+                        .extend(nodes_on_read);
                 }
             }
             let filtered_haplotype_nodes =
                 filter_haplotype_nodes(node_info, &haplotype_nodes, &haplotype_reads);
 
             let node_haplotype = assign_haplotype_to_nodes(&filtered_haplotype_nodes);
-            
-        return (haplotype_reads, node_haplotype)
-    }}else{
+
+            return (haplotype_reads, node_haplotype);
+        }
+    } else {
         warn!("Unsupported hap_number: {}", hap_number);
         (HashMap::new(), HashMap::new())
     }
@@ -1475,18 +1496,17 @@ pub fn call_methylation(
 pub fn start(
     graph_filename: &PathBuf,
     haplotype_number: usize,
-    output_prefix: &PathBuf
-) -> AnyhowResult<(HashMap<usize, (Vec<String>, String, HashSet<String>, usize, usize)>, HashMap<String, NodeInfo>, HashMap<String, Vec<String>>)> {
+    output_prefix: &PathBuf,
+) -> AnyhowResult<(
+    HashMap<usize, (Vec<String>, String, HashSet<String>, usize, usize)>,
+    HashMap<String, NodeInfo>,
+    HashMap<String, Vec<String>>,
+)> {
     let (node_info, edge_info) = load_graph(graph_filename).unwrap();
 
-    let (_haplotype_reads, node_haplotype) =
-        find_node_haplotype(&node_info, haplotype_number);
-    let primary_haplotypes = find_best_haplotype_paths_dp(
-        &node_info,
-        &edge_info,
-        &node_haplotype,
-        haplotype_number,
-    );
+    let (_haplotype_reads, node_haplotype) = find_node_haplotype(&node_info, haplotype_number);
+    let primary_haplotypes =
+        find_best_haplotype_paths_dp(&node_info, &edge_info, &node_haplotype, haplotype_number);
     info!("Best haplotype paths (DP): {}", primary_haplotypes.len());
     call_methylation(&node_info, primary_haplotypes.clone(), output_prefix);
     info!(
@@ -1505,8 +1525,8 @@ pub fn start(
 #[cfg(test)]
 mod path_dp_tests {
     use super::{
-        find_best_haplotype_paths_dp, find_full_range_haplotypes, enumerate_all_paths_with_haplotype,
-        construct_sequences_from_haplotype_path, NodeInfo,
+        construct_sequences_from_haplotype_path, enumerate_all_paths_with_haplotype,
+        find_best_haplotype_paths_dp, find_full_range_haplotypes, NodeInfo,
     };
     use std::collections::{HashMap, HashSet};
 
@@ -1557,13 +1577,8 @@ mod path_dp_tests {
         assert_eq!(dp[&0].0.len(), 3);
         assert_eq!(dp[&0].1.len(), 30);
 
-        let all_paths = enumerate_all_paths_with_haplotype(
-            &node_info,
-            &edge_info,
-            &node_haplotype,
-            1,
-        )
-        .unwrap();
+        let all_paths =
+            enumerate_all_paths_with_haplotype(&node_info, &edge_info, &node_haplotype, 1).unwrap();
         let allseq = construct_sequences_from_haplotype_path(&node_info, &all_paths);
         let dfs_best = find_full_range_haplotypes(&node_info, &allseq);
         assert_eq!(dp[&0].1, dfs_best[&0].1);

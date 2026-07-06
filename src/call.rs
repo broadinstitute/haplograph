@@ -4,12 +4,12 @@ use crate::util;
 use anyhow::Result as AnyhowResult;
 use bio::io::fastq;
 use log::{info, warn};
+use ndarray::s;
 use ndarray::Array2;
+use rayon::prelude::*;
 use rust_htslib::bcf::{self, record::GenotypeAllele};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use ndarray::s;
-use rayon::prelude::*;
 
 #[derive(Debug, Clone)]
 pub struct Variant {
@@ -39,6 +39,7 @@ pub fn get_variants_from_cigar(
     allele_count_dict: &HashMap<usize, usize>,
     node_id: &str,
 ) -> (Vec<Variant>, HashMap<usize, usize>) {
+    let cigar = util::normalize_homopolymer_indels(cigar, ref_seq, alt_seq);
     let mut poscount = HashMap::new();
     let mut variants = Vec::new();
     let mut ref_pos = 0;
@@ -274,7 +275,9 @@ fn collapse_identical_records(variants: Vec<Variant>) -> Vec<Variant> {
     collapsed_variants
 }
 
-fn find_coverage_from_node_info(node_info: &HashMap<String, asm::NodeInfo>) -> HashMap<usize, usize> {
+fn find_coverage_from_node_info(
+    node_info: &HashMap<String, asm::NodeInfo>,
+) -> HashMap<usize, usize> {
     let mut coverage = HashMap::new();
     let interval_node = asm::find_parallele_nodes(node_info);
     for (interval, nodes) in interval_node.iter() {
@@ -764,11 +767,8 @@ pub fn start(
         .unwrap()
         .clone();
 
-    let (phased_variants, somatic_variants) = get_variants_from_path(
-        &node_info,
-        primary_haplotypes,
-        &ref_chromosome_seqs,
-    );
+    let (phased_variants, somatic_variants) =
+        get_variants_from_path(&node_info, primary_haplotypes, &ref_chromosome_seqs);
     let all_variants = [phased_variants.clone(), somatic_variants.clone()].concat();
     let all_variants_filtered = collapse_identical_records(all_variants);
     let phased_keys = phased_variants
@@ -844,11 +844,15 @@ pub fn start(
                 util::permutation_test(&chunk, 0.5, 100, var_list_chunk).into_iter()
             })
             .collect();
-        chunks_filtered.into_iter().collect::<HashSet<_>>().into_iter().collect()
-    }else{
+        chunks_filtered
+            .into_iter()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect()
+    } else {
         util::permutation_test(&matrix, 0.05, 100, var_list.clone())
     };
-    
+
     let mut filtered_somatic_variants = Vec::new();
     for var in s_variants.iter() {
         if sequencing_technology == "hifi" {

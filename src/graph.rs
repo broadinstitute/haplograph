@@ -1,5 +1,5 @@
-use crate::intervals;
 use crate::extract;
+use crate::intervals;
 use crate::methyl;
 use crate::util;
 use anyhow::{Context, Result as AnyhowResult};
@@ -71,7 +71,10 @@ fn add_adjacent_window_edges(
     window: &(String, usize, usize),
     next_window: &(String, usize, usize),
     final_hap_list_index: &HashMap<String, (String, HashMap<String, HashMap<usize, f32>>, f64)>,
-    next_final_hap_list_index: &HashMap<String, (String, HashMap<String, HashMap<usize, f32>>, f64)>,
+    next_final_hap_list_index: &HashMap<
+        String,
+        (String, HashMap<String, HashMap<usize, f32>>, f64),
+    >,
     edge_info: &mut HashMap<(String, String), EdgeInfo>,
     min_reads: usize,
 ) {
@@ -82,8 +85,10 @@ fn add_adjacent_window_edges(
         let read_vector_clone: HashSet<_> = read_dict.keys().map(|x| read_base_name(x)).collect();
         let node_id = format!("H.{}:{}-{}.{}", window.0, window.1, window.2, i);
 
-        for (j, (_next_final_haplotype_seq, (_next_cigar, next_methyl_dict, _next_allele_frequency))) in
-            next_final_hap_list_index.iter().enumerate()
+        for (
+            j,
+            (_next_final_haplotype_seq, (_next_cigar, next_methyl_dict, _next_allele_frequency)),
+        ) in next_final_hap_list_index.iter().enumerate()
         {
             let next_node_id = format!(
                 "H.{}:{}-{}.{}",
@@ -118,7 +123,10 @@ pub fn build_node_edge_info(
     windows: &[(String, usize, usize)],
     final_hap_list: &[WindowHapResult],
     min_reads: usize,
-) -> (HashMap<String, NodeInfo>, HashMap<(String, String), EdgeInfo>) {
+) -> (
+    HashMap<String, NodeInfo>,
+    HashMap<(String, String), EdgeInfo>,
+) {
     let mut node_info = HashMap::new();
     let mut edge_info = HashMap::new();
 
@@ -237,32 +245,36 @@ pub fn start(
         let mut indexed_results: Vec<(usize, WindowHapResult)> = windows
             .par_iter()
             .enumerate()
-            .map(|(index, window)| -> AnyhowResult<(usize, WindowHapResult)> {
-                let (chromosome, start, end) = window;
-                let result = util::with_thread_local_bam(bam_path_str, |bam| {
-                    intervals::start(
-                        bam,
-                        reference_fa,
-                        chromosome,
-                        *start,
-                        *end,
-                        sampleid,
-                        min_reads,
-                        frequency_min,
-                        primary_only,
-                        true,
-                        false,
-                    )
-                })
-                .with_context(|| {
-                    format!("Failed to process window {}:{}-{}", chromosome, start, end)
-                })?;
-                Ok((index, result))
-            })
+            .map(
+                |(index, window)| -> AnyhowResult<(usize, WindowHapResult)> {
+                    let (chromosome, start, end) = window;
+                    let result = util::with_thread_local_bam(bam_path_str, |bam| {
+                        intervals::start(
+                            bam,
+                            reference_fa,
+                            chromosome,
+                            *start,
+                            *end,
+                            sampleid,
+                            min_reads,
+                            frequency_min,
+                            primary_only,
+                            true,
+                            false,
+                        )
+                    })
+                    .with_context(|| {
+                        format!("Failed to process window {}:{}-{}", chromosome, start, end)
+                    })?;
+                    Ok((index, result))
+                },
+            )
             .collect::<Result<Vec<_>, _>>()?;
         indexed_results.sort_by_key(|(index, _)| *index);
-        let final_hap_list: Vec<WindowHapResult> =
-            indexed_results.into_iter().map(|(_, result)| result).collect();
+        let final_hap_list: Vec<WindowHapResult> = indexed_results
+            .into_iter()
+            .map(|(_, result)| result)
+            .collect();
         return write_graph_from_windows(
             windows,
             &final_hap_list,
@@ -279,27 +291,33 @@ pub fn start(
     let mut indexed_results: Vec<(usize, WindowHapResult)> = windows
         .par_iter()
         .enumerate()
-        .map(|(index, window)| -> AnyhowResult<(usize, WindowHapResult)> {
-            let (chromosome, start, end) = window;
-            let result = intervals::start_with_prefetch(
-                &prefetch,
-                index,
-                reference_fa,
-                chromosome,
-                *start,
-                *end,
-                sampleid,
-                min_reads,
-                frequency_min,
-                false,
-            )
-            .with_context(|| format!("Failed to process window {}:{}-{}", chromosome, start, end))?;
-            Ok((index, result))
-        })
+        .map(
+            |(index, window)| -> AnyhowResult<(usize, WindowHapResult)> {
+                let (chromosome, start, end) = window;
+                let result = intervals::start_with_prefetch(
+                    &prefetch,
+                    index,
+                    reference_fa,
+                    chromosome,
+                    *start,
+                    *end,
+                    sampleid,
+                    min_reads,
+                    frequency_min,
+                    false,
+                )
+                .with_context(|| {
+                    format!("Failed to process window {}:{}-{}", chromosome, start, end)
+                })?;
+                Ok((index, result))
+            },
+        )
         .collect::<Result<Vec<_>, _>>()?;
     indexed_results.sort_by_key(|(index, _)| *index);
-    let final_hap_list: Vec<WindowHapResult> =
-        indexed_results.into_iter().map(|(_, result)| result).collect();
+    let final_hap_list: Vec<WindowHapResult> = indexed_results
+        .into_iter()
+        .map(|(_, result)| result)
+        .collect();
 
     write_graph_from_windows(
         windows,

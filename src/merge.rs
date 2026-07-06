@@ -1,13 +1,13 @@
 use crate::asm;
 use crate::util;
-use anyhow::{Context, Result as AnyhowResult, bail};
+use anyhow::{bail, Context, Result as AnyhowResult};
 use bio::io::fasta::Reader as FastaReader;
 use log::{info, warn};
 use rust_htslib::bcf::{self, Read};
 use std::collections::{HashMap, HashSet};
-use std::ops::Deref;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
 /// Default overlap between adjacent maximal-locus windows (matches `main.rs`).
@@ -133,9 +133,7 @@ fn parse_fasta_header(header: &str) -> AnyhowResult<(String, usize, usize, usize
         .next()
         .context("Missing chromosome in FASTA header")?
         .to_string();
-    let span = coord_split
-        .next()
-        .context("Missing span in FASTA header")?;
+    let span = coord_split.next().context("Missing span in FASTA header")?;
     let mut span_split = span.split('-');
     let ref_start = span_split
         .next()
@@ -149,10 +147,7 @@ fn parse_fasta_header(header: &str) -> AnyhowResult<(String, usize, usize, usize
     Ok((chromosome, ref_start, ref_end, hap_index, path))
 }
 
-fn path_read_names(
-    node_info: &HashMap<String, asm::NodeInfo>,
-    path: &[String],
-) -> HashSet<String> {
+fn path_read_names(node_info: &HashMap<String, asm::NodeInfo>, path: &[String]) -> HashSet<String> {
     let mut reads = HashSet::new();
     for node in path {
         if node_info.contains_key(node) {
@@ -225,15 +220,13 @@ fn discover_all_segments(output_prefix: &str, max_scan: usize) -> Vec<Segment> {
     segments
 }
 
-fn build_merge_plan(
-    output_prefix: &str,
-    planned: &[(String, usize, usize)],
-) -> Vec<MergeChunk> {
+fn build_merge_plan(output_prefix: &str, planned: &[(String, usize, usize)]) -> Vec<MergeChunk> {
     let max_scan = planned.len().saturating_add(32);
-    let loaded_by_coords: HashMap<(usize, usize), Segment> = discover_all_segments(output_prefix, max_scan)
-        .into_iter()
-        .map(|segment| ((segment.ref_start, segment.ref_end), segment))
-        .collect();
+    let loaded_by_coords: HashMap<(usize, usize), Segment> =
+        discover_all_segments(output_prefix, max_scan)
+            .into_iter()
+            .map(|segment| ((segment.ref_start, segment.ref_end), segment))
+            .collect();
 
     planned
         .iter()
@@ -376,7 +369,16 @@ fn match_haplotypes_at_overlap(
 
     info!(
         "Phasing {} -> {} at overlap {}:{}-{} (read-overlap score={})",
-        left.prefix, right.prefix, left.haplotypes.values().next().map(|h| h.chromosome.as_str()).unwrap_or("?"), overlap_start, overlap_end, best_score
+        left.prefix,
+        right.prefix,
+        left.haplotypes
+            .values()
+            .next()
+            .map(|h| h.chromosome.as_str())
+            .unwrap_or("?"),
+        overlap_start,
+        overlap_end,
+        best_score
     );
     Ok(best_mapping)
 }
@@ -416,8 +418,9 @@ fn build_global_to_local_maps(
         let left = merge_chunks[idx - 1].segment.as_ref();
         let right = merge_chunks[idx].segment.as_ref();
         let mapping = match (left, right) {
-            (Some(left_seg), Some(right_seg)) if !left_seg.prefix.is_empty() && !right_seg.prefix.is_empty()
-            => {
+            (Some(left_seg), Some(right_seg))
+                if !left_seg.prefix.is_empty() && !right_seg.prefix.is_empty() =>
+            {
                 let left_gfa_path = PathBuf::from(format!("{}.gfa", left_seg.prefix));
                 let right_gfa_path = PathBuf::from(format!("{}.gfa", right_seg.prefix));
                 if left_gfa_path.exists() && right_gfa_path.exists() {
@@ -719,10 +722,8 @@ fn merge_vcf_files(
         for record_result in reader.records() {
             let mut record = record_result?;
             let chrom = match record.rid() {
-                Some(rid) => String::from_utf8_lossy(
-                    record.header().rid2name(rid).unwrap_or(b"?"),
-                )
-                .to_string(),
+                Some(rid) => String::from_utf8_lossy(record.header().rid2name(rid).unwrap_or(b"?"))
+                    .to_string(),
                 None => "?".to_string(),
             };
             let pos = record.pos() + 1;
@@ -783,7 +784,10 @@ pub fn start(
     );
 
     let merge_chunks = build_merge_plan(output_prefix, &planned);
-    let assembled_count = merge_chunks.iter().filter(|chunk| chunk.segment.is_some()).count();
+    let assembled_count = merge_chunks
+        .iter()
+        .filter(|chunk| chunk.segment.is_some())
+        .count();
     info!(
         "Found assembly for {assembled_count}/{} planned sub-loci",
         merge_chunks.len()
@@ -914,7 +918,8 @@ mod tests {
             },
         ];
         let global_to_local = vec![vec![0], vec![0]];
-        let stitched = stitch_fasta(&merge_chunks, &global_to_local, 1, &full_ref, 100, 700).unwrap();
+        let stitched =
+            stitch_fasta(&merge_chunks, &global_to_local, 1, &full_ref, 100, 700).unwrap();
         let seq = stitched.values().next().unwrap();
         // 200 bp assembly + 200 bp gap ref + 200 bp missing-chunk ref
         assert_eq!(seq.len(), 600);
@@ -1038,8 +1043,7 @@ mod tests {
             ),
         ]);
 
-        let mapping =
-            match_haplotypes_at_overlap(&left, &right, &left_gfa, &right_gfa, 2).unwrap();
+        let mapping = match_haplotypes_at_overlap(&left, &right, &left_gfa, &right_gfa, 2).unwrap();
         assert_eq!(mapping, vec![1, 0]);
     }
 }

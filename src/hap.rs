@@ -16,7 +16,7 @@ pub fn start(
     min_reads: usize,
     frequency_min: f64,
     primary_only: bool,
-    pileup:bool,
+    pileup: bool,
     output_prefix: &String,
     default_file_format: &String,
     methyl_threshold: f32,
@@ -61,22 +61,28 @@ pub fn start(
             );
         }
         header.push_record(
-            "##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Read Depth\">\n".to_string()
+            "##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Read Depth\">\n"
+                .to_string()
                 .as_bytes(),
         );
         header.push_record(
-            "##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n".to_string().as_bytes(),
+            "##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n"
+                .to_string()
+                .as_bytes(),
         );
         header.push_record(
-            "##FORMAT=<ID=AD,Number=1,Type=Integer,Description=\"Alternative Allele Depth\">\n".to_string()
-            .as_bytes(),
+            "##FORMAT=<ID=AD,Number=1,Type=Integer,Description=\"Alternative Allele Depth\">\n"
+                .to_string()
+                .as_bytes(),
         );
         header.push_record(
-            "##FORMAT=<ID=VAF,Number=1,Type=Float,Description=\"Variant Allele Frequency\">\n".to_string()
-            .as_bytes(),
+            "##FORMAT=<ID=VAF,Number=1,Type=Float,Description=\"Variant Allele Frequency\">\n"
+                .to_string()
+                .as_bytes(),
         );
         header.push_record(
-            "##FORMAT=<ID=MOD,Number=1,Type=Float,Description=\"Modification Score\">\n".to_string()
+            "##FORMAT=<ID=MOD,Number=1,Type=Float,Description=\"Modification Score\">\n"
+                .to_string()
                 .as_bytes(),
         );
         header.push_sample(sampleid.as_bytes());
@@ -100,7 +106,7 @@ pub fn start(
             let mut record = writer.empty_record();
             let reference_seq = reference_sequence[*start..*end].to_string();
             let mut bam = util::open_bam_file(&bam_path.clone());
-            let (haplotype_info, _,_, _) = intervals::start(
+            let (haplotype_info, _, _, _) = intervals::start(
                 &mut bam,
                 reference_fa,
                 chromosome,
@@ -154,10 +160,7 @@ pub fn start(
             record
                 .push_format_integer(
                     b"AD",
-                    &record_list
-                        .iter()
-                        .map(|v| v.3 as i32)
-                        .collect::<Vec<i32>>(),
+                    &record_list.iter().map(|v| v.3 as i32).collect::<Vec<i32>>(),
                 )
                 .expect("Failed to set AD format field");
             record
@@ -172,10 +175,7 @@ pub fn start(
             record
                 .push_format_float(
                     b"MOD",
-                    &record_list
-                        .iter()
-                        .map(|v| v.2)
-                        .collect::<Vec<f32>>(),
+                    &record_list.iter().map(|v| v.2).collect::<Vec<f32>>(),
                 )
                 .expect("Failed to set VAF format field");
             writer.write(&record).expect("Failed to write record");
