@@ -126,7 +126,8 @@ pub fn extract_haplotypes_coordinates_from_bam_pileup(
                     continue;
                 }
                 readnames.insert(align_key.clone());
-                let Some((seq_name, _query_start, _query_end)) = eligible_reads.get(&align_key) else {
+                let Some((seq_name, _query_start, _query_end)) = eligible_reads.get(&align_key)
+                else {
                     continue;
                 };
 
@@ -215,7 +216,13 @@ pub fn extract_haplotypes_coordinates_from_bam_pileup(
         read_sequence_dict.len()
     );
 
-    Ok((records, read_coordinates, read_sequence_dict, read_methyl_dict, read_strand_dict))
+    Ok((
+        records,
+        read_coordinates,
+        read_sequence_dict,
+        read_methyl_dict,
+        read_strand_dict,
+    ))
 }
 
 pub fn process_fasta_file(
@@ -451,7 +458,7 @@ pub fn start(
     min_reads: usize,
     frequency_min: f64,
     primary_only: bool,
-    pileup:bool,
+    pileup: bool,
     write_output: bool,
 ) -> AnyhowResult<(
     HashMap<String, (String, HashMap<String, HashMap<usize, f32>>, f64)>,
@@ -461,7 +468,13 @@ pub fn start(
 )> {
     // if pileup is true, use extract_haplotypes_coordinates_from_bam_pileup
     // if pileup is false, use  extract::extract_haplotypes_coordinates_from_bam
-    let (read_coordinates, read_quality_dict, read_sequence_dict, read_strand_dict, read_methyl_dict) = if !pileup {
+    let (
+        read_coordinates,
+        read_quality_dict,
+        read_sequence_dict,
+        read_strand_dict,
+        read_methyl_dict,
+    ) = if !pileup {
         extract::extract_haplotypes_coordinates_from_bam(
             bam,
             chromosome,
@@ -548,7 +561,9 @@ pub fn start(
 
 #[cfg(test)]
 mod pileup_extract_tests {
-    use super::{collapse_haplotypes, extract_haplotypes_coordinates_from_bam_pileup, process_fasta_file};
+    use super::{
+        collapse_haplotypes, extract_haplotypes_coordinates_from_bam_pileup, process_fasta_file,
+    };
     use bio::io::fastq;
     use rust_htslib::bam::IndexedReader;
     use std::collections::HashSet;
@@ -590,14 +605,24 @@ mod pileup_extract_tests {
 
         assert_eq!(records.len(), read_seq_dict.len());
         assert_eq!(unique_pileup.len(), unique_for_collapse.len());
-        assert!(unique_for_collapse.len() <= 10, "got {}", unique_for_collapse.len());
+        assert!(
+            unique_for_collapse.len() <= 10,
+            "got {}",
+            unique_for_collapse.len()
+        );
 
-        let reference =
-            process_fasta_file(&chr17_reference(end as usize + 1), chr, start as usize, end as usize, &sampleid)
-                .first()
-                .unwrap()
-                .clone();
-        let final_hap = collapse_haplotypes(&read_seq_dict, &read_methyl, &reference, 2, 0.0).unwrap();
+        let reference = process_fasta_file(
+            &chr17_reference(end as usize + 1),
+            chr,
+            start as usize,
+            end as usize,
+            &sampleid,
+        )
+        .first()
+        .unwrap()
+        .clone();
+        let final_hap =
+            collapse_haplotypes(&read_seq_dict, &read_methyl, &reference, 2, 0.0).unwrap();
 
         assert!(
             !final_hap.is_empty(),

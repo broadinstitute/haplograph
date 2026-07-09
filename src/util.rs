@@ -9,22 +9,22 @@ use log::debug;
 use log::info;
 use ndarray::s;
 use ndarray::{Array1, Array2};
+use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
-use rand::rngs::SmallRng;
 use rayon::prelude::*;
 use rust_htslib::bam::{self, record::Aux, IndexedReader, Read as BamRead};
 use rust_htslib::faidx;
-use std::cell::RefCell;
-use std::path::Path;
 use statrs::distribution::ContinuousCDF;
 use statrs::distribution::Normal;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
-use url::Url;
-use std::path::PathBuf;
 use std::io::Write;
+use std::io::{BufRead, BufReader};
+use std::path::Path;
+use std::path::PathBuf;
+use url::Url;
 
 pub fn reverse_complement(kmer: &str) -> String {
     kmer.chars()
@@ -66,7 +66,6 @@ pub fn write_fasta(
     }
     Ok(())
 }
-
 
 pub fn gcs_gcloud_is_installed() -> bool {
     // Check if gcloud is installed on the PATH
@@ -289,7 +288,8 @@ impl ReferenceFasta {
         let path = Path::new(reference_fa);
         let fai_path = format!("{reference_fa}.fai");
         if !Path::new(&fai_path).exists() {
-            faidx::build(path).map_err(|err| anyhow::anyhow!("failed to build FASTA index: {err}"))?;
+            faidx::build(path)
+                .map_err(|err| anyhow::anyhow!("failed to build FASTA index: {err}"))?;
         }
         let reader = faidx::Reader::from_path(path)
             .map_err(|err| anyhow::anyhow!("failed to open indexed FASTA {reference_fa}: {err}"))?;
@@ -355,17 +355,15 @@ pub fn get_ref_seq_from_chromosome(
     let reference_seqs = genome
         .fetch_all_chromosome_records()
         .unwrap_or_else(|_| get_all_ref_seq(reference_fa));
-    let reference_seqs_chromosome = vec![
-        genome
-            .fetch_chromosome_record(chromosome)
-            .unwrap_or_else(|_| {
-                reference_seqs
-                    .iter()
-                    .find(|r| r.id() == chromosome)
-                    .cloned()
-                    .expect("chromosome not found in reference")
-            }),
-    ];
+    let reference_seqs_chromosome = vec![genome
+        .fetch_chromosome_record(chromosome)
+        .unwrap_or_else(|_| {
+            reference_seqs
+                .iter()
+                .find(|r| r.id() == chromosome)
+                .cloned()
+                .expect("chromosome not found in reference")
+        })];
     (reference_seqs, reference_seqs_chromosome)
 }
 
@@ -387,6 +385,138 @@ pub fn split_locus(locus: String) -> (String, usize, usize) {
         .parse()
         .unwrap();
     (chromosome, start, end)
+}
+
+/// Parses a run-length CIGAR string ("23=4I1X20=") into `(length, op)` pairs.
+pub fn parse_cigar(cigar: &str) -> Vec<(usize, char)> {
+    let mut ops = Vec::new();
+    let mut num = String::new();
+    for c in cigar.chars() {
+        if c.is_ascii_digit() {
+            num.push(c);
+        } else {
+            ops.push((num.parse().expect("cigar length"), c));
+            num.clear();
+        }
+    }
+    ops
+}
+
+/// Rewrites a CIGAR to eliminate a length-1 `X` sitting directly against an
+/// `I` or `D` run whenever the X's "orphaned" base (the one with no partner
+/// on the gapped side) also occurs inside that run. In that case the run can
+/// be losslessly re-anchored so the X becomes a plain match and the indel is
+/// redistributed around it: same total ref/alt content, no substitution.
+/// Left untouched when the orphaned base doesn't occur in the adjacent run -
+/// that's very likely a genuine substitution, not a homopolymer-registration
+/// artifact.
+pub fn normalize_homopolymer_indels(cigar: &str, ref_seq: &str, alt_seq: &str) -> String {
+    let ops = parse_cigar(cigar);
+    let ref_bytes = ref_seq.as_bytes();
+    let alt_bytes = alt_seq.as_bytes();
+
+    let mut result: Vec<(usize, char)> = Vec::new();
+    let mut ref_pos = 0usize;
+    let mut alt_pos = 0usize;
+    let mut i = 0usize;
+
+    let push_op = |result: &mut Vec<(usize, char)>, len: usize, op: char| {
+        if len == 0 {
+            return;
+        }
+        if let Some(last) = result.last_mut() {
+            if last.1 == op {
+                last.0 += len;
+                return;
+            }
+        }
+        result.push((len, op));
+    };
+
+    while i < ops.len() {
+        let (len, op) = ops[i];
+
+        // I(n) immediately followed by a single mismatch: the mismatch's ref
+        // base may really belong inside the insertion run.
+        if op == 'I' && i + 1 < ops.len() && ops[i + 1] == (1, 'X') {
+            let ins = &alt_bytes[alt_pos..alt_pos + len];
+            let ref_x = ref_bytes[ref_pos];
+            if let Some(p) = ins.iter().rposition(|&b| b == ref_x) {
+                push_op(&mut result, p, 'I');
+                push_op(&mut result, 1, '=');
+                push_op(&mut result, len - p, 'I');
+                ref_pos += 1;
+                alt_pos += len + 1;
+                i += 2;
+                continue;
+            }
+        }
+
+        // A single mismatch immediately followed by I(n): mirror of the above.
+        if op == 'X' && len == 1 && i + 1 < ops.len() && ops[i + 1].1 == 'I' {
+            let n = ops[i + 1].0;
+            let ins = &alt_bytes[alt_pos + 1..alt_pos + 1 + n];
+            let ref_x = ref_bytes[ref_pos];
+            if let Some(p) = ins.iter().position(|&b| b == ref_x) {
+                push_op(&mut result, 1 + p, 'I');
+                push_op(&mut result, 1, '=');
+                push_op(&mut result, n - p - 1, 'I');
+                ref_pos += 1;
+                alt_pos += 1 + n;
+                i += 2;
+                continue;
+            }
+        }
+
+        // D(n) immediately followed by a single mismatch: mirror of I+X with
+        // ref/alt roles swapped.
+        if op == 'D' && i + 1 < ops.len() && ops[i + 1] == (1, 'X') {
+            let del = &ref_bytes[ref_pos..ref_pos + len];
+            let alt_x = alt_bytes[alt_pos];
+            if let Some(q) = del.iter().rposition(|&b| b == alt_x) {
+                push_op(&mut result, q, 'D');
+                push_op(&mut result, 1, '=');
+                push_op(&mut result, len - q, 'D');
+                ref_pos += len + 1;
+                alt_pos += 1;
+                i += 2;
+                continue;
+            }
+        }
+
+        // A single mismatch immediately followed by D(n): mirror of X+I.
+        if op == 'X' && len == 1 && i + 1 < ops.len() && ops[i + 1].1 == 'D' {
+            let n = ops[i + 1].0;
+            let del = &ref_bytes[ref_pos + 1..ref_pos + 1 + n];
+            let alt_x = alt_bytes[alt_pos];
+            if let Some(q) = del.iter().position(|&b| b == alt_x) {
+                push_op(&mut result, 1 + q, 'D');
+                push_op(&mut result, 1, '=');
+                push_op(&mut result, n - q - 1, 'D');
+                ref_pos += 1 + n;
+                alt_pos += 1;
+                i += 2;
+                continue;
+            }
+        }
+
+        match op {
+            '=' | 'X' => {
+                ref_pos += len;
+                alt_pos += len;
+            }
+            'I' => alt_pos += len,
+            'D' => ref_pos += len,
+            _ => {}
+        }
+        push_op(&mut result, len, op);
+        i += 1;
+    }
+
+    result
+        .iter()
+        .map(|(count, op)| format!("{}{}", count, op))
+        .collect()
 }
 
 pub fn alignment_to_cigar(operations: &[AlignmentOperation]) -> String {
@@ -422,7 +552,8 @@ pub fn gap_open_aligner(reference: &str, sequence: &str) -> String {
 
     // Perform the alignment
     let alignment = aligner.global(sequence.as_bytes(), reference.as_bytes());
-    alignment_to_cigar(&alignment.operations)
+    let cigar = alignment_to_cigar(&alignment.operations);
+    normalize_homopolymer_indels(&cigar, reference, sequence)
 }
 
 pub fn import_bed(bed_file: &String) -> Vec<(String, usize, usize)> {
@@ -673,4 +804,94 @@ pub fn permutation_test(
     }
 
     f_node
+}
+
+#[cfg(test)]
+mod cigar_tests {
+    use super::{gap_open_aligner, normalize_homopolymer_indels, parse_cigar};
+    use std::collections::HashMap;
+
+    #[test]
+    fn parse_cigar_splits_runs() {
+        assert_eq!(parse_cigar("3=2I1X"), vec![(3, '='), (2, 'I'), (1, 'X')]);
+    }
+
+    #[test]
+    fn normalize_x_plus_i_homopolymer() {
+        // Homopolymer T extension: aligner may emit 1X1I instead of 2I.
+        let ref_seq = "ATTT";
+        let alt_seq = "ATTTT";
+        let raw = "3=1X1I";
+        let normalized = normalize_homopolymer_indels(raw, ref_seq, alt_seq);
+        assert_eq!(normalized, "3=1I1=");
+        let (variants, _) = crate::call::get_variants_from_cigar(
+            raw,
+            "chr1",
+            ref_seq,
+            alt_seq,
+            0,
+            String::new(),
+            &HashMap::new(),
+            "n1",
+        );
+        assert!(
+            variants.iter().all(|v| v.variant_type != "SNP"),
+            "expected no spurious SNP, got {:?}",
+            variants
+        );
+        let (variants_norm, _) = crate::call::get_variants_from_cigar(
+            &normalized,
+            "chr1",
+            ref_seq,
+            alt_seq,
+            0,
+            String::new(),
+            &HashMap::new(),
+            "n1",
+        );
+        assert_eq!(variants_norm.len(), 1);
+        assert_eq!(variants_norm[0].variant_type, "INS");
+    }
+
+    #[test]
+    fn normalize_i_plus_x_homopolymer() {
+        let ref_seq = "ATTT";
+        let alt_seq = "ATTTT";
+        let raw = "3=1I1X";
+        let normalized = normalize_homopolymer_indels(raw, ref_seq, alt_seq);
+        assert_eq!(normalized, "4=1I");
+    }
+
+    #[test]
+    fn normalize_leaves_real_snp_adjacent_to_indel() {
+        // Genuine SNP next to indel should not be collapsed into the indel.
+        let ref_seq = "AAAC";
+        let alt_seq = "AAATAC";
+        let raw = "3=1X1I1=";
+        let normalized = normalize_homopolymer_indels(raw, ref_seq, alt_seq);
+        assert_eq!(normalized, raw);
+    }
+
+    #[test]
+    fn gap_open_aligner_avoids_snp_inside_indel() {
+        let ref_seq = "ATTT";
+        let alt_seq = "ATTTT";
+        let cigar = gap_open_aligner(ref_seq, alt_seq);
+        let (variants, _) = crate::call::get_variants_from_cigar(
+            &cigar,
+            "chr1",
+            ref_seq,
+            alt_seq,
+            0,
+            String::new(),
+            &HashMap::new(),
+            "n1",
+        );
+        assert!(
+            variants.iter().all(|v| v.variant_type != "SNP"),
+            "gap_open_aligner cigar {:?} produced SNP variants {:?}",
+            cigar,
+            variants
+        );
+    }
 }

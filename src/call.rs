@@ -4,12 +4,12 @@ use crate::util;
 use anyhow::Result as AnyhowResult;
 use bio::io::fastq;
 use log::{info, warn};
+use ndarray::s;
 use ndarray::Array2;
+use rayon::prelude::*;
 use rust_htslib::bcf::{self, record::GenotypeAllele};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use ndarray::s;
-use rayon::prelude::*;
 
 #[derive(Debug, Clone)]
 pub struct Variant {
@@ -29,6 +29,44 @@ fn normalize_haplotype_indices(mut haplotype_indices: Vec<usize>) -> Vec<usize> 
     haplotype_indices
 }
 
+/// Phred-scaled genotype quality for one biallelic ALT, from a binomial
+/// genotype-likelihood model over the AD/DP read split.
+///
+/// For genotypes 0/0, 0/1, 1/1 the expected P(alt read) is `error_rate`, 0.5,
+/// and `1 - error_rate` respectively. Each genotype likelihood is a binomial
+/// over `alt_reads` successes in `depth` trials; the shared binomial
+/// coefficient cancels under normalization and is dropped. GQ is the Phred
+/// margin between the best and second-best genotype (GATK-style), capped at 99.
+fn approx_gq(depth: usize, alt_reads: usize, error_rate: f64) -> i32 {
+    if depth == 0 {
+        return 0;
+    }
+    let alt = alt_reads.min(depth) as f64;
+    let ref_reads = depth as f64 - alt;
+    let e = error_rate.clamp(1e-6, 0.5);
+
+    // log10 likelihood (minus the common binomial coefficient) per genotype.
+    let p = [e, 0.5, 1.0 - e]; // 0/0, 0/1, 1/1
+    let log10l: [f64; 3] =
+        std::array::from_fn(|k| alt * p[k].log10() + ref_reads * (1.0 - p[k]).log10());
+
+    // PL = -10 * log10L, normalized so the best genotype is 0.
+    let best = log10l.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let mut pl: [f64; 3] = std::array::from_fn(|k| -10.0 * (log10l[k] - best));
+    pl.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+    // GQ = second-smallest PL (smallest is 0 for the called genotype).
+    (pl[1].round() as i64).clamp(0, 99) as i32
+}
+
+fn tech_error_rate(tech: &str) -> f64 {
+    match tech.to_lowercase().as_str() {
+        "hifi" => 0.001,
+        "nanopore" | "ont" => 0.05,
+        _ => 0.01,
+    }
+}
+
 pub fn get_variants_from_cigar(
     cigar: &str,
     ref_name: &str,
@@ -39,6 +77,7 @@ pub fn get_variants_from_cigar(
     allele_count_dict: &HashMap<usize, usize>,
     node_id: &str,
 ) -> (Vec<Variant>, HashMap<usize, usize>) {
+    let cigar = util::normalize_homopolymer_indels(cigar, ref_seq, alt_seq);
     let mut poscount = HashMap::new();
     let mut variants = Vec::new();
     let mut ref_pos = 0;
@@ -274,7 +313,9 @@ fn collapse_identical_records(variants: Vec<Variant>) -> Vec<Variant> {
     collapsed_variants
 }
 
-fn find_coverage_from_node_info(node_info: &HashMap<String, asm::NodeInfo>) -> HashMap<usize, usize> {
+fn find_coverage_from_node_info(
+    node_info: &HashMap<String, asm::NodeInfo>,
+) -> HashMap<usize, usize> {
     let mut coverage = HashMap::new();
     let interval_node = asm::find_parallele_nodes(node_info);
     for (interval, nodes) in interval_node.iter() {
@@ -303,6 +344,7 @@ pub fn write_vcf(
     reference_seqs: &Vec<fastq::Record>,
     haplotype_number: usize,
     phase_variants: bool,
+    sequencing_technology: &str,
 ) -> AnyhowResult<()> {
     let mut header = bcf::Header::new();
     for record in reference_seqs.iter() {
@@ -339,6 +381,11 @@ pub fn write_vcf(
     );
     header.push_record(
         "##FORMAT=<ID=VAF,Number=1,Type=Float,Description=\"Variant Allele Frequency\">\n"
+            .to_string()
+            .as_bytes(),
+    );
+    header.push_record(
+        "##FORMAT=<ID=GQ,Number=A,Type=Integer,Description=\"Phred-scaled genotype quality (binomial genotype-likelihood model) per ALT allele\">\n"
             .to_string()
             .as_bytes(),
     );
@@ -428,6 +475,14 @@ pub fn write_vcf(
         record
             .push_format_float(b"VAF", &allele_frequency)
             .expect("Failed to set VAF format field");
+        let error_rate = tech_error_rate(sequencing_technology);
+        let gq_values: Vec<i32> = var_list
+            .iter()
+            .map(|v| approx_gq(*read_depth, v.allele_count, error_rate))
+            .collect();
+        record
+            .push_format_integer(b"GQ", &gq_values)
+            .expect("Failed to set GQ format field");
         let mut genotype_list = Vec::new();
         if phase_variants {
             let mut phase = false;
@@ -486,8 +541,8 @@ pub fn get_variants_from_node(
     reference_seqs: &Vec<fastq::Record>,
 ) -> AnyhowResult<HashMap<String, HashSet<String>>> {
     let n_info = node_info.get(&node_id).unwrap().clone();
-    let cigar = n_info.cigar.clone();
-    let alt_seq = n_info.seq.clone();
+    let cigar = n_info.cigar.clone().trim_matches('"').to_string();
+    let alt_seq = n_info.seq.clone().trim_matches('"').to_string();
     let read_list = asm::get_read_name_list(node_info, node_id.clone());
     let parts: Vec<&str> = node_id.split(".").collect();
     let locus = parts[1];
@@ -729,6 +784,23 @@ pub fn construct_var_read_matrix(
     Ok((matrix, var_list.clone(), read_list.clone()))
 }
 
+/// Distinct alt-supporting read count per variant key ("chrom.pos.ref.alt.type").
+/// Unions the per-node read sets so reads shared across haplotype paths / nodes
+/// are counted once (correct AD), instead of summing per-path support.
+fn variant_distinct_read_counts(
+    node_info: &HashMap<String, asm::NodeInfo>,
+    reference_seqs: &Vec<fastq::Record>,
+) -> AnyhowResult<HashMap<String, usize>> {
+    let mut var_reads: HashMap<String, HashSet<String>> = HashMap::new();
+    for node in node_info.keys().cloned().collect::<Vec<_>>() {
+        let m = get_variants_from_node(node_info, node, reference_seqs)?;
+        for (key, reads) in m {
+            var_reads.entry(key).or_default().extend(reads);
+        }
+    }
+    Ok(var_reads.into_iter().map(|(k, v)| (k, v.len())).collect())
+}
+
 pub fn start(
     graph_filename: &PathBuf,
     reference_seqs: &Vec<fastq::Record>,
@@ -764,11 +836,8 @@ pub fn start(
         .unwrap()
         .clone();
 
-    let (phased_variants, somatic_variants) = get_variants_from_path(
-        &node_info,
-        primary_haplotypes,
-        &ref_chromosome_seqs,
-    );
+    let (phased_variants, somatic_variants) =
+        get_variants_from_path(&node_info, primary_haplotypes, &ref_chromosome_seqs);
     let all_variants = [phased_variants.clone(), somatic_variants.clone()].concat();
     let all_variants_filtered = collapse_identical_records(all_variants);
     let phased_keys = phased_variants
@@ -813,6 +882,23 @@ pub fn start(
         .cloned()
         .collect::<Vec<_>>();
 
+    // AD = distinct alt-supporting reads (dedup shared reads across haplotype
+    // paths and phased/somatic duplicates), so VAF = AD/DP stays in [0, 1].
+    let ad_map = variant_distinct_read_counts(&node_info, reference_seqs)?;
+    let apply_ad = |v: &Variant| -> Variant {
+        let key = format!(
+            "{}.{}.{}.{}.{}",
+            v.chromosome, v.pos, v.ref_allele, v.alt_allele, v.variant_type
+        );
+        let mut nv = v.clone();
+        if let Some(&c) = ad_map.get(&key) {
+            nv.allele_count = c;
+        }
+        nv
+    };
+    let p_variants = p_variants.iter().map(&apply_ad).collect::<Vec<_>>();
+    let s_variants = s_variants.iter().map(&apply_ad).collect::<Vec<_>>();
+
     let germline_output = format!("{}.germline", output_prefix);
     write_vcf(
         &p_variants,
@@ -822,6 +908,7 @@ pub fn start(
         reference_seqs,
         haplotype_number,
         true,
+        sequencing_technology,
     )?;
     info!("Germline variants: {}", p_variants.len());
 
@@ -844,11 +931,15 @@ pub fn start(
                 util::permutation_test(&chunk, 0.5, 100, var_list_chunk).into_iter()
             })
             .collect();
-        chunks_filtered.into_iter().collect::<HashSet<_>>().into_iter().collect()
-    }else{
+        chunks_filtered
+            .into_iter()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect()
+    } else {
         util::permutation_test(&matrix, 0.05, 100, var_list.clone())
     };
-    
+
     let mut filtered_somatic_variants = Vec::new();
     for var in s_variants.iter() {
         if sequencing_technology == "hifi" {
@@ -890,6 +981,7 @@ pub fn start(
         reference_seqs,
         haplotype_number,
         false,
+        sequencing_technology,
     )?;
     info!(
         "Total somatic variants: {}",

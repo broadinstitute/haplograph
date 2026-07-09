@@ -1,12 +1,11 @@
 use anyhow::Result;
+use bio::io::fasta::Reader as FastaReader;
 use clap::{Args, Parser, Subcommand};
 use log::{info, warn};
 use rayon::prelude::*;
-use std::path::PathBuf;
-use bio::io::fasta::Reader as FastaReader;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
-
 
 mod asm;
 mod call;
@@ -14,11 +13,11 @@ mod eval;
 mod extract;
 mod graph;
 mod hap;
+mod haplopan;
 mod intervals;
 mod merge;
 mod methyl;
 mod util;
-mod haplopan;
 
 #[derive(Debug, Subcommand)]
 enum DevToolsCommands {
@@ -74,8 +73,6 @@ enum DevToolsCommands {
         verbose: bool,
     },
 }
-
-
 
 #[derive(Parser)]
 #[command(name = "haplograph")]
@@ -306,6 +303,10 @@ enum Commands {
         #[arg(short, long)]
         alignment_bam: PathBuf,
 
+        /// Genomic locus to analyze (chromo:start-end)
+        #[arg(short, long)]
+        locus: String,
+
         /// Output prefix
         #[arg(short, long, default_value = "haplograph_pangenome")]
         output_prefix: String,
@@ -328,6 +329,10 @@ enum Commands {
         ///if use pileup to extract reads
         #[arg(long, default_value_t = false)]
         pileup: bool,
+
+        /// Number of haplotypes to select from the pangenome (1 = haploid, 2 = diploid, etc.)
+        #[arg(long, default_value_t = 2)]
+        ploidy: usize,
 
         /// Verbose output
         #[arg(short, long)]
@@ -539,20 +544,21 @@ fn main() -> Result<()> {
                     })
                     .collect();
 
-                let processed: Result<()> = eligible_loci
-                    .par_iter()
-                    .enumerate()
-                    .try_for_each(|(output_index, locus)| {
-                        info!("Interval: {}:{}-{}", locus.0, locus.1, locus.2);
-                        let segment_prefix = format!("{}_{}", output_prefix, output_index);
-                        run_haplograph_segment(
-                            &run_config,
-                            &locus.0,
-                            locus.1,
-                            locus.2,
-                            &segment_prefix,
-                        )
-                    });
+                let processed: Result<()> =
+                    eligible_loci
+                        .par_iter()
+                        .enumerate()
+                        .try_for_each(|(output_index, locus)| {
+                            info!("Interval: {}:{}-{}", locus.0, locus.1, locus.2);
+                            let segment_prefix = format!("{}_{}", output_prefix, output_index);
+                            run_haplograph_segment(
+                                &run_config,
+                                &locus.0,
+                                locus.1,
+                                locus.2,
+                                &segment_prefix,
+                            )
+                        });
                 processed?;
 
                 if eligible_loci.is_empty() {
@@ -568,13 +574,7 @@ fn main() -> Result<()> {
                         chromosome, start, end, mean_depth, min_mean_depth
                     );
                 } else {
-                    run_haplograph_segment(
-                        &run_config,
-                        &chromosome,
-                        start,
-                        end,
-                        &output_prefix,
-                    )?;
+                    run_haplograph_segment(&run_config, &chromosome, start, end, &output_prefix)?;
                 }
             }
         }
@@ -649,6 +649,7 @@ fn main() -> Result<()> {
         Commands::Haplopan {
             pangenome_fasta,
             alignment_bam,
+            locus,
             output_prefix,
             rollingkmer_list,
             sample_id,
@@ -656,18 +657,17 @@ fn main() -> Result<()> {
             pileup,
             //window size
             window_size,
-
+            ploidy,
             verbose,
         } => {
-
             // Initialize logging
             env_logger::Builder::from_default_env()
-            .filter_level(if verbose {
-                log::LevelFilter::Debug
-            } else {
-                log::LevelFilter::Info
-            })
-            .init();
+                .filter_level(if verbose {
+                    log::LevelFilter::Debug
+                } else {
+                    log::LevelFilter::Info
+                })
+                .init();
             info!("Starting HaploPan analysis");
             info!("Input BAM: {}", alignment_bam.display());
             info!("Input Pangenome FASTA: {}", pangenome_fasta.display());
@@ -675,51 +675,35 @@ fn main() -> Result<()> {
             info!("Output prefix: {}", output_prefix);
             info!("Verbose: {}", verbose);
 
-            let rollingkmer_list_vec = rollingkmer_list.split(",").map(|x| x.parse::<usize>().unwrap()).collect();
-            haplopan::start(&alignment_bam, &pangenome_fasta, &rollingkmer_list_vec, &output_prefix.to_string(), &data_technology.to_string(), &sample_id)?;
+            let rollingkmer_list_vec: Vec<usize> = rollingkmer_list
+                .split(",")
+                .map(|x| x.parse::<usize>().unwrap())
+                .collect();
+            let (selected_haplotypes, _distance) = haplopan::start(
+                &alignment_bam,
+                &pangenome_fasta,
+                &locus,
+                &rollingkmer_list_vec,
+                &output_prefix.to_string(),
+                &data_technology.to_string(),
+                &sample_id,
+                ploidy,
+            )?;
+            let is_homozygous = {
+                let unique_count = selected_haplotypes
+                    .iter()
+                    .collect::<std::collections::HashSet<_>>()
+                    .len();
+                unique_count < selected_haplotypes.len()
+            };
 
             let tmp_bam_path = PathBuf::from(format!("{}.tmp.sorted.bam", output_prefix));
             let tmp_fasta_path = PathBuf::from(format!("{}.tmp.ref.fasta", output_prefix));
 
             let reference_seqs = util::get_all_ref_seq(&tmp_fasta_path.display().to_string());
-            
-            let mut final_fasta_seq = HashMap::new();
-            for record in reference_seqs.iter(){
-                let mut windows = Vec::new();
-                let start = 0;
-                let end = record.seq().len();
-                let chromosome = record.id().to_string();
-                for i in (start..end).step_by(window_size) {
-                    let end_pos = std::cmp::min(i + window_size, end);
-                    windows.push((chromosome.clone(), i, end_pos));                 
-                }
-                graph::start(
-                    &tmp_bam_path.display().to_string(),
-                    &windows,
-                    &reference_seqs,
-                    &sample_id,
-                    1,
-                    0.5,
-                    0.0,
-                    false,
-                    pileup,
-                    &format!("{}_{}_tmp", output_prefix, chromosome),
-                    MINIMAL_GAP_LENGTH
-                )?;
-                let output_p = PathBuf::from(&format!("{}_{}_tmp", output_prefix, chromosome));
-                let graph_gfa = output_p.with_extension("gfa");
-                asm::start(
-                    &graph_gfa,
-                    1,
-                    &output_p,
-                )?;
-                let fasta_reader = FastaReader::from_file(format!("{}.fasta", &output_p.display().to_string()))?;
-                for record in fasta_reader.records() {
-                    let record = record.expect("Failed to read FASTA record");
-                    final_fasta_seq.insert(record.id().to_string(), String::from_utf8_lossy(record.seq()).to_string());
-                }
-            }
-            util::write_fasta(&final_fasta_seq, &PathBuf::from(format!("{}.final.fasta", output_prefix)))?;
+
+
+
         }
 
         Commands::DevTools(dev_tools_cmd) => {
@@ -738,11 +722,7 @@ fn main() -> Result<()> {
                             log::LevelFilter::Info
                         })
                         .init();
-                    asm::start(
-                        &graph_gfa,
-                        number_of_haplotypes,
-                        &output_prefix,
-                    )?;
+                    asm::start(&graph_gfa, number_of_haplotypes, &output_prefix)?;
                 }
                 DevToolsCommands::Call {
                     gfa_file,
@@ -778,7 +758,6 @@ fn main() -> Result<()> {
                         &detection_technology,
                         Some((node_info, edge_info)),
                     )?;
-                    
                 }
             }
         }
@@ -798,7 +777,13 @@ fn main() -> Result<()> {
                     log::LevelFilter::Info
                 })
                 .init();
-            eval::start(&truth_fasta, &query_fasta, seq_number, &output_prefix, as_genotyper)?;
+            eval::start(
+                &truth_fasta,
+                &query_fasta,
+                seq_number,
+                &output_prefix,
+                as_genotyper,
+            )?;
         }
         Commands::Extract {
             bamfile,

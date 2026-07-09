@@ -31,7 +31,6 @@ itertools = "0.14.0"
 rand = "0.9.3"
 statrs = "0.18.0"
 adjustp = "0.1.6"
-nalgebra = "0.34.1"
 
 [dev-dependencies]
 criterion = "0.5"

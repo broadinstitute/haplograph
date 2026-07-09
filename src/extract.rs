@@ -5,9 +5,9 @@ use anyhow::{Context, Result as AnyhowResult};
 use indicatif::ProgressBar;
 use indicatif::ProgressStyle;
 use log::info;
-use rust_htslib::bam::{IndexedReader, Read as BamRead, Record as BamRecord};
-use rust_htslib::bam::ext::BamRecordExtensions;
 use rust_htslib::bam;
+use rust_htslib::bam::ext::BamRecordExtensions;
+use rust_htslib::bam::{IndexedReader, Read as BamRead, Record as BamRecord};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs::File;
@@ -37,7 +37,6 @@ pub fn normalized_read_slice_bounds(
     }
     Some((pos_start, pos_end))
 }
-
 
 /// Per-alignment query bounds within a reference interval, plus window-edge alignment keys.
 pub struct IntervalQueryBounds {
@@ -143,7 +142,10 @@ pub fn build_locus_prefetch(
     sampleid: &String,
     primary_only: bool,
 ) -> AnyhowResult<LocusPrefetch> {
-    anyhow::ensure!(!windows.is_empty(), "build_locus_prefetch requires at least one window");
+    anyhow::ensure!(
+        !windows.is_empty(),
+        "build_locus_prefetch requires at least one window"
+    );
 
     let chromosome = windows[0].0.clone();
     let region_start = windows.first().unwrap().1 as u64;
@@ -317,14 +319,12 @@ pub fn sequence_from_interval_bounds(
         let end_pos = bounds.per_align_end.get(end_key)?;
         let (pos_start, pos_end) =
             normalized_read_slice_bounds(*start_pos, *end_pos, record.seq().len(), "")?;
-        return Some(String::from_utf8_lossy(&record.seq().as_bytes()[pos_start..pos_end]).to_string());
+        return Some(
+            String::from_utf8_lossy(&record.seq().as_bytes()[pos_start..pos_end]).to_string(),
+        );
     }
 
-    let start_ref_pos: i64 = start_key
-        .rsplit('|')
-        .next()?
-        .parse()
-        .ok()?;
+    let start_ref_pos: i64 = start_key.rsplit('|').next()?.parse().ok()?;
     let end_ref_pos: i64 = end_key.rsplit('|').next()?.parse().ok()?;
 
     let mut segments: Vec<(i64, String)> = Vec::new();
@@ -458,7 +458,8 @@ pub fn extract_haplotypes_from_bam(
             continue;
         }
 
-        let Some(read_seq_final) = sequence_from_interval_bounds(&records, &read_name, &bounds) else {
+        let Some(read_seq_final) = sequence_from_interval_bounds(&records, &read_name, &bounds)
+        else {
             continue;
         };
 
@@ -531,8 +532,7 @@ pub fn extract_haplotypes_coordinates_from_bam(
             read_coordinates_formatted.insert(record_id.clone(), (0u64, 0u64));
             read_sequence_dict_formatted.insert(record_id.clone(), Vec::new());
             read_quality_dict_formatted.insert(record_id.clone(), Vec::new());
-            read_strand_dict_formatted
-                .insert(record_id.clone(), record.strand().to_string());
+            read_strand_dict_formatted.insert(record_id.clone(), record.strand().to_string());
             read_methyl_dict_formatted.insert(record_id, HashMap::new());
             continue;
         }
@@ -602,15 +602,20 @@ pub fn start(
     pileup: bool,
 ) -> AnyhowResult<()> {
     if pileup {
-        let (reads, _read_coordinates, _read_sequence_dictionary, _read_methyl, _read_strand_dictionary) =
-            intervals::extract_haplotypes_coordinates_from_bam_pileup(
-                bam,
-                chromosome,
-                start as u64,
-                end as u64,
-                primary_only,
-            )
-            .unwrap();
+        let (
+            reads,
+            _read_coordinates,
+            _read_sequence_dictionary,
+            _read_methyl,
+            _read_strand_dictionary,
+        ) = intervals::extract_haplotypes_coordinates_from_bam_pileup(
+            bam,
+            chromosome,
+            start as u64,
+            end as u64,
+            primary_only,
+        )
+        .unwrap();
         let outputfile = PathBuf::from(format!("{}.fasta", output_path));
         let mut file = File::create(outputfile)
             .with_context(|| format!("Failed to create output file: {}.fasta", output_path))?;
@@ -665,15 +670,9 @@ mod extract_tests {
         }
         let mut bam = IndexedReader::from_path(bam_path).unwrap();
         let sampleid = "HG00097".to_string();
-        let reads = extract_haplotypes_from_bam(
-            &mut bam,
-            "chr17",
-            7668752,
-            7668828,
-            &sampleid,
-            false,
-        )
-        .unwrap();
+        let reads =
+            extract_haplotypes_from_bam(&mut bam, "chr17", 7668752, 7668828, &sampleid, false)
+                .unwrap();
         assert_eq!(reads.len(), 34);
     }
 
@@ -690,8 +689,7 @@ mod extract_tests {
         let end = 7668828_usize;
         let windows = vec![(chr.to_string(), start, end)];
 
-        let prefetch =
-            super::build_locus_prefetch(&mut bam, &windows, &sampleid, false).unwrap();
+        let prefetch = super::build_locus_prefetch(&mut bam, &windows, &sampleid, false).unwrap();
         let (coords_p, _, seqs_p, _, _) =
             super::extract_window_coordinates_from_prefetch(&prefetch, 0, start as u64, end as u64)
                 .unwrap();
