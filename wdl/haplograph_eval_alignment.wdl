@@ -26,11 +26,27 @@ workflow Haplograph_eval_regular_genes {
         Boolean skip_haplograph = false
         Boolean verbose = false
 
+
+        String sample
+        String truth_sample = ""
+        String output_prefix
+        String coverage_tag = ""
+        Int maximal_locus_size = 200000
+        Int overlap_bp = 0
+        Float min_mean_depth = 2.0
+        Int window_size = 100
+        Int vcfdist_verbosity = 1
+        Int haplograph_threads = 4
+        String extra_vcfdist_args = ""
+        Boolean skip_haplograph = false
+        Boolean verbose = false
+
         File gene_bed
         Array[Int] desiredCoverages
         Int hifiasm_mem
         Int hifiasm_thread
         Float min_freq
+        String haplograph_docker = "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograph:dev"
         String haplograph_docker = "us.gcr.io/broad-dsp-lrma/hangsuunc/haplograph:dev"
     }
 
@@ -39,6 +55,7 @@ workflow Haplograph_eval_regular_genes {
     call parseBed {
         input:
             bed = gene_bed,
+            output_prefix = output_prefix
             output_prefix = output_prefix
     }
 
@@ -58,6 +75,13 @@ workflow Haplograph_eval_regular_genes {
             input:
                 locus = locus,
                 maximal_locus_size = maximal_locus_size
+                prefix = output_prefix + "_" + gene_name
+        }
+
+        call parse_locus {
+            input:
+                locus = locus,
+                maximal_locus_size = maximal_locus_size
         }
 
         call get_truth_haplotypes {
@@ -68,6 +92,7 @@ workflow Haplograph_eval_regular_genes {
                 truth_hap2_bai = hap2_asm_bai,
                 locus = locus,
                 prefix = output_prefix + "_" + gene_name
+                prefix = output_prefix + "_" + gene_name
         }
 
         scatter (desiredCoverage in desiredCoverages) {
@@ -76,11 +101,13 @@ workflow Haplograph_eval_regular_genes {
                 input_bam = CalculateCoverage.subsetbam,
                 input_bam_bai = CalculateCoverage.subsetbai,
                 basename = output_prefix + "_" + gene_name,
+                basename = output_prefix + "_" + gene_name,
                 desiredCoverage = desiredCoverage,
                 currentCoverage = CalculateCoverage.coverage,
                 preemptible_tries = 0
             }
 
+            call run_haplograph_benchmark as haplograph {
             call run_haplograph_benchmark as haplograph {
                 input:
                     bam = downsampleBam.downsampled_bam,
@@ -119,12 +146,18 @@ workflow Haplograph_eval_regular_genes {
                         genename = gene_name,
                         extra_args = ""
                 }
+            call haplograph_eval {
+                input:
+                    truth_fasta = get_truth_haplotypes.fasta_file,
+                    query_fasta = haplograph.asm_file,
+                    prefix = output_prefix + "_" + gene_name + "_" + desiredCoverage,
             }
 
             call hifiasm_asm {
                 input:
                     bam = downsampleBam.downsampled_bam,
                     bai = downsampleBam.downsampled_bai,
+                    prefix = output_prefix + "_" + gene_name + "_" + desiredCoverage,
                     prefix = output_prefix + "_" + gene_name + "_" + desiredCoverage,
                     num_cpus = hifiasm_thread,
                     mem_gb = hifiasm_mem
@@ -135,6 +168,19 @@ workflow Haplograph_eval_regular_genes {
                     truth_fasta = get_truth_haplotypes.fasta_file,
                     query_fasta = hifiasm_asm.asm_file,
                     prefix = output_prefix + "_" + gene_name + "_" + desiredCoverage,
+                    prefix = output_prefix + "_" + gene_name + "_" + desiredCoverage,
+            }
+
+            call Vcfdist as VCFdist_germline {
+                input:
+                    sample = sample,
+                    eval_vcf = haplograph.germline_vcf,
+                    truth_vcf = truth_vcf,
+                    locus = locus,
+                    reference_fasta = reference_fa,
+                    coverage = desiredCoverage,
+                    genename = gene_name,
+                    extra_args = ""
             }
         }
     }
@@ -146,10 +192,63 @@ workflow Haplograph_eval_regular_genes {
         Array[Array[File]] fasta = haplograph.asm_file
         Array[Array[File]] vcf = haplograph.germline_vcf
         Array[Array[File?]] haplograph_eval_result = haplograph_eval.qv_scores
+        Array[Array[File]] vcf = haplograph.germline_vcf
+        Array[Array[File]] haplograph_eval_result = haplograph_eval.qv_scores
         Array[Array[File]] hifiasm_eval_result = hifiasm_eval.qv_scores
         Array[Array[VcfdistOutputs?]] vcfdist_summary = VCFdist_germline.outputs
     }
 }
+
+
+task parse_locus {
+    input {
+        String locus
+        Int maximal_locus_size
+    }
+
+    command <<<
+        set -euo pipefail
+        python3 - <<'PY'
+        import sys
+
+        locus = "~{locus}"
+        maximal = int("~{maximal_locus_size}")
+
+        _chrom, span = locus.split(":", 1)
+        start_s, end_s = span.split("-", 1)
+        start = int(start_s)
+        end = int(end_s)
+        locus_len = end - start
+        if locus_len <= 0:
+            sys.exit(f"invalid locus span {start}-{end} => {locus_len} bp")
+
+        locus_tag = locus.replace(":", "_").replace("-", "_")
+        needs_merge = locus_len > maximal
+
+        with open("locus_len.txt", "w") as fh:
+            fh.write(str(locus_len))
+        with open("locus_tag.txt", "w") as fh:
+            fh.write(locus_tag)
+        with open("needs_merge.txt", "w") as fh:
+            fh.write("true" if needs_merge else "false")
+        PY
+    >>>
+
+    output {
+        Int locus_len = read_int("locus_len.txt")
+        String locus_tag = read_string("locus_tag.txt")
+        Boolean needs_merge = read_boolean("needs_merge.txt")
+    }
+
+    runtime {
+        docker: "us.gcr.io/broad-dsde-methods/slee/kage-lite:pr_29"
+        memory: "1 GiB"
+        cpu: 1
+        disks: "local-disk 10 HDD"
+    }
+}
+
+
 
 
 task parse_locus {
@@ -277,8 +376,11 @@ task run_haplograph_benchmark {
     output {
         File? graph_file = "~{output_prefix}.gfa"
         File asm_file = "~{output_prefix}.fasta"
+        File graph_file = "~{output_prefix}.gfa"
+        File asm_file = "~{output_prefix}.fasta"
         File germline_vcf = "~{output_prefix}.germline.vcf.gz"
         File? germline_vcf_tbi = "~{output_prefix}.germline.vcf.gz.tbi"
+        File somatic_vcf_file = "~{output_prefix}.somatic.vcf.gz"
         File somatic_vcf_file = "~{output_prefix}.somatic.vcf.gz"
         File? somatic_vcf_tbi = "~{output_prefix}.somatic.vcf.gz.tbi"
         Array[File] methyl_bed = glob("~{output_prefix}.Hap.*.bed")

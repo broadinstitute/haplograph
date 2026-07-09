@@ -1003,6 +1003,7 @@ fn main() -> Result<()> {
                         &detection_technology,
                         Some((node_info, edge_info)),
                     )?;
+<<<<<<< HEAD
                 }
                 DevToolsCommands::MergeOutputs {
                     output_prefix,
@@ -1030,6 +1031,8 @@ fn main() -> Result<()> {
                         maximal_locus_size,
                         overlap_bp,
                     )?;
+=======
+>>>>>>> d988c0f (Hs haplopan (#13))
                 }
             }
         }

@@ -195,12 +195,18 @@ pub fn identify_heterozygous_nodes(
             .cmp(&util::split_locus(b.to_string()).1)
     });
 
+<<<<<<< HEAD
     // Each interval's combinatorial het-set search is independent, so run the
     // intervals in parallel and merge the chosen node sets afterward.
     let results: Vec<(String, Vec<String>)> = interval_list
         .par_iter()
         .filter_map(|interval_name| {
             let node_vec = all_nodes.get(*interval_name).unwrap();
+=======
+    for interval_name in interval_list.iter() {
+        let (chromo, start, end) = util::split_locus(interval_name.to_string());
+        let node_vec = all_nodes.get(*interval_name).unwrap();
+>>>>>>> d988c0f (Hs haplopan (#13))
 
             let mut candidates: Vec<(String, HashSet<String>)> = node_vec
                 .iter()
@@ -226,6 +232,7 @@ pub fn identify_heterozygous_nodes(
 
                     let balance = min_max_support_ratio(&supports);
 
+<<<<<<< HEAD
                     let reads_owned: Vec<HashSet<String>> =
                         reads.iter().map(|&r| r.clone()).collect();
                     let max_jac = max_pairwise_jaccard(&reads_owned);
@@ -234,9 +241,18 @@ pub fn identify_heterozygous_nodes(
                         reads.iter().flat_map(|r| r.iter()).collect();
                     let disjointness = 1.0 - max_jac;
                     let total_unique = union_reads.len();
+=======
+                let reads_owned: Vec<HashSet<String>> = reads.iter().map(|&r| r.clone()).collect();
+                let max_jac = max_pairwise_jaccard(&reads_owned);
+
+                let union_reads: HashSet<&String> = reads.iter().flat_map(|r| r.iter()).collect();
+                let disjointness = 1.0 - max_jac;
+                let total_unique = union_reads.len();
+>>>>>>> d988c0f (Hs haplopan (#13))
 
                     let candidate_score = (disjointness, balance, total_unique);
 
+<<<<<<< HEAD
                     let is_better = match &best {
                         None => true,
                         Some((d, b, t, _)) => {
@@ -247,6 +263,12 @@ pub fn identify_heterozygous_nodes(
                         let nodes: Vec<String> =
                             combo.iter().map(|&i| candidates[i].0.clone()).collect();
                         best = Some((disjointness, balance, total_unique, nodes));
+=======
+                let is_better = match &best {
+                    None => true,
+                    Some((d, b, t, _)) => {
+                        (candidate_score.0, candidate_score.1, candidate_score.2) > (*d, *b, *t)
+>>>>>>> d988c0f (Hs haplopan (#13))
                     }
                 }
 
@@ -649,6 +671,7 @@ fn construct_het_interval_matrix(
     let n_reads = read_list.len();
     let n_rows = het_nodes.len();
 
+<<<<<<< HEAD
     // Cache each interval's union of reads once (previously recomputed for every
     // het node in the interval).
     let interval_total_reads: HashMap<String, HashSet<String>> = heterozygous_nodes
@@ -657,6 +680,38 @@ fn construct_het_interval_matrix(
             let mut total = HashSet::new();
             for node in nodes {
                 total.extend(get_read_name_list(node_info, node.clone()));
+=======
+    for (row, node) in het_nodes.iter().enumerate() {
+        // let vote = if allele_idx == 0 { 1.0_f64 } else { -1.0_f64 };
+        // get all read in the interval
+        let interval = node.split(".").collect::<Vec<_>>()[1];
+        let interval_nodes = heterozygous_nodes
+            .get(interval)
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut total_reads = HashSet::new();
+        for node in interval_nodes.iter() {
+            let read_names = get_read_name_list(node_info, node.clone());
+            total_reads.extend(read_names);
+        }
+
+        let current_read_list = get_read_name_list(node_info, node.clone());
+        for read in read_list.iter() {
+            let vote = if total_reads.contains(read) {
+                if current_read_list.contains(read) {
+                    1.0
+                } else {
+                    -1.0
+                }
+            } else {
+                0.0
+            };
+
+            if let Some(&col) = read_index.get(read.as_str()) {
+                matrix[[row, col]] = vote;
+>>>>>>> d988c0f (Hs haplopan (#13))
             }
             (interval.clone(), total)
         })
@@ -719,6 +774,7 @@ pub fn assign_haplotype_reads(
 
     let (clusters, corrections) =
         cluster_partition_reads(&het_matrix, hap_number, CLUSTER_BALANCE_WEIGHT);
+<<<<<<< HEAD
     // The het matrix CSV is a debugging artifact; only write it when debug
     // logging is enabled (e.g. `--verbose` / RUST_LOG=debug) to avoid the
     // O(rows*reads) serialization on every locus in a whole-genome run.
@@ -732,6 +788,16 @@ pub fn assign_haplotype_reads(
         )
         .unwrap();
     }
+=======
+    write_matrix_to_csv(
+        &het_matrix,
+        &clusters,
+        &het_nodes,
+        &read_list,
+        "het_matrix.csv",
+    )
+    .unwrap();
+>>>>>>> d988c0f (Hs haplopan (#13))
 
     info!(
         "Cluster partition: cluster sizes = {:?}, corrections = {}",
@@ -1027,9 +1093,17 @@ fn extend_path_state(
             .ok()?;
     let mut path = prev.path.clone();
     path.push(node.to_string());
+<<<<<<< HEAD
     // Support/span accumulate in O(1); the read-set union and sequence are
     // rebuilt once for the single winning path instead of on every extension.
     let read_len_sum = prev.read_len_sum + info.read_names_set.len();
+=======
+    let mut read_names = prev.read_names.clone();
+    read_names.extend(get_read_name_list(node_info, node.to_string()));
+    let sequence = format!("{}{}", prev.sequence, info.seq);
+    let (start, end) =
+        eval::find_alignment_intervals(path.iter().map(|x| x.as_str()).collect()).ok()?;
+>>>>>>> d988c0f (Hs haplopan (#13))
     Some(PathState {
         path,
         supports: read_len_sum,
@@ -1565,7 +1639,11 @@ pub fn start(
 mod path_dp_tests {
     use super::{
         construct_sequences_from_haplotype_path, enumerate_all_paths_with_haplotype,
+<<<<<<< HEAD
         find_best_haplotype_paths_dp, find_full_range_haplotypes, parse_read_names, NodeInfo,
+=======
+        find_best_haplotype_paths_dp, find_full_range_haplotypes, NodeInfo,
+>>>>>>> d988c0f (Hs haplopan (#13))
     };
     use std::collections::{HashMap, HashSet};
 

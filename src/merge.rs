@@ -5,7 +5,11 @@ use bio::io::fasta::Reader as FastaReader;
 use log::{info, warn};
 use rust_htslib::bcf::{self, Read};
 use std::collections::{HashMap, HashSet};
+<<<<<<< HEAD
 use std::fs::{self, File};
+=======
+use std::fs::File;
+>>>>>>> d988c0f (Hs haplopan (#13))
 use std::io::{BufRead, BufReader, Write};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
