@@ -72,6 +72,42 @@ enum DevToolsCommands {
         #[arg(short, long)]
         verbose: bool,
     },
+
+    /// Merge per-window haplograph outputs into full-length FASTA, VCF, and methylation BED
+    #[command(name = "merge", arg_required_else_help = true)]
+    MergeOutputs {
+        /// Base output prefix used for the large-locus haplograph run (segments are `{prefix}_0`, `{prefix}_1`, …)
+        #[arg(short, long)]
+        output_prefix: String,
+
+        /// Full genomic locus (chrom:start-end) that was analyzed
+        #[arg(short, long)]
+        locus: String,
+
+        /// Input Reference FASTA file
+        #[arg(short, long)]
+        reference_fa: String,
+
+        /// Sample ID
+        #[arg(short, long)]
+        sampleid: String,
+
+        /// Haplotype number, currently only support 1 or 2
+        #[arg(short, long, default_value_t = 2)]
+        number_of_haplotypes: usize,
+
+        /// Overlap between adjacent sub-loci in bp (must match the haplograph run; default 500)
+        #[arg(long, default_value_t = merge::DEFAULT_OVERLAP_BP)]
+        overlap_bp: usize,
+
+        /// Maximal sub-locus size used during haplograph (must match the haplograph run; default 200000)
+        #[arg(long, default_value_t = 200_000)]
+        maximal_locus_size: usize,
+
+        /// Verbose output
+        #[arg(long)]
+        verbose: bool,
+    },
 }
 
 #[derive(Parser)]
@@ -539,42 +575,6 @@ enum Commands {
     #[clap(subcommand)]
     DevTools(DevToolsCommands),
 
-    /// Merge per-window haplograph outputs into full-length FASTA, VCF, and methylation BED
-    #[clap(arg_required_else_help = true)]
-    Merge {
-        /// Base output prefix used for the large-locus haplograph run (segments are `{prefix}_0`, `{prefix}_1`, …)
-        #[arg(short, long)]
-        output_prefix: String,
-
-        /// Full genomic locus (chrom:start-end) that was analyzed
-        #[arg(short, long)]
-        locus: String,
-
-        /// Input Reference FASTA file
-        #[arg(short, long)]
-        reference_fa: String,
-
-        /// Sample ID
-        #[arg(short, long)]
-        sampleid: String,
-
-        /// Haplotype number, currently only support 1 or 2
-        #[arg(short, long, default_value_t = 2)]
-        number_of_haplotypes: usize,
-
-        /// Overlap between adjacent sub-loci in bp (must match the haplograph run; default 500)
-        #[arg(long, default_value_t = merge::DEFAULT_OVERLAP_BP)]
-        overlap_bp: usize,
-
-        /// Maximal sub-locus size used during haplograph (must match the haplograph run; default 200000)
-        #[arg(long, default_value_t = 200_000)]
-        maximal_locus_size: usize,
-
-        /// Verbose output
-        #[arg(long)]
-        verbose: bool,
-    },
-
     /// Whole-genome / multi-region analysis from a BED file: plans overlapping chunks per
     /// region, assembles/calls all chunks in parallel, stitches each region, and concatenates
     /// genome-wide germline/somatic VCFs.
@@ -796,6 +796,18 @@ fn main() -> Result<()> {
 
                 if eligible_loci.is_empty() {
                     warn!("All sub-loci were skipped due to low coverage");
+                } else {
+                    info!("Merging haplotypes");
+                    merge::start(
+                        &output_prefix,
+                        &locus,
+                        number_of_haplotypes,
+                        &sampleid,
+                        &reference_fa,
+                        maximal_locus_size,
+                        overlap_bp,
+                    )?;
+                    info!("Merging haplotypes completed");
                 }
             } else {
                 let mean_depth = util::with_thread_local_bam(&alignment_bam, |bam| {
@@ -992,6 +1004,33 @@ fn main() -> Result<()> {
                         Some((node_info, edge_info)),
                     )?;
                 }
+                DevToolsCommands::MergeOutputs {
+                    output_prefix,
+                    locus,
+                    reference_fa,
+                    sampleid,
+                    number_of_haplotypes,
+                    overlap_bp,
+                    maximal_locus_size,
+                    verbose,
+                } => {
+                    env_logger::Builder::from_default_env()
+                        .filter_level(if verbose {
+                            log::LevelFilter::Debug
+                        } else {
+                            log::LevelFilter::Info
+                        })
+                        .init();
+                    merge::start(
+                        &output_prefix,
+                        &locus,
+                        number_of_haplotypes,
+                        &sampleid,
+                        &reference_fa,
+                        maximal_locus_size,
+                        overlap_bp,
+                    )?;
+                }
             }
         }
         Commands::Evaluate {
@@ -1045,33 +1084,6 @@ fn main() -> Result<()> {
                 output_prefix.clone().to_string(),
                 sampleid.clone(),
                 pileup,
-            )?;
-        }
-        Commands::Merge {
-            output_prefix,
-            locus,
-            reference_fa,
-            sampleid,
-            number_of_haplotypes,
-            overlap_bp,
-            maximal_locus_size,
-            verbose,
-        } => {
-            env_logger::Builder::from_default_env()
-                .filter_level(if verbose {
-                    log::LevelFilter::Debug
-                } else {
-                    log::LevelFilter::Info
-                })
-                .init();
-            merge::start(
-                &output_prefix,
-                &locus,
-                number_of_haplotypes,
-                &sampleid,
-                &reference_fa,
-                maximal_locus_size,
-                overlap_bp,
             )?;
         }
         Commands::Wgs {

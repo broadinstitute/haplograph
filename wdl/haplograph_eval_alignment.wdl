@@ -204,7 +204,7 @@ task parse_locus {
 
 task run_haplograph_benchmark {
     meta {
-        description: "Run haplograph haplograph; call haplograph merge when the locus exceeds maximal_locus_size."
+        description: "Run haplograph haplograph; call haplograph dev-tools merge when the locus exceeds maximal_locus_size."
     }
 
     input {
@@ -261,7 +261,7 @@ task run_haplograph_benchmark {
         else
             echo "false" > low_coverage.txt
             if [ "~{needs_merge}" = "true" ]; then
-                ${HAPLOGRAPH} merge \
+                ${HAPLOGRAPH} dev-tools merge \
                     --output-prefix ~{output_prefix} \
                     --locus ~{locus} \
                     --reference-fa ~{reference_fa} \

@@ -248,7 +248,7 @@ task CalculateCoverage {
 
 task run_haplograph_benchmark {
     meta {
-        description: "Run haplograph haplograph; call haplograph merge when the locus exceeds maximal_locus_size."
+        description: "Run haplograph haplograph; call haplograph dev-tools merge when the locus exceeds maximal_locus_size."
     }
 
     input {
@@ -295,7 +295,7 @@ task run_haplograph_benchmark {
             ~{verbose_flag}
 
         if [ "~{needs_merge}" = "true" ]; then
-            ${HAPLOGRAPH} merge \
+            ${HAPLOGRAPH} dev-tools merge \
                 --output-prefix ~{output_prefix} \
                 --locus ~{locus} \
                 --reference-fa ~{reference_fa} \
@@ -312,7 +312,6 @@ task run_haplograph_benchmark {
         File? germline_vcf_tbi = "~{output_prefix}.germline.vcf.gz.tbi"
         File fasta = "~{output_prefix}.fasta"
         File somatic_vcf = "~{output_prefix}.somatic.vcf.gz"
-        Array[File] segment_outputs = glob("~{output_prefix}_*")
     }
 
     #########################

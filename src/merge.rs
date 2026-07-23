@@ -5,7 +5,7 @@ use bio::io::fasta::Reader as FastaReader;
 use log::{info, warn};
 use rust_htslib::bcf::{self, Read};
 use std::collections::{HashMap, HashSet};
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
@@ -856,12 +856,68 @@ pub fn start(
         "somatic",
     )?;
 
+    remove_segment_tmp_files(output_prefix)?;
+
+    Ok(())
+}
+
+/// True for segment artifact names `{prefix}_*.{gfa,fasta,bed,vcf.gz}` (not merged `{prefix}.*`).
+fn is_segment_tmp_artifact(name: &str, output_prefix: &str) -> bool {
+    let tag = format!("{output_prefix}_");
+    if !name.starts_with(&tag) {
+        return false;
+    }
+    name.ends_with(".gfa")
+        || name.ends_with(".fasta")
+        || name.ends_with(".bed")
+        || name.ends_with(".vcf.gz")
+        || name.ends_with(".vcf.gz.tbi")
+}
+
+/// Delete per-segment intermediates (`{output_prefix}_0.gfa`, …) after merge.
+pub fn remove_segment_tmp_files(output_prefix: &str) -> AnyhowResult<()> {
+    let cwd = std::env::current_dir().context("Failed to get current directory")?;
+    let mut removed = 0usize;
+    for entry in fs::read_dir(&cwd).with_context(|| format!("Failed to read {}", cwd.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !is_segment_tmp_artifact(name, output_prefix) {
+            continue;
+        }
+        fs::remove_file(&path)
+            .with_context(|| format!("Failed to remove tmp file {}", path.display()))?;
+        removed += 1;
+    }
+    if removed > 0 {
+        info!(
+            "Removed {removed} segment tmp file(s) matching {output_prefix}_*.{{gfa,fasta,bed,vcf.gz}}"
+        );
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_segment_tmp_artifact_matches_segment_not_merged_outputs() {
+        let prefix = "run/out";
+        assert!(is_segment_tmp_artifact("run/out_0.gfa", prefix));
+        assert!(is_segment_tmp_artifact("run/out_0.fasta", prefix));
+        assert!(is_segment_tmp_artifact("run/out_1.germline.vcf.gz", prefix));
+        assert!(is_segment_tmp_artifact("run/out_0.Hap.0.bed", prefix));
+        assert!(!is_segment_tmp_artifact("run/out.fasta", prefix));
+        assert!(!is_segment_tmp_artifact("run/out.germline.vcf.gz", prefix));
+        assert!(!is_segment_tmp_artifact("run/out.Hap.0.bed", prefix));
+        assert!(!is_segment_tmp_artifact("other/out_0.gfa", prefix));
+    }
 
     #[test]
     fn parse_fasta_header_extracts_coords_and_path() {
