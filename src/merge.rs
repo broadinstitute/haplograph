@@ -414,6 +414,9 @@ fn build_global_to_local_maps(
     number_of_haplotypes: usize,
 ) -> AnyhowResult<Vec<Vec<usize>>> {
     let mut global_to_local = vec![(0..number_of_haplotypes).collect::<Vec<_>>()];
+    // Adjacent pairs share a GFA (the right of pair i is the left of pair i+1);
+    // cache the last-loaded right GFA to avoid reloading each GFA twice.
+    let mut cached_left: Option<(String, HashMap<String, asm::NodeInfo>)> = None;
     for idx in 1..merge_chunks.len() {
         let left = merge_chunks[idx - 1].segment.as_ref();
         let right = merge_chunks[idx].segment.as_ref();
@@ -424,20 +427,29 @@ fn build_global_to_local_maps(
                 let left_gfa_path = PathBuf::from(format!("{}.gfa", left_seg.prefix));
                 let right_gfa_path = PathBuf::from(format!("{}.gfa", right_seg.prefix));
                 if left_gfa_path.exists() && right_gfa_path.exists() {
-                    let left_gfa = asm::load_graph(&left_gfa_path)?.0;
+                    let left_gfa = match cached_left.take() {
+                        Some((prefix, gfa)) if prefix == left_seg.prefix => gfa,
+                        _ => asm::load_graph(&left_gfa_path)?.0,
+                    };
                     let right_gfa = asm::load_graph(&right_gfa_path)?.0;
-                    match_haplotypes_at_overlap(
+                    let mapping = match_haplotypes_at_overlap(
                         left_seg,
                         right_seg,
                         &left_gfa,
                         &right_gfa,
                         number_of_haplotypes,
-                    )?
+                    )?;
+                    cached_left = Some((right_seg.prefix.clone(), right_gfa));
+                    mapping
                 } else {
+                    cached_left = None;
                     (0..number_of_haplotypes).collect()
                 }
             }
-            _ => (0..number_of_haplotypes).collect(),
+            _ => {
+                cached_left = None;
+                (0..number_of_haplotypes).collect()
+            }
         };
         global_to_local.push(mapping);
     }
@@ -470,9 +482,9 @@ fn haplotype_for_chunk(
     }
 }
 
-fn append_reference_gap(stitched: &mut String, full_ref: &str, gap_start: usize, gap_end: usize) {
+fn append_reference_gap(buffer: &mut Vec<u8>, full_ref: &str, gap_start: usize, gap_end: usize) {
     if gap_start < gap_end {
-        stitched.push_str(&reference_slice(full_ref, gap_start, gap_end));
+        buffer.extend_from_slice(reference_slice(full_ref, gap_start, gap_end).as_bytes());
     }
 }
 
@@ -490,55 +502,60 @@ fn stitch_fasta(
 
     let mut output = HashMap::new();
     for global_hap in 0..number_of_haplotypes {
-        let mut stitched = String::new();
+        // Accumulate the stitched haplotype into a single growable byte buffer.
+        // Each chunk truncates the overlap tail then appends its own suffix, which
+        // is O(chunk length) instead of cloning the whole accumulated sequence
+        // (previously O(total length) per chunk → quadratic in locus length).
+        let mut buffer: Vec<u8> = Vec::new();
         let mut tracked_ref_start = locus_start;
         let mut tracked_ref_end = locus_start;
 
         if merge_chunks[0].ref_start > locus_start {
-            append_reference_gap(
-                &mut stitched,
-                full_ref,
-                locus_start,
-                merge_chunks[0].ref_start,
-            );
+            append_reference_gap(&mut buffer, full_ref, locus_start, merge_chunks[0].ref_start);
         }
 
         for (chunk_idx, chunk) in merge_chunks.iter().enumerate() {
             let local_hap = global_to_local[chunk_idx][global_hap];
             let hap = haplotype_for_chunk(chunk, global_hap, local_hap, full_ref);
 
-            if stitched.is_empty() {
-                stitched = hap.sequence.clone();
+            if chunk_idx == 0 {
+                buffer.extend_from_slice(hap.sequence.as_bytes());
                 tracked_ref_start = chunk.ref_start;
                 tracked_ref_end = chunk.ref_end;
                 continue;
             }
 
-            if chunk_idx > 0 {
-                let prev_end = merge_chunks[chunk_idx - 1].ref_end;
-                if chunk.ref_start > prev_end {
-                    append_reference_gap(&mut stitched, full_ref, prev_end, chunk.ref_start);
-                }
+            let prev_end = merge_chunks[chunk_idx - 1].ref_end;
+            if chunk.ref_start > prev_end {
+                append_reference_gap(&mut buffer, full_ref, prev_end, chunk.ref_start);
             }
 
             let overlap_start = chunk.ref_start;
-            let overlap_end = merge_chunks[chunk_idx - 1].ref_end.min(chunk.ref_end);
-            let left_hap = ParsedHaplotype {
-                hap_index: global_hap,
-                chromosome: chunk.chrom.clone(),
-                ref_start: tracked_ref_start,
-                ref_end: tracked_ref_end,
-                sequence: stitched.clone(),
-                path: Vec::new(),
-                read_names: HashSet::new(),
+            let overlap_end = prev_end.min(chunk.ref_end);
+
+            // Offset within the accumulated buffer for `overlap_start` (mirrors
+            // ref_coord_to_asm_offset with sequence == buffer).
+            let trim_left = if overlap_start <= tracked_ref_start {
+                0
+            } else if overlap_start >= tracked_ref_end {
+                buffer.len()
+            } else {
+                let ref_span = tracked_ref_end.saturating_sub(tracked_ref_start).max(1);
+                ((overlap_start - tracked_ref_start) * buffer.len()) / ref_span
             };
-            stitched = stitch_haplotype_pair(&left_hap, &hap, overlap_start, overlap_end);
+            let skip_right = ref_coord_to_asm_offset(&hap, overlap_end);
+
+            buffer.truncate(trim_left.min(buffer.len()));
+            let right_bytes = hap.sequence.as_bytes();
+            if skip_right < right_bytes.len() {
+                buffer.extend_from_slice(&right_bytes[skip_right..]);
+            }
             tracked_ref_end = chunk.ref_end;
         }
 
         if let Some(last_chunk) = merge_chunks.last() {
             if last_chunk.ref_end < locus_end {
-                append_reference_gap(&mut stitched, full_ref, last_chunk.ref_end, locus_end);
+                append_reference_gap(&mut buffer, full_ref, last_chunk.ref_end, locus_end);
             }
         }
 
@@ -546,7 +563,7 @@ fn stitch_fasta(
             "{}:{}-{}.{global_hap}",
             merge_chunks[0].chrom, locus_start, locus_end
         );
-        output.insert(header, stitched);
+        output.insert(header, String::from_utf8(buffer).unwrap_or_default());
     }
     Ok(output)
 }
@@ -1003,6 +1020,7 @@ mod tests {
                     support_reads: 2,
                     allele_frequency: "0.5".to_string(),
                     read_names: "r1,r2".to_string(),
+                    read_names_set: asm::parse_read_names("r1,r2"),
                     methyl_info: HashMap::new(),
                 },
             ),
@@ -1014,6 +1032,7 @@ mod tests {
                     support_reads: 1,
                     allele_frequency: "0.5".to_string(),
                     read_names: "r3".to_string(),
+                    read_names_set: asm::parse_read_names("r3"),
                     methyl_info: HashMap::new(),
                 },
             ),
@@ -1027,6 +1046,7 @@ mod tests {
                     support_reads: 1,
                     allele_frequency: "0.5".to_string(),
                     read_names: "r9".to_string(),
+                    read_names_set: asm::parse_read_names("r9"),
                     methyl_info: HashMap::new(),
                 },
             ),
@@ -1038,6 +1058,7 @@ mod tests {
                     support_reads: 2,
                     allele_frequency: "0.5".to_string(),
                     read_names: "r1,r2".to_string(),
+                    read_names_set: asm::parse_read_names("r1,r2"),
                     methyl_info: HashMap::new(),
                 },
             ),

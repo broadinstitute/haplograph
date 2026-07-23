@@ -752,53 +752,53 @@ pub fn get_variants_from_path(
     (phased_variants, somatic_variants)
 }
 
-pub fn construct_var_read_matrix(
+/// Single pass over all nodes building `variant key -> distinct supporting reads`.
+/// This is the shared source of truth for both the AD map (distinct read counts)
+/// and the variant-read matrix, so `get_variants_from_node` runs once per node.
+pub fn build_var_read_map(
     node_info: &HashMap<String, asm::NodeInfo>,
     reference_seqs: &Vec<fastq::Record>,
-) -> AnyhowResult<(Array2<f64>, Vec<String>, Vec<String>)> {
-    let node_list = node_info.keys().cloned().collect::<Vec<_>>();
-    let mut var_read_matrix = HashMap::new();
-    let mut all_read_set = HashSet::new();
-    let mut var_set = HashSet::new();
-    for node in node_list.iter() {
-        let variants_read_map = get_variants_from_node(node_info, node.clone(), reference_seqs)?;
-        for (key, read_set) in variants_read_map.iter() {
-            var_read_matrix
-                .entry(key.clone())
-                .or_insert(HashSet::new())
-                .extend(read_set.iter().cloned());
-            all_read_set.extend(read_set.iter().cloned());
-            var_set.insert(key.clone());
+) -> AnyhowResult<HashMap<String, HashSet<String>>> {
+    let mut var_read_map: HashMap<String, HashSet<String>> = HashMap::new();
+    for node in node_info.keys().cloned().collect::<Vec<_>>() {
+        let variants_read_map = get_variants_from_node(node_info, node, reference_seqs)?;
+        for (key, read_set) in variants_read_map {
+            var_read_map.entry(key).or_default().extend(read_set);
         }
     }
-    let read_list = all_read_set.iter().cloned().collect::<Vec<_>>();
-    let var_list = var_set.iter().cloned().collect::<Vec<_>>();
+    Ok(var_read_map)
+}
+
+/// Distinct alt-supporting read count per variant key, derived from the shared map.
+fn ad_map_from_var_read_map(var_read_map: &HashMap<String, HashSet<String>>) -> HashMap<String, usize> {
+    var_read_map
+        .iter()
+        .map(|(k, v)| (k.clone(), v.len()))
+        .collect()
+}
+
+/// Build the variant x read binary matrix from the shared map using O(1) index
+/// lookups (HashMap) instead of O(n) `Vec::position` scans.
+fn matrix_from_var_read_map(
+    var_read_map: &HashMap<String, HashSet<String>>,
+) -> (Array2<f64>, Vec<String>, Vec<String>) {
+    let var_list: Vec<String> = var_read_map.keys().cloned().collect();
+    let mut read_set: HashSet<String> = HashSet::new();
+    for reads in var_read_map.values() {
+        read_set.extend(reads.iter().cloned());
+    }
+    let read_list: Vec<String> = read_set.into_iter().collect();
+    let read_index: HashMap<&String, usize> =
+        read_list.iter().enumerate().map(|(i, r)| (r, i)).collect();
+
     let mut matrix = Array2::<f64>::zeros((var_list.len(), read_list.len()));
-    for (key, read_s) in var_read_matrix.iter() {
-        let var_index = var_list.iter().position(|x| x == key).unwrap();
-        for read in read_s.iter() {
-            let read_index = read_list.iter().position(|x| x == read).unwrap();
+    for (var_index, key) in var_list.iter().enumerate() {
+        for read in var_read_map.get(key).into_iter().flatten() {
+            let read_index = read_index[read];
             matrix[[var_index, read_index]] = 1.0;
         }
     }
-    Ok((matrix, var_list.clone(), read_list.clone()))
-}
-
-/// Distinct alt-supporting read count per variant key ("chrom.pos.ref.alt.type").
-/// Unions the per-node read sets so reads shared across haplotype paths / nodes
-/// are counted once (correct AD), instead of summing per-path support.
-fn variant_distinct_read_counts(
-    node_info: &HashMap<String, asm::NodeInfo>,
-    reference_seqs: &Vec<fastq::Record>,
-) -> AnyhowResult<HashMap<String, usize>> {
-    let mut var_reads: HashMap<String, HashSet<String>> = HashMap::new();
-    for node in node_info.keys().cloned().collect::<Vec<_>>() {
-        let m = get_variants_from_node(node_info, node, reference_seqs)?;
-        for (key, reads) in m {
-            var_reads.entry(key).or_default().extend(reads);
-        }
-    }
-    Ok(var_reads.into_iter().map(|(k, v)| (k, v.len())).collect())
+    (matrix, var_list, read_list)
 }
 
 pub fn start(
@@ -882,9 +882,14 @@ pub fn start(
         .cloned()
         .collect::<Vec<_>>();
 
+    // Single pass over all nodes: shared source of truth for both the AD map
+    // and the somatic variant-read matrix (avoids running get_variants_from_node
+    // over every node twice).
+    let var_read_map = build_var_read_map(&node_info, reference_seqs)?;
+
     // AD = distinct alt-supporting reads (dedup shared reads across haplotype
     // paths and phased/somatic duplicates), so VAF = AD/DP stays in [0, 1].
-    let ad_map = variant_distinct_read_counts(&node_info, reference_seqs)?;
+    let ad_map = ad_map_from_var_read_map(&var_read_map);
     let apply_ad = |v: &Variant| -> Variant {
         let key = format!(
             "{}.{}.{}.{}.{}",
@@ -912,64 +917,40 @@ pub fn start(
     )?;
     info!("Germline variants: {}", p_variants.len());
 
-    let (matrix, var_list, read_list) = construct_var_read_matrix(&node_info, reference_seqs)?;
-    let filtered_var_name = if matrix.shape()[0] > 2000 {
-        // split the matrix into chunks of 2000 rows
-        let chunk_num = matrix.shape()[0] / 2000 as usize;
-        let n_rows = matrix.shape()[0];
-        let chunks_filtered: Vec<String> = (0..chunk_num)
+    let (matrix, var_list, _read_list) = matrix_from_var_read_map(&var_read_map);
+    let n_rows = matrix.shape()[0];
+    let filtered_var_name: HashSet<String> = if n_rows > 2000 {
+        // Split the matrix into contiguous chunks of <=2000 rows. Using a ceiling
+        // division keeps the final partial chunk (rows not divisible by 2000).
+        let chunk_num = n_rows.div_ceil(2000);
+        (0..chunk_num)
             .into_par_iter()
             .flat_map_iter(|i| {
-                let raw_start = i * 2000;
-                let (start, end) = if raw_start + 2000 > n_rows {
-                    (n_rows - 2000, n_rows)
-                } else {
-                    (raw_start, raw_start + 2000)
-                };
+                let start = i * 2000;
+                let end = std::cmp::min(start + 2000, n_rows);
                 let chunk = matrix.slice(s![start..end, ..]).to_owned();
                 let var_list_chunk = var_list[start..end].to_vec();
                 util::permutation_test(&chunk, 0.5, 100, var_list_chunk).into_iter()
             })
-            .collect();
-        chunks_filtered
-            .into_iter()
-            .collect::<HashSet<_>>()
-            .into_iter()
             .collect()
     } else {
         util::permutation_test(&matrix, 0.05, 100, var_list.clone())
+            .into_iter()
+            .collect()
     };
 
     let mut filtered_somatic_variants = Vec::new();
     for var in s_variants.iter() {
-        if sequencing_technology == "hifi" {
-            if var.variant_type == "SNP" {
-                filtered_somatic_variants.push(var.clone());
-            } else {
-                let key = format!(
-                    "{}.{}.{}.{}.{}",
-                    var.chromosome.clone(),
-                    var.pos,
-                    var.ref_allele.clone(),
-                    var.alt_allele.clone(),
-                    var.variant_type.clone()
-                );
-                if filtered_var_name.contains(&key) {
-                    filtered_somatic_variants.push(var.clone());
-                }
-            }
-        } else {
-            let key = format!(
-                "{}.{}.{}.{}.{}",
-                var.chromosome.clone(),
-                var.pos,
-                var.ref_allele.clone(),
-                var.alt_allele.clone(),
-                var.variant_type.clone()
-            );
-            if filtered_var_name.contains(&key) {
-                filtered_somatic_variants.push(var.clone());
-            }
+        let key = format!(
+            "{}.{}.{}.{}.{}",
+            var.chromosome, var.pos, var.ref_allele, var.alt_allele, var.variant_type
+        );
+        // HiFi SNPs are trusted directly; everything else must pass the
+        // permutation test (co-occurrence) filter.
+        let keep = (sequencing_technology == "hifi" && var.variant_type == "SNP")
+            || filtered_var_name.contains(&key);
+        if keep {
+            filtered_somatic_variants.push(var.clone());
         }
     }
     let somatic_output = format!("{}.somatic", output_prefix);

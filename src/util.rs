@@ -159,6 +159,17 @@ pub fn init_rayon_threads(threads: Option<usize>) -> AnyhowResult<()> {
     Ok(())
 }
 
+/// A BAM path is "remote" (random seeks are expensive under high concurrency)
+/// if it is a cloud/URL path rather than a local file.
+pub fn is_remote_bam(bam_path: &str) -> bool {
+    let lower = bam_path.to_ascii_lowercase();
+    lower.starts_with("gs://")
+        || lower.starts_with("s3://")
+        || lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("ftp://")
+}
+
 thread_local! {
     static THREAD_BAM: RefCell<Option<(String, IndexedReader)>> = const { RefCell::new(None) };
 }

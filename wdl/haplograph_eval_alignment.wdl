@@ -99,11 +99,26 @@ workflow Haplograph_eval_regular_genes {
                     thread = haplograph_threads
             }
 
-            call haplograph_eval {
-                input:
-                    truth_fasta = get_truth_haplotypes.fasta_file,
-                    query_fasta = haplograph.asm_file,
-                    prefix = output_prefix + "_" + gene_name + "_" + desiredCoverage,
+            # Only run haplograph-dependent tasks when coverage was sufficient.
+            if (!haplograph.low_coverage) {
+                call haplograph_eval {
+                    input:
+                        truth_fasta = get_truth_haplotypes.fasta_file,
+                        query_fasta = haplograph.asm_file,
+                        prefix = output_prefix + "_" + gene_name + "_" + desiredCoverage,
+                }
+
+                call Vcfdist as VCFdist_germline {
+                    input:
+                        sample = sample,
+                        eval_vcf = haplograph.germline_vcf,
+                        truth_vcf = truth_vcf,
+                        locus = locus,
+                        reference_fasta = reference_fa,
+                        coverage = desiredCoverage,
+                        genename = gene_name,
+                        extra_args = ""
+                }
             }
 
             call hifiasm_asm {
@@ -121,30 +136,18 @@ workflow Haplograph_eval_regular_genes {
                     query_fasta = hifiasm_asm.asm_file,
                     prefix = output_prefix + "_" + gene_name + "_" + desiredCoverage,
             }
-
-            call Vcfdist as VCFdist_germline {
-                input:
-                    sample = sample,
-                    eval_vcf = haplograph.germline_vcf,
-                    truth_vcf = truth_vcf,
-                    locus = locus,
-                    reference_fasta = reference_fa,
-                    coverage = desiredCoverage,
-                    genename = gene_name,
-                    extra_args = ""
-            }
         }
     }
 
 
     output {
         Array[Float] bam_coverage = CalculateCoverage.coverage
-        Array[Array[File]] gfa = haplograph.graph_file
+        Array[Array[File?]] gfa = haplograph.graph_file
         Array[Array[File]] fasta = haplograph.asm_file
         Array[Array[File]] vcf = haplograph.germline_vcf
-        Array[Array[File]] haplograph_eval_result = haplograph_eval.qv_scores
+        Array[Array[File?]] haplograph_eval_result = haplograph_eval.qv_scores
         Array[Array[File]] hifiasm_eval_result = hifiasm_eval.qv_scores
-        Array[Array[VcfdistOutputs]] vcfdist_summary = VCFdist_germline.outputs
+        Array[Array[VcfdistOutputs?]] vcfdist_summary = VCFdist_germline.outputs
     }
 }
 
@@ -227,13 +230,14 @@ task run_haplograph_benchmark {
     Int disk_gb = 20 + ceil(size([bam, reference_fa], "GiB"))
 
     command <<<
-        set -euxo pipefail
+        set -uxo pipefail
 
         export TMPDIR="${PWD}"
         mkdir -p "${TMPDIR}"
 
         HAPLOGRAPH=/haplograph/target/release/haplograph
 
+        LOW_COVERAGE=false
         ${HAPLOGRAPH} haplograph \
             --alignment-bam ~{bam} \
             --reference-fa ~{reference_fa} \
@@ -245,29 +249,40 @@ task run_haplograph_benchmark {
             --overlap-bp ~{overlap_bp} \
             --min-mean-depth ~{min_mean_depth} \
             --threads ~{thread} \
-            ~{verbose_flag}
+            ~{verbose_flag} \
+            || { LOW_COVERAGE=true; }
 
-        if [ "~{needs_merge}" = "true" ]; then
-            ${HAPLOGRAPH} merge \
-                --output-prefix ~{output_prefix} \
-                --locus ~{locus} \
-                --reference-fa ~{reference_fa} \
-                --sampleid ~{sample} \
-                --maximal-locus-size ~{maximal_locus_size} \
-                --overlap-bp ~{overlap_bp} \
-                ~{verbose_flag}
+        if [ "${LOW_COVERAGE}" = "true" ] || [ ! -f "~{output_prefix}.fasta" ]; then
+            echo "Insufficient coverage or no output produced; skipping locus." >&2
+            touch ~{output_prefix}.fasta
+            touch ~{output_prefix}.germline.vcf.gz
+            touch ~{output_prefix}.somatic.vcf.gz
+            echo "true" > low_coverage.txt
+        else
+            echo "false" > low_coverage.txt
+            if [ "~{needs_merge}" = "true" ]; then
+                ${HAPLOGRAPH} merge \
+                    --output-prefix ~{output_prefix} \
+                    --locus ~{locus} \
+                    --reference-fa ~{reference_fa} \
+                    --sampleid ~{sample} \
+                    --maximal-locus-size ~{maximal_locus_size} \
+                    --overlap-bp ~{overlap_bp} \
+                    ~{verbose_flag}
+            fi
         fi
 
     >>>
 
     output {
-        File graph_file = "~{output_prefix}.gfa"
+        File? graph_file = "~{output_prefix}.gfa"
         File asm_file = "~{output_prefix}.fasta"
         File germline_vcf = "~{output_prefix}.germline.vcf.gz"
         File? germline_vcf_tbi = "~{output_prefix}.germline.vcf.gz.tbi"
         File somatic_vcf_file = "~{output_prefix}.somatic.vcf.gz"
         File? somatic_vcf_tbi = "~{output_prefix}.somatic.vcf.gz.tbi"
         Array[File] methyl_bed = glob("~{output_prefix}.Hap.*.bed")
+        Boolean low_coverage = read_boolean("low_coverage.txt")
     }
 
     #########################

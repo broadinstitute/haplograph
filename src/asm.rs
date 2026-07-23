@@ -6,6 +6,7 @@ use flate2::read::GzDecoder;
 use itertools::Itertools;
 use log::{info, warn};
 use ndarray::Array2;
+use rayon::prelude::*;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -22,7 +23,19 @@ pub struct NodeInfo {
     pub support_reads: usize,
     pub allele_frequency: String,
     pub read_names: String,
+    /// Parsed, deduplicated read base names (the `read_names` string is only
+    /// parsed once, at graph load, instead of on every `get_read_name_list`).
+    pub read_names_set: HashSet<String>,
     pub methyl_info: HashMap<usize, f32>,
+}
+
+/// Parse the raw comma-separated `read_names` annotation into a set of read base
+/// names (dropping any `|pos` suffix and stray quotes).
+pub fn parse_read_names(read_names: &str) -> HashSet<String> {
+    read_names
+        .split(',')
+        .map(|x| x.split('|').next().unwrap_or("").replace('"', ""))
+        .collect()
 }
 
 pub fn load_graph(
@@ -80,6 +93,7 @@ pub fn load_graph(
                     }),
                 allele_frequency: value["allele_frequency"].to_string(),
                 read_names: value["read_names"].to_string(),
+                read_names_set: parse_read_names(&value["read_names"].to_string()),
                 methyl_info: methyl_info_dict,
             };
             node_info.insert(name.to_string(), value_info);
@@ -181,68 +195,76 @@ pub fn identify_heterozygous_nodes(
             .cmp(&util::split_locus(b.to_string()).1)
     });
 
-    for interval_name in interval_list.iter() {
-        let (chromo, start, end) = util::split_locus(interval_name.to_string());
-        let node_vec = all_nodes.get(*interval_name).unwrap();
+    // Each interval's combinatorial het-set search is independent, so run the
+    // intervals in parallel and merge the chosen node sets afterward.
+    let results: Vec<(String, Vec<String>)> = interval_list
+        .par_iter()
+        .filter_map(|interval_name| {
+            let node_vec = all_nodes.get(*interval_name).unwrap();
 
-        let mut candidates: Vec<(String, HashSet<String>)> = node_vec
-            .iter()
-            .map(|node| (node.clone(), get_read_name_list(node_info, node.clone())))
-            .filter(|(_, reads)| reads.len() >= HET_MIN_NODE_SUPPORT)
-            .collect();
+            let mut candidates: Vec<(String, HashSet<String>)> = node_vec
+                .iter()
+                .map(|node| (node.clone(), get_read_name_list(node_info, node.clone())))
+                .filter(|(_, reads)| reads.len() >= HET_MIN_NODE_SUPPORT)
+                .collect();
 
-        if candidates.len() < 2 {
-            continue;
-        }
-        candidates.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+            if candidates.len() < 2 {
+                return None;
+            }
+            candidates.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
 
-        let max_k = hap_number.min(candidates.len());
-        let mut chosen: Option<Vec<String>> = None;
+            let max_k = hap_number.min(candidates.len());
+            let mut chosen: Option<Vec<String>> = None;
 
-        for k in (2..=max_k).rev() {
-            let mut best: Option<(f64, f64, usize, Vec<String>)> = None;
+            for k in (2..=max_k).rev() {
+                let mut best: Option<(f64, f64, usize, Vec<String>)> = None;
 
-            for combo in (0..candidates.len()).combinations(k) {
-                let reads: Vec<&HashSet<String>> =
-                    combo.iter().map(|&i| &candidates[i].1).collect();
-                let supports: Vec<usize> = reads.iter().map(|r| r.len()).collect();
+                for combo in (0..candidates.len()).combinations(k) {
+                    let reads: Vec<&HashSet<String>> =
+                        combo.iter().map(|&i| &candidates[i].1).collect();
+                    let supports: Vec<usize> = reads.iter().map(|r| r.len()).collect();
 
-                let balance = min_max_support_ratio(&supports);
+                    let balance = min_max_support_ratio(&supports);
 
-                let reads_owned: Vec<HashSet<String>> = reads.iter().map(|&r| r.clone()).collect();
-                let max_jac = max_pairwise_jaccard(&reads_owned);
+                    let reads_owned: Vec<HashSet<String>> =
+                        reads.iter().map(|&r| r.clone()).collect();
+                    let max_jac = max_pairwise_jaccard(&reads_owned);
 
-                let union_reads: HashSet<&String> = reads.iter().flat_map(|r| r.iter()).collect();
-                let disjointness = 1.0 - max_jac;
-                let total_unique = union_reads.len();
+                    let union_reads: HashSet<&String> =
+                        reads.iter().flat_map(|r| r.iter()).collect();
+                    let disjointness = 1.0 - max_jac;
+                    let total_unique = union_reads.len();
 
-                let candidate_score = (disjointness, balance, total_unique);
+                    let candidate_score = (disjointness, balance, total_unique);
 
-                let is_better = match &best {
-                    None => true,
-                    Some((d, b, t, _)) => {
-                        (candidate_score.0, candidate_score.1, candidate_score.2) > (*d, *b, *t)
+                    let is_better = match &best {
+                        None => true,
+                        Some((d, b, t, _)) => {
+                            (candidate_score.0, candidate_score.1, candidate_score.2) > (*d, *b, *t)
+                        }
+                    };
+                    if is_better {
+                        let nodes: Vec<String> =
+                            combo.iter().map(|&i| candidates[i].0.clone()).collect();
+                        best = Some((disjointness, balance, total_unique, nodes));
                     }
-                };
-                if is_better {
-                    let nodes: Vec<String> =
-                        combo.iter().map(|&i| candidates[i].0.clone()).collect();
-                    best = Some((disjointness, balance, total_unique, nodes));
+                }
+
+                if let Some((_, _, _, nodes)) = best {
+                    chosen = Some(nodes);
+                    break;
                 }
             }
 
-            if let Some((_, _, _, nodes)) = best {
-                chosen = Some(nodes);
-                break;
-            }
-        }
+            chosen.map(|nodes| ((*interval_name).clone(), nodes))
+        })
+        .collect();
 
-        if let Some(nodes) = chosen {
-            heterozygous_nodes
-                .entry((*interval_name).clone())
-                .or_default()
-                .extend(nodes.clone());
-        }
+    for (interval_name, nodes) in results {
+        heterozygous_nodes
+            .entry(interval_name)
+            .or_default()
+            .extend(nodes);
     }
     heterozygous_nodes
 }
@@ -452,99 +474,105 @@ pub fn cluster_partition_reads(
     }
 
     let restarts = CLUSTER_RESTARTS.min(informative.len());
-    let mut best: Option<(f64, usize, usize, Vec<usize>)> = None; // (objective, corrections, eff_k, assignment)
+    // Restarts are fully independent (each seeds its own centroids); run them in
+    // parallel and keep the lowest-objective result. Ties break on restart index
+    // to keep the choice deterministic (matches the old first-wins sequential loop).
+    let best: Option<(f64, usize, usize, usize, Vec<usize>)> = (0..restarts)
+        .into_par_iter()
+        .filter_map(|restart| {
+            let first = informative[restart];
+            let seeds = seed_clusters(&reads, k, first);
+            if seeds.len() < 2 {
+                return None;
+            }
+            let eff_k = seeds.len();
 
-    for restart in 0..restarts {
-        let first = informative[restart];
-        let seeds = seed_clusters(&reads, k, first);
-        if seeds.len() < 2 {
-            continue;
-        }
-        let eff_k = seeds.len();
+            let mut centroids: Vec<Vec<i8>> = seeds
+                .iter()
+                .map(|&s| {
+                    let mut dense = vec![0i8; n_nodes];
+                    for &(row, sign) in reads[s].iter() {
+                        dense[row] = sign;
+                    }
+                    dense
+                })
+                .collect();
 
-        let mut centroids: Vec<Vec<i8>> = seeds
-            .iter()
-            .map(|&s| {
-                let mut dense = vec![0i8; n_nodes];
-                for &(row, sign) in reads[s].iter() {
-                    dense[row] = sign;
+            let mut assignment = vec![0usize; n_reads];
+            let mut prev_assignment: Vec<usize> = Vec::new();
+
+            for _iter in 0..CLUSTER_MAX_ITER {
+                let mut sizes = vec![0usize; eff_k];
+
+                // Assign informative reads to the closest consensus over the whole interval.
+                for &c in informative.iter() {
+                    let mut best_cl = 0usize;
+                    let mut best_frac = f64::MAX;
+                    let mut best_overlap = 0usize;
+                    let mut found = false;
+                    for cl in 0..eff_k {
+                        let (dis, ov) = read_centroid_disagreement(&reads[c], &centroids[cl]);
+                        if ov < CLUSTER_MIN_OVERLAP {
+                            continue;
+                        }
+                        let frac = dis as f64 / ov as f64;
+                        let better = !found
+                            || frac < best_frac - 1e-9
+                            || ((frac - best_frac).abs() <= 1e-9 && ov > best_overlap);
+                        if better {
+                            found = true;
+                            best_frac = frac;
+                            best_overlap = ov;
+                            best_cl = cl;
+                        }
+                    }
+                    if !found {
+                        // No overlap with any centroid this round: keep clusters balanced.
+                        best_cl = (0..eff_k).min_by_key(|&cl| sizes[cl]).unwrap();
+                    }
+                    assignment[c] = best_cl;
+                    sizes[best_cl] += 1;
                 }
-                dense
-            })
-            .collect();
+                // Reads with no informative site carry no phasing signal → balance filler.
+                for c in 0..n_reads {
+                    if reads[c].is_empty() {
+                        let cl = (0..eff_k).min_by_key(|&x| sizes[x]).unwrap();
+                        assignment[c] = cl;
+                        sizes[cl] += 1;
+                    }
+                }
 
-        let mut assignment = vec![0usize; n_reads];
-        let mut prev_assignment: Vec<usize> = Vec::new();
+                if assignment == prev_assignment {
+                    break;
+                }
+                prev_assignment = assignment.clone();
 
-        for _iter in 0..CLUSTER_MAX_ITER {
-            let mut sizes = vec![0usize; eff_k];
-
-            // Assign informative reads to the closest consensus over the whole interval.
-            for &c in informative.iter() {
-                let mut best_cl = 0usize;
-                let mut best_frac = f64::MAX;
-                let mut best_overlap = 0usize;
-                let mut found = false;
+                let mut members: Vec<Vec<usize>> = vec![Vec::new(); eff_k];
+                for (idx, &cl) in assignment.iter().enumerate() {
+                    members[cl].push(idx);
+                }
                 for cl in 0..eff_k {
-                    let (dis, ov) = read_centroid_disagreement(&reads[c], &centroids[cl]);
-                    if ov < CLUSTER_MIN_OVERLAP {
-                        continue;
-                    }
-                    let frac = dis as f64 / ov as f64;
-                    let better = !found
-                        || frac < best_frac - 1e-9
-                        || ((frac - best_frac).abs() <= 1e-9 && ov > best_overlap);
-                    if better {
-                        found = true;
-                        best_frac = frac;
-                        best_overlap = ov;
-                        best_cl = cl;
-                    }
-                }
-                if !found {
-                    // No overlap with any centroid this round: keep clusters balanced.
-                    best_cl = (0..eff_k).min_by_key(|&cl| sizes[cl]).unwrap();
-                }
-                assignment[c] = best_cl;
-                sizes[best_cl] += 1;
-            }
-            // Reads with no informative site carry no phasing signal → balance filler.
-            for c in 0..n_reads {
-                if reads[c].is_empty() {
-                    let cl = (0..eff_k).min_by_key(|&x| sizes[x]).unwrap();
-                    assignment[c] = cl;
-                    sizes[cl] += 1;
+                    centroids[cl] = compute_centroid(&reads, &members[cl], n_nodes);
                 }
             }
 
-            if assignment == prev_assignment {
-                break;
+            let corrections = cluster_corrections(&reads, &assignment, eff_k, n_nodes);
+            let mut sizes = vec![0usize; eff_k];
+            for &cl in assignment.iter() {
+                sizes[cl] += 1;
             }
-            prev_assignment = assignment.clone();
+            let imbalance = (sizes.iter().max().unwrap() - sizes.iter().min().unwrap()) as f64;
+            let objective = corrections as f64 + balance_weight * imbalance;
 
-            let mut members: Vec<Vec<usize>> = vec![Vec::new(); eff_k];
-            for (idx, &cl) in assignment.iter().enumerate() {
-                members[cl].push(idx);
-            }
-            for cl in 0..eff_k {
-                centroids[cl] = compute_centroid(&reads, &members[cl], n_nodes);
-            }
-        }
+            Some((objective, restart, corrections, eff_k, assignment))
+        })
+        .min_by(|a, b| {
+            a.0.partial_cmp(&b.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.1.cmp(&b.1))
+        });
 
-        let corrections = cluster_corrections(&reads, &assignment, eff_k, n_nodes);
-        let mut sizes = vec![0usize; eff_k];
-        for &cl in assignment.iter() {
-            sizes[cl] += 1;
-        }
-        let imbalance = (sizes.iter().max().unwrap() - sizes.iter().min().unwrap()) as f64;
-        let objective = corrections as f64 + balance_weight * imbalance;
-
-        if best.as_ref().map_or(true, |(bo, _, _, _)| objective < *bo) {
-            best = Some((objective, corrections, eff_k, assignment.clone()));
-        }
-    }
-
-    let (_, corrections, _eff_k, assignment) = match best {
+    let (_, _restart, corrections, _eff_k, assignment) = match best {
         Some(b) => b,
         None => return trivial(),
     };
@@ -620,39 +648,49 @@ fn construct_het_interval_matrix(
 
     let n_reads = read_list.len();
     let n_rows = het_nodes.len();
-    let mut matrix = Array2::<f64>::zeros((n_rows, n_reads));
 
-    for (row, node) in het_nodes.iter().enumerate() {
-        // let vote = if allele_idx == 0 { 1.0_f64 } else { -1.0_f64 };
-        // get all read in the interval
-        let interval = node.split(".").collect::<Vec<_>>()[1];
-        let interval_nodes = heterozygous_nodes
-            .get(interval)
-            .unwrap()
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut total_reads = HashSet::new();
-        for node in interval_nodes.iter() {
-            let read_names = get_read_name_list(node_info, node.clone());
-            total_reads.extend(read_names);
-        }
-
-        let current_read_list = get_read_name_list(node_info, node.clone());
-        for read in read_list.iter() {
-            let vote = if total_reads.contains(read) {
-                if current_read_list.contains(read) {
-                    1.0
-                } else {
-                    -1.0
-                }
-            } else {
-                0.0
-            };
-
-            if let Some(&col) = read_index.get(read.as_str()) {
-                matrix[[row, col]] = vote;
+    // Cache each interval's union of reads once (previously recomputed for every
+    // het node in the interval).
+    let interval_total_reads: HashMap<String, HashSet<String>> = heterozygous_nodes
+        .iter()
+        .map(|(interval, nodes)| {
+            let mut total = HashSet::new();
+            for node in nodes {
+                total.extend(get_read_name_list(node_info, node.clone()));
             }
+            (interval.clone(), total)
+        })
+        .collect();
+
+    // Each row is independent; compute the sparse non-zero votes in parallel.
+    // A read votes +1 if it supports this node, -1 if it covers the interval but
+    // supports a different node, and 0 (omitted) otherwise.
+    let rows: Vec<Vec<(usize, f64)>> = het_nodes
+        .par_iter()
+        .map(|node| {
+            let interval = node.split('.').collect::<Vec<_>>()[1];
+            let current_read_list = get_read_name_list(node_info, node.clone());
+            let mut entries = Vec::new();
+            if let Some(total_reads) = interval_total_reads.get(interval) {
+                for read in total_reads.iter() {
+                    if let Some(&col) = read_index.get(read.as_str()) {
+                        let vote = if current_read_list.contains(read) {
+                            1.0
+                        } else {
+                            -1.0
+                        };
+                        entries.push((col, vote));
+                    }
+                }
+            }
+            entries
+        })
+        .collect();
+
+    let mut matrix = Array2::<f64>::zeros((n_rows, n_reads));
+    for (row, entries) in rows.into_iter().enumerate() {
+        for (col, vote) in entries {
+            matrix[[row, col]] = vote;
         }
     }
 
@@ -681,14 +719,19 @@ pub fn assign_haplotype_reads(
 
     let (clusters, corrections) =
         cluster_partition_reads(&het_matrix, hap_number, CLUSTER_BALANCE_WEIGHT);
-    write_matrix_to_csv(
-        &het_matrix,
-        &clusters,
-        &het_nodes,
-        &read_list,
-        "het_matrix.csv",
-    )
-    .unwrap();
+    // The het matrix CSV is a debugging artifact; only write it when debug
+    // logging is enabled (e.g. `--verbose` / RUST_LOG=debug) to avoid the
+    // O(rows*reads) serialization on every locus in a whole-genome run.
+    if log::log_enabled!(log::Level::Debug) {
+        write_matrix_to_csv(
+            &het_matrix,
+            &clusters,
+            &het_nodes,
+            &read_list,
+            "het_matrix.csv",
+        )
+        .unwrap();
+    }
 
     info!(
         "Cluster partition: cluster sizes = {:?}, corrections = {}",
@@ -774,23 +817,8 @@ pub fn get_read_name_list(
     node_info: &HashMap<String, NodeInfo>,
     node_id: String,
 ) -> HashSet<String> {
-    let read_names = node_info.get(&node_id).unwrap().read_names.clone();
-    let read_names_list = read_names
-        .split(",")
-        .collect::<Vec<_>>()
-        .iter()
-        .map(|x| x.to_string())
-        .collect::<HashSet<_>>();
-    let read_names_list_clone = read_names_list
-        .iter()
-        .map(|x| {
-            x.split("|").collect::<Vec<_>>()[0]
-                .to_string()
-                .replace("\"", "")
-                .clone()
-        })
-        .collect::<HashSet<_>>();
-    read_names_list_clone
+    // Read names are parsed once at load time; return the cached set.
+    node_info.get(&node_id).unwrap().read_names_set.clone()
 }
 
 pub fn enumerate_all_paths_with_haplotype(
@@ -959,24 +987,32 @@ pub fn get_supports(node_info: &HashMap<String, NodeInfo>, path: &Vec<String>) -
 #[derive(Clone)]
 struct PathState {
     path: Vec<String>,
-    sequence: String,
-    read_names: HashSet<String>,
     supports: usize,
-    span: usize,
+    // Running sum of per-node read-name counts (the value the former
+    // `get_supports(path)` produced for a multi-node path).
+    read_len_sum: usize,
+    // Reference bounds carried incrementally so span never re-parses the path.
+    left: usize,
+    right: usize,
+}
+
+impl PathState {
+    fn span(&self) -> usize {
+        self.right.saturating_sub(self.left)
+    }
 }
 
 fn path_state_from_node(node_info: &HashMap<String, NodeInfo>, node: &str) -> Option<PathState> {
     let info = node_info.get(node)?;
-    let read_names = get_read_name_list(node_info, node.to_string());
     let (start, end) =
         eval::find_alignment_intervals([node.to_string()].iter().map(|x| x.as_str()).collect())
             .ok()?;
     Some(PathState {
         path: vec![node.to_string()],
-        sequence: info.seq.clone(),
-        read_names,
         supports: info.support_reads,
-        span: end.saturating_sub(start),
+        read_len_sum: info.read_names_set.len(),
+        left: start,
+        right: end,
     })
 }
 
@@ -986,24 +1022,25 @@ fn extend_path_state(
     node: &str,
 ) -> Option<PathState> {
     let info = node_info.get(node)?;
+    let (n_start, n_end) =
+        eval::find_alignment_intervals([node.to_string()].iter().map(|x| x.as_str()).collect())
+            .ok()?;
     let mut path = prev.path.clone();
     path.push(node.to_string());
-    let mut read_names = prev.read_names.clone();
-    read_names.extend(get_read_name_list(node_info, node.to_string()));
-    let sequence = format!("{}{}", prev.sequence, info.seq);
-    let (start, end) =
-        eval::find_alignment_intervals(path.iter().map(|x| x.as_str()).collect()).ok()?;
+    // Support/span accumulate in O(1); the read-set union and sequence are
+    // rebuilt once for the single winning path instead of on every extension.
+    let read_len_sum = prev.read_len_sum + info.read_names_set.len();
     Some(PathState {
-        path: path.clone(),
-        sequence,
-        read_names,
-        supports: get_supports(node_info, &path),
-        span: end.saturating_sub(start),
+        path,
+        supports: read_len_sum,
+        read_len_sum,
+        left: prev.left.min(n_start),
+        right: prev.right.max(n_end),
     })
 }
 
 fn path_state_better(a: &PathState, b: &PathState) -> bool {
-    a.span > b.span || (a.span == b.span && a.supports > b.supports)
+    a.span() > b.span() || (a.span() == b.span() && a.supports > b.supports)
 }
 
 /// Layer-wise DP over the window graph: one best path per haplotype (max span, then supports).
@@ -1111,16 +1148,18 @@ pub fn find_best_haplotype_paths_dp(
         }
 
         if let Some(state) = hap_best {
-            best_by_hap.insert(
-                hap,
-                (
-                    state.path,
-                    state.sequence,
-                    state.read_names,
-                    state.supports,
-                    state.span,
-                ),
-            );
+            let span = state.span();
+            // Materialize the sequence (ordered concat of node seqs) and read-name
+            // union only for the chosen path — identical to the incremental build.
+            let mut sequence = String::new();
+            let mut read_names: HashSet<String> = HashSet::new();
+            for node in state.path.iter() {
+                if let Some(info) = node_info.get(node) {
+                    sequence.push_str(&info.seq);
+                    read_names.extend(info.read_names_set.iter().cloned());
+                }
+            }
+            best_by_hap.insert(hap, (state.path, sequence, read_names, state.supports, span));
         }
     }
 
@@ -1526,7 +1565,7 @@ pub fn start(
 mod path_dp_tests {
     use super::{
         construct_sequences_from_haplotype_path, enumerate_all_paths_with_haplotype,
-        find_best_haplotype_paths_dp, find_full_range_haplotypes, NodeInfo,
+        find_best_haplotype_paths_dp, find_full_range_haplotypes, parse_read_names, NodeInfo,
     };
     use std::collections::{HashMap, HashSet};
 
@@ -1537,6 +1576,7 @@ mod path_dp_tests {
             support_reads: support,
             allele_frequency: "0.5".to_string(),
             read_names: reads.to_string(),
+            read_names_set: parse_read_names(reads),
             methyl_info: HashMap::new(),
         }
     }

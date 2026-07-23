@@ -4,7 +4,7 @@ use crate::methyl;
 use crate::util;
 use anyhow::{Context, Result as AnyhowResult};
 use bio::io::fastq;
-use log::info;
+use log::{info, warn};
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
@@ -240,6 +240,18 @@ pub fn start(
 ) -> AnyhowResult<()> {
     info!("Processing {} windows in parallel", windows.len());
     let bam_path_str = bam_path.as_str();
+
+    // Pileup mode re-fetches the BAM multiple times per window with no prefetch;
+    // for many windows this dominates runtime. Warn so users prefer the prefetch path.
+    const PILEUP_WINDOW_WARN_THRESHOLD: usize = 200;
+    if pileup && windows.len() > PILEUP_WINDOW_WARN_THRESHOLD {
+        warn!(
+            "--pileup enabled for {} windows: each window re-fetches the BAM (no prefetch), \
+             which is slow for large regions. Consider dropping --pileup to use the single-fetch \
+             prefetch path.",
+            windows.len()
+        );
+    }
 
     if pileup {
         let mut indexed_results: Vec<(usize, WindowHapResult)> = windows

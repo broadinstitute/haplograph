@@ -233,35 +233,32 @@ pub fn process_fasta_file(
     sampleid: &String,
 ) -> Vec<fastq::Record> {
     let mut reference_seqs = Vec::new();
-    for record in reference.iter() {
-        let seq_id = record.id().to_string();
-        let sequence = String::from_utf8_lossy(record.seq()).to_string();
-        // Check if this sequence matches the target chromosome
-        if seq_id == chromosome {
-            debug!(
-                "Extracting region {}:{}-{} from chromosome {}",
-                chromosome, start, end, seq_id
+    // Find the matching chromosome once and slice only the requested window
+    // (avoids converting the whole multi-Mb chromosome to a String per call).
+    if let Some(record) = reference.iter().find(|r| r.id() == chromosome) {
+        let sequence = record.seq();
+        debug!(
+            "Extracting region {}:{}-{} from chromosome {}",
+            chromosome, start, end, chromosome
+        );
+        if start < sequence.len() && end <= sequence.len() {
+            let region_seq = &sequence[start..end];
+            let record_id = format!("{}:{}-{}|reference|{}", chromosome, start, end, sampleid);
+
+            let fastq_record = fastq::Record::with_attrs(
+                &record_id,
+                None,
+                region_seq,
+                vec![30; region_seq.len()].as_slice(), // Default quality score
             );
-            // Extract the specified region
-            if start < sequence.len() && end <= sequence.len() {
-                let region_seq = sequence[start..end].to_string();
-                let record_id = format!("{}:{}-{}|reference|{}", chromosome, start, end, sampleid);
 
-                let fastq_record = fastq::Record::with_attrs(
-                    &record_id,
-                    None,
-                    region_seq.as_bytes(),
-                    vec![30; region_seq.len()].as_slice(), // Default quality score
-                );
-
-                reference_seqs.push(fastq_record);
-                debug!("Extracted reference sequence: {} bp", region_seq.len());
-            } else {
-                warn!(
-                    "Region coordinates out of bounds for sequence length {}",
-                    sequence.len()
-                );
-            }
+            reference_seqs.push(fastq_record);
+            debug!("Extracted reference sequence: {} bp", region_seq.len());
+        } else {
+            warn!(
+                "Region coordinates out of bounds for sequence length {}",
+                sequence.len()
+            );
         }
     }
 
