@@ -199,6 +199,10 @@ pub fn open_bam_file(alignment_bam: &String) -> IndexedReader {
     }
     let bam = if alignment_bam.starts_with("gs://") {
         let url = Url::parse(alignment_bam).unwrap();
+        // add fix to htslib issue: https://github.com/rust-bio/rust-htslib/issues/404#issuecomment-1905264507
+        if std::env::var("CURL_CA_BUNDLE").is_err() {
+            std::env::set_var("CURL_CA_BUNDLE", "/etc/ssl/certs/ca-certificates.crt");
+        }
         IndexedReader::from_url(&url).unwrap()
     } else {
         IndexedReader::from_path(alignment_bam).unwrap()
