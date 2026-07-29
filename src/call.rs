@@ -801,23 +801,6 @@ fn matrix_from_var_read_map(
     (matrix, var_list, read_list)
 }
 
-/// Distinct alt-supporting read count per variant key ("chrom.pos.ref.alt.type").
-/// Unions the per-node read sets so reads shared across haplotype paths / nodes
-/// are counted once (correct AD), instead of summing per-path support.
-fn variant_distinct_read_counts(
-    node_info: &HashMap<String, asm::NodeInfo>,
-    reference_seqs: &Vec<fastq::Record>,
-) -> AnyhowResult<HashMap<String, usize>> {
-    let mut var_reads: HashMap<String, HashSet<String>> = HashMap::new();
-    for node in node_info.keys().cloned().collect::<Vec<_>>() {
-        let m = get_variants_from_node(node_info, node, reference_seqs)?;
-        for (key, reads) in m {
-            var_reads.entry(key).or_default().extend(reads);
-        }
-    }
-    Ok(var_reads.into_iter().map(|(k, v)| (k, v.len())).collect())
-}
-
 pub fn start(
     graph_filename: &PathBuf,
     reference_seqs: &Vec<fastq::Record>,
@@ -899,7 +882,6 @@ pub fn start(
         .cloned()
         .collect::<Vec<_>>();
 
-<<<<<<< HEAD
     // Single pass over all nodes: shared source of truth for both the AD map
     // and the somatic variant-read matrix (avoids running get_variants_from_node
     // over every node twice).
@@ -908,11 +890,6 @@ pub fn start(
     // AD = distinct alt-supporting reads (dedup shared reads across haplotype
     // paths and phased/somatic duplicates), so VAF = AD/DP stays in [0, 1].
     let ad_map = ad_map_from_var_read_map(&var_read_map);
-=======
-    // AD = distinct alt-supporting reads (dedup shared reads across haplotype
-    // paths and phased/somatic duplicates), so VAF = AD/DP stays in [0, 1].
-    let ad_map = variant_distinct_read_counts(&node_info, reference_seqs)?;
->>>>>>> d988c0f (Hs haplopan (#13))
     let apply_ad = |v: &Variant| -> Variant {
         let key = format!(
             "{}.{}.{}.{}.{}",
@@ -955,14 +932,6 @@ pub fn start(
                 let var_list_chunk = var_list[start..end].to_vec();
                 util::permutation_test(&chunk, 0.5, 100, var_list_chunk).into_iter()
             })
-<<<<<<< HEAD
-=======
-            .collect();
-        chunks_filtered
-            .into_iter()
-            .collect::<HashSet<_>>()
-            .into_iter()
->>>>>>> d988c0f (Hs haplopan (#13))
             .collect()
     } else {
         util::permutation_test(&matrix, 0.05, 100, var_list.clone())
