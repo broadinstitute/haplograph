@@ -27,7 +27,7 @@ pub fn start(
             .par_iter()
             .map(|window| {
                 let (chromosome, start, end) = window;
-                let mut bam = util::open_bam_file(bam_path);
+                let mut bam = util::open_bam_file(bam_path)?;
                 intervals::start(
                     &mut bam,
                     reference_fa,
@@ -105,7 +105,7 @@ pub fn start(
 
             let mut record = writer.empty_record();
             let reference_seq = reference_sequence[*start..*end].to_string();
-            let mut bam = util::open_bam_file(&bam_path.clone());
+            let mut bam = util::open_bam_file(bam_path)?;
             let (haplotype_info, _, _, _) = intervals::start(
                 &mut bam,
                 reference_fa,

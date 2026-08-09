@@ -11,7 +11,19 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
 /// Default overlap between adjacent maximal-locus windows (matches `main.rs`).
+///
+/// The overlap is the only region where adjacent sub-loci share reads (the
+/// phasing signal). A wider overlap gives more phasing evidence, but the merge
+/// attributes each overlap region to a single chunk's *edge* (see
+/// `stitch_fasta` / `merge_vcf_files`), where assembly is weakest — so widening
+/// it trades recall for phasing. Until overlap variants are recovered as the
+/// union of both chunks, keep the tested 500 bp default.
 pub const DEFAULT_OVERLAP_BP: usize = 500;
+
+/// Minimum shared reads required before a boundary is allowed to *flip* the
+/// phase. Below this, the previous phase is carried forward rather than flipped
+/// on weak/noisy evidence — a major switch-error source on large loci.
+const MIN_PHASE_SUPPORT: usize = 2;
 
 #[derive(Debug, Clone)]
 struct ParsedHaplotype {
@@ -174,7 +186,11 @@ fn hap_overlap_reads(
 ) -> HashSet<String> {
     let mut reads = HashSet::new();
     for node in &hap.path {
-        if node_overlaps_interval(node, overlap_start, overlap_end) {
+        // `get_read_name_list` unwraps, so guard on membership (mirrors
+        // `path_read_names`): a path node missing from this segment's GFA must
+        // not panic and abort the whole (wgs) merge.
+        if node_overlaps_interval(node, overlap_start, overlap_end) && node_info.contains_key(node)
+        {
             reads.extend(asm::get_read_name_list(node_info, node.clone()));
         }
     }
@@ -340,35 +356,51 @@ fn match_haplotypes_at_overlap(
         .collect();
 
     let empty = HashSet::new();
-    let mut best_mapping = (0..number_of_haplotypes).collect::<Vec<_>>();
-    let mut best_score = 0usize;
 
-    let permutations: Vec<Vec<usize>> = if number_of_haplotypes == 1 {
-        vec![vec![0]]
-    } else if number_of_haplotypes == 2 {
-        vec![vec![0, 1], vec![1, 0]]
-    } else {
-        bail!("merge currently supports 1 or 2 haplotypes, got {number_of_haplotypes}");
+    let permutations: Vec<Vec<usize>> = match number_of_haplotypes {
+        1 => vec![vec![0]],
+        2 => vec![vec![0, 1], vec![1, 0]],
+        n => bail!("merge currently supports 1 or 2 haplotypes, got {n}"),
     };
 
-    for perm in permutations {
-        let score: usize = (0..number_of_haplotypes)
-            .map(|global_hap| {
+    let score_of = |perm: &[usize]| -> usize {
+        (0..number_of_haplotypes)
+            .map(|left_local| {
                 left_reads
-                    .get(&global_hap)
+                    .get(&left_local)
                     .unwrap_or(&empty)
-                    .intersection(right_reads.get(&perm[global_hap]).unwrap_or(&empty))
+                    .intersection(right_reads.get(&perm[left_local]).unwrap_or(&empty))
                     .count()
             })
-            .sum();
+            .sum()
+    };
+
+    // Identity is the first permutation and the default. A non-identity mapping is
+    // adopted only when it is *strictly* better supported, so a single spuriously
+    // shared read cannot flip the phase. When no reads are shared (best_score == 0)
+    // the identity map is returned; composed against the running global map by the
+    // caller, this carries the previous phase forward rather than resetting it.
+    let identity = permutations[0].clone();
+    let identity_score = score_of(&identity);
+    let mut best_mapping = identity.clone();
+    let mut best_score = identity_score;
+    for perm in permutations.iter().skip(1) {
+        let score = score_of(perm);
         if score > best_score {
             best_score = score;
-            best_mapping = perm;
+            best_mapping = perm.clone();
         }
     }
 
+    // Only trust a *flip* when it is backed by enough shared reads; otherwise
+    // carry the previous phase forward (identity) rather than switching on noise.
+    if best_mapping != identity && best_score < MIN_PHASE_SUPPORT {
+        best_mapping = identity.clone();
+        best_score = identity_score;
+    }
+
     info!(
-        "Phasing {} -> {} at overlap {}:{}-{} (read-overlap score={})",
+        "Phasing {} -> {} at overlap {}:{}-{} (best read-overlap score={}, flipped={})",
         left.prefix,
         right.prefix,
         left.haplotypes
@@ -378,9 +410,33 @@ fn match_haplotypes_at_overlap(
             .unwrap_or("?"),
         overlap_start,
         overlap_end,
-        best_score
+        best_score,
+        best_mapping != identity
     );
     Ok(best_mapping)
+}
+
+/// Compose an accumulated `global -> left-local` map with a pairwise
+/// `left-local -> right-local` map to yield `global -> right-local`.
+///
+/// `match_haplotypes_at_overlap` returns the pairwise map between two *adjacent*
+/// segments, keyed by the left segment's local indices. Without composing it
+/// through the running global map, a phase flip at one boundary is silently
+/// dropped for every downstream segment — the dominant switch-error source on
+/// large loci. An out-of-range pairwise entry falls back to identity.
+fn compose_phase_mapping(
+    prev_global_to_local: &[usize],
+    pairwise_left_to_right: &[usize],
+) -> Vec<usize> {
+    prev_global_to_local
+        .iter()
+        .map(|&left_local| {
+            pairwise_left_to_right
+                .get(left_local)
+                .copied()
+                .unwrap_or(left_local)
+        })
+        .collect()
 }
 
 fn ref_coord_to_asm_offset(hap: &ParsedHaplotype, ref_pos: usize) -> usize {
@@ -451,7 +507,14 @@ fn build_global_to_local_maps(
                 (0..number_of_haplotypes).collect()
             }
         };
-        global_to_local.push(mapping);
+        // `mapping` is pairwise (segment[idx-1]-local -> segment[idx]-local).
+        // Compose it through the running global map so phase flips accumulate
+        // instead of being reset at every boundary.
+        let prev = global_to_local
+            .last()
+            .expect("global_to_local seeded with the identity map")
+            .clone();
+        global_to_local.push(compose_phase_mapping(&prev, &mapping));
     }
     Ok(global_to_local)
 }
@@ -530,20 +593,24 @@ fn stitch_fasta(
                 append_reference_gap(&mut buffer, full_ref, prev_end, chunk.ref_start);
             }
 
-            let overlap_start = chunk.ref_start;
             let overlap_end = prev_end.min(chunk.ref_end);
 
-            // Offset within the accumulated buffer for `overlap_start` (mirrors
-            // ref_coord_to_asm_offset with sequence == buffer).
-            let trim_left = if overlap_start <= tracked_ref_start {
+            // Cut both sides at the SAME reference coordinate (`overlap_end`) so the
+            // overlap is emitted exactly once — the left chunk keeps it, the right
+            // chunk starts just after. Using different coordinates for the two sides
+            // (overlap_start for the left, overlap_end for the right) silently
+            // deleted the whole overlap region, dropping variants → low recall.
+            // `overlap_end` matches the VCF/methyl dedup cut at `prev.ref_end`.
+            let cut = overlap_end;
+            let trim_left = if cut <= tracked_ref_start {
                 0
-            } else if overlap_start >= tracked_ref_end {
+            } else if cut >= tracked_ref_end {
                 buffer.len()
             } else {
                 let ref_span = tracked_ref_end.saturating_sub(tracked_ref_start).max(1);
-                ((overlap_start - tracked_ref_start) * buffer.len()) / ref_span
+                ((cut - tracked_ref_start) * buffer.len()) / ref_span
             };
-            let skip_right = ref_coord_to_asm_offset(&hap, overlap_end);
+            let skip_right = ref_coord_to_asm_offset(&hap, cut);
 
             buffer.truncate(trim_left.min(buffer.len()));
             let right_bytes = hap.sequence.as_bytes();
@@ -957,6 +1024,49 @@ mod tests {
     }
 
     #[test]
+    fn stitch_fasta_preserves_overlap_region() {
+        // Two assembled chunks that overlap by 50 bp. The stitched haplotype must
+        // span the full locus with no deleted bases; the old code dropped the
+        // overlap (length would be 350 instead of 400).
+        let full_ref = "N".repeat(600);
+        let seg = |prefix: &str, start: usize, end: usize, base: &str| {
+            let len = end - start;
+            MergeChunk {
+                chrom: "chr1".to_string(),
+                ref_start: start,
+                ref_end: end,
+                segment: Some(Segment {
+                    index: 0,
+                    prefix: prefix.to_string(),
+                    ref_start: start,
+                    ref_end: end,
+                    haplotypes: HashMap::from([(
+                        0,
+                        ParsedHaplotype {
+                            hap_index: 0,
+                            chromosome: "chr1".to_string(),
+                            ref_start: start,
+                            ref_end: end,
+                            sequence: base.repeat(len),
+                            path: Vec::new(),
+                            read_names: HashSet::new(),
+                        },
+                    )]),
+                }),
+            }
+        };
+        let merge_chunks = vec![seg("s0", 100, 300, "G"), seg("s1", 250, 500, "C")];
+        let global_to_local = vec![vec![0], vec![0]];
+        let stitched =
+            stitch_fasta(&merge_chunks, &global_to_local, 1, &full_ref, 100, 500).unwrap();
+        let seq = stitched.values().next().unwrap();
+        assert_eq!(seq.len(), 400, "full [100,500) span must be preserved");
+        // Left owns the overlap up to overlap_end (300): 200 G's then 200 C's.
+        assert_eq!(seq.matches('G').count(), 200);
+        assert_eq!(seq.matches('C').count(), 200);
+    }
+
+    #[test]
     fn stitch_fasta_uses_reference_for_missing_chunk() {
         let full_ref = "A".repeat(1000);
         let merge_chunks = vec![
@@ -998,6 +1108,100 @@ mod tests {
         assert_eq!(seq.len(), 600);
         assert!(seq.starts_with('G'));
         assert!(seq.ends_with('A'));
+    }
+
+    #[test]
+    fn compose_phase_mapping_carries_flip_forward() {
+        // Chain of three segments. Boundary 0->1 flips; boundary 1->2 keeps
+        // local order. Global haplotype 0 must track the *same* physical
+        // haplotype across all three segments.
+        let g0 = vec![0, 1]; // segment 0 seeds the global order (identity)
+        let pair_0_1 = vec![1, 0]; // flip
+        let pair_1_2 = vec![0, 1]; // local identity
+
+        let g1 = compose_phase_mapping(&g0, &pair_0_1);
+        assert_eq!(g1, vec![1, 0], "flip at first boundary must be recorded");
+
+        let g2 = compose_phase_mapping(&g1, &pair_1_2);
+        // Global 0 -> seg1-local 1 -> seg2-local 1 (the flip must persist).
+        // The pre-fix code stored pair_1_2 verbatim ([0,1]) here — a switch error.
+        assert_eq!(g2, vec![1, 0], "flip must persist downstream, not reset");
+    }
+
+    #[test]
+    fn match_haplotypes_does_not_flip_on_weak_evidence() {
+        // A single shared read supports a flip but is below MIN_PHASE_SUPPORT,
+        // so the boundary must stay identity (carry phase forward) not flip.
+        let make_seg = |prefix: &str, node0: &str, node1: &str, r0: &str, r1: &str| Segment {
+            index: 0,
+            prefix: prefix.to_string(),
+            ref_start: 1000,
+            ref_end: 2000,
+            haplotypes: HashMap::from([
+                (
+                    0,
+                    ParsedHaplotype {
+                        hap_index: 0,
+                        chromosome: "chr1".to_string(),
+                        ref_start: 1000,
+                        ref_end: 2000,
+                        sequence: String::new(),
+                        path: vec![node0.to_string()],
+                        read_names: asm::parse_read_names(r0),
+                    },
+                ),
+                (
+                    1,
+                    ParsedHaplotype {
+                        hap_index: 1,
+                        chromosome: "chr1".to_string(),
+                        ref_start: 1000,
+                        ref_end: 2000,
+                        sequence: String::new(),
+                        path: vec![node1.to_string()],
+                        read_names: asm::parse_read_names(r1),
+                    },
+                ),
+            ]),
+        };
+        let node_info = |node: &str, reads: &str| {
+            (
+                node.to_string(),
+                asm::NodeInfo {
+                    seq: String::new(),
+                    cigar: String::new(),
+                    support_reads: 1,
+                    allele_frequency: "0.5".to_string(),
+                    read_names: reads.to_string(),
+                    read_names_set: asm::parse_read_names(reads),
+                    methyl_info: HashMap::new(),
+                },
+            )
+        };
+
+        // Only one read (r1) is shared, and it points toward a flip.
+        let left = make_seg("left", "H.chr1:1500-1600.0", "H.chr1:1500-1600.1", "r1", "r3");
+        let right = make_seg("right", "H.chr1:1500-1600.0", "H.chr1:1500-1600.1", "r9", "r1");
+        let left_gfa = HashMap::from([
+            node_info("H.chr1:1500-1600.0", "r1"),
+            node_info("H.chr1:1500-1600.1", "r3"),
+        ]);
+        let right_gfa = HashMap::from([
+            node_info("H.chr1:1500-1600.0", "r9"),
+            node_info("H.chr1:1500-1600.1", "r1"),
+        ]);
+
+        let mapping = match_haplotypes_at_overlap(&left, &right, &left_gfa, &right_gfa, 2).unwrap();
+        assert_eq!(mapping, vec![0, 1], "one shared read must not flip the phase");
+    }
+
+    #[test]
+    fn compose_phase_mapping_identity_boundary_preserves_global() {
+        // An unphased (identity) boundary must carry the accumulated phase
+        // forward rather than resetting to raw local order.
+        let g_prev = vec![1, 0];
+        let unphased = vec![0, 1];
+        assert_eq!(compose_phase_mapping(&g_prev, &unphased), vec![1, 0]);
     }
 
     #[test]

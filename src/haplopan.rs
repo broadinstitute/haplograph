@@ -121,7 +121,7 @@ pub fn count_kmer_from_read(
     let (chromosome, start, end) = util::split_locus(locus.to_string());
 
     if read_path.display().to_string().ends_with(".bam") {
-        let mut bam = util::open_bam_file(&read_path.display().to_string());
+        let mut bam = util::open_bam_file(&read_path.display().to_string())?;
         let mut read_set = HashSet::new();
         let header = bam.header().to_owned();
         let tid = header

@@ -1,4 +1,4 @@
-use anyhow::{Context, Result as AnyhowResult};
+use anyhow::{bail, Context, Result as AnyhowResult};
 use bio::alignment::pairwise::*;
 use bio::alignment::AlignmentOperation;
 use bio::io::fasta::Reader as FastaReader;
@@ -7,6 +7,7 @@ use flate2::read::GzDecoder;
 use indicatif::ProgressBar;
 use log::debug;
 use log::info;
+use log::warn;
 use ndarray::s;
 use ndarray::{Array1, Array2};
 use rand::rngs::SmallRng;
@@ -78,25 +79,28 @@ pub fn gcs_gcloud_is_installed() -> bool {
         .is_ok()
 }
 
-pub fn gcs_authorize_data_access() {
+pub fn gcs_authorize_data_access() -> AnyhowResult<()> {
     // Check if gcloud is installed on the PATH
     if !gcs_gcloud_is_installed() {
-        panic!("gcloud is not installed on the PATH");
+        bail!("gcloud is not installed on the PATH (needed to authorize gs:// access)");
     }
 
     // Execute the command and capture the output
     let output = std::process::Command::new("gcloud")
         .args(["auth", "application-default", "print-access-token"])
         .output()
-        .expect("Failed to execute command");
+        .context("failed to execute `gcloud auth application-default print-access-token`")?;
 
     if !output.status.success() {
-        panic!("{}", String::from_utf8_lossy(&output.stderr));
+        bail!(
+            "gcloud auth failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
     }
 
     // Decode the output and remove trailing newline
     let token = String::from_utf8(output.stdout)
-        .expect("Failed to decode output")
+        .context("gcloud returned a non-UTF8 access token")?
         .trim_end()
         .to_string();
 
@@ -104,6 +108,7 @@ pub fn gcs_authorize_data_access() {
     unsafe {
         std::env::set_var("GCS_OAUTH_TOKEN", token);
     }
+    Ok(())
 }
 
 // Function to get a mapping between read group and sample name from a BAM header.
@@ -186,31 +191,119 @@ where
             .map(|(path, _)| path != bam_path)
             .unwrap_or(true);
         if need_open {
-            *slot = Some((bam_path.to_string(), open_bam_file(&bam_path.to_string())));
+            // A failed open is fatal for every caller (they all need the BAM), so
+            // surface the full actionable error chain instead of an opaque
+            // `unwrap()` panic. Transient/auth failures are already retried inside
+            // `open_bam_file`, so reaching here means the BAM is genuinely unusable.
+            let reader = open_bam_file(bam_path).unwrap_or_else(|err| panic!("{err:#}"));
+            *slot = Some((bam_path.to_string(), reader));
         }
         f(&mut slot.as_mut().unwrap().1)
     })
 }
 
-pub fn open_bam_file(alignment_bam: &String) -> IndexedReader {
-    // Open BAM file
-    if alignment_bam.starts_with("gs://") && std::env::var("GCS_OAUTH_TOKEN").is_err() {
-        gcs_authorize_data_access();
-    }
-    let bam = if alignment_bam.starts_with("gs://") {
-        let url = Url::parse(alignment_bam).unwrap();
-        // add fix to htslib issue: https://github.com/rust-bio/rust-htslib/issues/404#issuecomment-1905264507
-        if std::env::var("CURL_CA_BUNDLE").is_err() {
-            std::env::set_var("CURL_CA_BUNDLE", "/etc/ssl/certs/ca-certificates.crt");
-        }
-        IndexedReader::from_url(&url).unwrap()
+/// How many times to attempt opening a *remote* BAM before giving up. Remote
+/// opens fail transiently under high concurrency and when a GCS token expires
+/// mid-run; retrying (with a re-auth) recovers both without aborting the run.
+const REMOTE_BAM_OPEN_ATTEMPTS: usize = 3;
+
+pub fn open_bam_file(alignment_bam: &str) -> AnyhowResult<IndexedReader> {
+    if is_remote_bam(alignment_bam) {
+        open_remote_bam(alignment_bam)
     } else {
-        IndexedReader::from_path(alignment_bam).unwrap()
-    };
+        let reader = IndexedReader::from_path(alignment_bam).with_context(|| {
+            format!(
+                "Failed to open local BAM '{alignment_bam}' \
+                 (is it indexed? expected '{alignment_bam}.bai')"
+            )
+        })?;
+        debug!("Successfully opened BAM file");
+        Ok(reader)
+    }
+}
 
-    debug!("Successfully opened BAM file");
+/// Point `CURL_CA_BUNDLE` at a CA bundle that actually exists on this system, so
+/// htslib/libcurl can do TLS. Only set it when unset AND a real bundle is found:
+/// pointing the variable at a missing path (e.g. the Debian bundle on macOS)
+/// breaks not just libcurl but every child process that reads it — including the
+/// `gcloud` we shell out to for GCS auth.
+fn ensure_curl_ca_bundle() {
+    if std::env::var_os("CURL_CA_BUNDLE").is_some() {
+        return;
+    }
+    // Ordered by prevalence; the first existing path wins.
+    const CANDIDATES: &[&str] = &[
+        "/etc/ssl/certs/ca-certificates.crt",   // Debian / Ubuntu
+        "/etc/pki/tls/certs/ca-bundle.crt",     // RHEL / CentOS / Fedora
+        "/etc/ssl/ca-bundle.pem",               // openSUSE
+        "/etc/ssl/cert.pem",                    // macOS / Alpine
+        "/opt/homebrew/etc/openssl@3/cert.pem", // macOS Homebrew (Apple silicon)
+        "/usr/local/etc/openssl@3/cert.pem",    // macOS Homebrew (Intel)
+    ];
+    match CANDIDATES.iter().find(|p| Path::new(p).exists()) {
+        Some(path) => {
+            unsafe {
+                std::env::set_var("CURL_CA_BUNDLE", path);
+            }
+            debug!("Set CURL_CA_BUNDLE to {path}");
+        }
+        None => {
+            warn!(
+                "No CA certificate bundle found in standard locations; leaving CURL_CA_BUNDLE \
+                 unset. If remote BAM opens fail with a TLS error, set CURL_CA_BUNDLE (and/or \
+                 SSL_CERT_FILE) to your system's CA bundle."
+            );
+        }
+    }
+}
 
-    bam
+fn open_remote_bam(alignment_bam: &str) -> AnyhowResult<IndexedReader> {
+    // GCS needs an OAuth token; fetch one up front if we don't already have it.
+    if alignment_bam.starts_with("gs://") && std::env::var("GCS_OAUTH_TOKEN").is_err() {
+        gcs_authorize_data_access()
+            .context("failed to obtain a GCS access token before opening the remote BAM")?;
+    }
+    // htslib/libcurl needs a CA bundle for TLS
+    // (https://github.com/rust-bio/rust-htslib/issues/404#issuecomment-1905264507).
+    ensure_curl_ca_bundle();
+    let url =
+        Url::parse(alignment_bam).with_context(|| format!("Invalid BAM URL '{alignment_bam}'"))?;
+
+    let mut last_err = None;
+    for attempt in 1..=REMOTE_BAM_OPEN_ATTEMPTS {
+        match IndexedReader::from_url(&url) {
+            Ok(reader) => {
+                debug!("Successfully opened remote BAM file (attempt {attempt})");
+                return Ok(reader);
+            }
+            Err(err) => {
+                warn!(
+                    "Opening remote BAM '{alignment_bam}' failed \
+                     (attempt {attempt}/{REMOTE_BAM_OPEN_ATTEMPTS}): {err:?}"
+                );
+                // A common cause under long/parallel runs is an expired GCS token;
+                // refresh it before the next attempt.
+                if alignment_bam.starts_with("gs://") {
+                    if let Err(auth_err) = gcs_authorize_data_access() {
+                        warn!("GCS re-authorization failed: {auth_err:#}");
+                    }
+                }
+                last_err = Some(err);
+                if attempt < REMOTE_BAM_OPEN_ATTEMPTS {
+                    std::thread::sleep(std::time::Duration::from_millis(300 * attempt as u64));
+                }
+            }
+        }
+    }
+
+    Err(last_err.expect("loop ran at least once")).with_context(|| {
+        format!(
+            "Failed to open remote BAM '{alignment_bam}' after {REMOTE_BAM_OPEN_ATTEMPTS} attempts. \
+             Check that (1) the index '{alignment_bam}.bai' exists and is readable, \
+             (2) GCS credentials are valid (`gcloud auth application-default login`), and \
+             (3) htslib was built with libcurl/GCS support."
+        )
+    })
 }
 
 /// Mean read depth over `[start, end)` on `chromosome`, counting uncovered positions as zero.

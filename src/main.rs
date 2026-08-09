@@ -96,7 +96,7 @@ enum DevToolsCommands {
         #[arg(short, long, default_value_t = 2)]
         number_of_haplotypes: usize,
 
-        /// Overlap between adjacent sub-loci in bp (must match the haplograph run; default 500)
+        /// Overlap between adjacent sub-loci in bp (must match the haplograph run)
         #[arg(long, default_value_t = merge::DEFAULT_OVERLAP_BP)]
         overlap_bp: usize,
 
@@ -1074,7 +1074,7 @@ fn main() -> Result<()> {
                 })
                 .init();
             let (chromosome, start, end) = util::split_locus(locus.clone());
-            let mut bam = util::open_bam_file(&bamfile);
+            let mut bam = util::open_bam_file(&bamfile)?;
             extract::start(
                 &mut bam,
                 &chromosome,
@@ -1286,19 +1286,26 @@ fn main() -> Result<()> {
                 warn!("{failed}/{} chunks failed (see logs above)", jobs.len());
             }
 
-            // Stitch each region (in parallel across regions).
+            // Stitch each region (in parallel across regions). A merge panic in
+            // one region must not abort the whole genome, mirroring the
+            // chunk-level containment above.
             regions.par_iter().for_each(|region| {
                 let locus_str = format!("{}:{}-{}", region.chrom, region.start, region.end);
-                if let Err(err) = merge::start(
-                    &region.prefix,
-                    &locus_str,
-                    number_of_haplotypes,
-                    &sampleid,
-                    &reference_fa,
-                    region.size,
-                    overlap_bp,
-                ) {
-                    warn!("Merge failed for region {locus_str}: {err}");
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    merge::start(
+                        &region.prefix,
+                        &locus_str,
+                        number_of_haplotypes,
+                        &sampleid,
+                        &reference_fa,
+                        region.size,
+                        overlap_bp,
+                    )
+                }));
+                match outcome {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => warn!("Merge failed for region {locus_str}: {err}"),
+                    Err(_) => warn!("Merge panicked for region {locus_str}; skipping"),
                 }
             });
 
