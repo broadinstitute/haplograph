@@ -308,6 +308,32 @@ fn open_remote_bam(alignment_bam: &str) -> AnyhowResult<IndexedReader> {
 
 /// Mean read depth over `[start, end)` on `chromosome`, counting uncovered positions as zero.
 /// Large intervals use position sampling every [`MEAN_DEPTH_SAMPLE_STEP`] bp.
+/// Attempts for a transient remote BAM read (fetch/pileup) under high concurrency.
+pub const REMOTE_READ_ATTEMPTS: usize = 3;
+
+/// Retry a BAM read operation that can fail transiently when many sub-loci hit a
+/// remote (gs://, s3://, http) BAM at once. Local reads almost never fail, so the
+/// happy path is a single attempt.
+pub fn with_read_retry<T, F>(what: &str, mut op: F) -> AnyhowResult<T>
+where
+    F: FnMut() -> AnyhowResult<T>,
+{
+    let mut last: Option<anyhow::Error> = None;
+    for attempt in 1..=REMOTE_READ_ATTEMPTS {
+        match op() {
+            Ok(value) => return Ok(value),
+            Err(err) => {
+                warn!("{what} failed (attempt {attempt}/{REMOTE_READ_ATTEMPTS}): {err:#}");
+                last = Some(err);
+                if attempt < REMOTE_READ_ATTEMPTS {
+                    std::thread::sleep(std::time::Duration::from_millis(250 * attempt as u64));
+                }
+            }
+        }
+    }
+    Err(last.expect("retry loop ran at least once"))
+}
+
 pub fn mean_depth(
     bam: &mut IndexedReader,
     chromosome: &str,
@@ -321,9 +347,10 @@ pub fn mean_depth(
     if bam.header().tid(chromosome.as_bytes()).is_none() {
         anyhow::bail!("Chromosome {chromosome} not found in BAM header");
     }
-    bam.fetch((chromosome.as_bytes(), start as u64, end as u64))?;
+    let mean = with_read_retry("mean_depth remote fetch", || {
+        bam.fetch((chromosome.as_bytes(), start as u64, end as u64))?;
 
-    let mean = if region_len <= MEAN_DEPTH_SAMPLE_STEP * 2 {
+        let mean = if region_len <= MEAN_DEPTH_SAMPLE_STEP * 2 {
         let mut depth_at = vec![0u32; region_len];
         for pileup_result in bam.pileup() {
             let pileup = pileup_result?;
@@ -348,7 +375,9 @@ pub fn mean_depth(
             }
         }
         depth_samples.iter().map(|d| *d as u64).sum::<u64>() as f64 / sample_count as f64
-    };
+        };
+        Ok(mean)
+    })?;
 
     info!(
         "Mean depth for {}:{}-{} = {:.2}x",

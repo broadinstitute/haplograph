@@ -260,20 +260,22 @@ pub fn start(
             .map(
                 |(index, window)| -> AnyhowResult<(usize, WindowHapResult)> {
                     let (chromosome, start, end) = window;
-                    let result = util::with_thread_local_bam(bam_path_str, |bam| {
-                        intervals::start(
-                            bam,
-                            reference_fa,
-                            chromosome,
-                            *start,
-                            *end,
-                            sampleid,
-                            min_reads,
-                            frequency_min,
-                            primary_only,
-                            true,
-                            false,
-                        )
+                    let result = util::with_read_retry("window pileup", || {
+                        util::with_thread_local_bam(bam_path_str, |bam| {
+                            intervals::start(
+                                bam,
+                                reference_fa,
+                                chromosome,
+                                *start,
+                                *end,
+                                sampleid,
+                                min_reads,
+                                frequency_min,
+                                primary_only,
+                                true,
+                                false,
+                            )
+                        })
                     })
                     .with_context(|| {
                         format!("Failed to process window {}:{}-{}", chromosome, start, end)
@@ -296,8 +298,10 @@ pub fn start(
         );
     }
 
-    let prefetch = Arc::new(util::with_thread_local_bam(bam_path_str, |bam| {
-        extract::build_locus_prefetch(bam, windows, sampleid, primary_only)
+    let prefetch = Arc::new(util::with_read_retry("locus prefetch", || {
+        util::with_thread_local_bam(bam_path_str, |bam| {
+            extract::build_locus_prefetch(bam, windows, sampleid, primary_only)
+        })
     })?);
 
     let mut indexed_results: Vec<(usize, WindowHapResult)> = windows

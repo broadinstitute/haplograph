@@ -10,16 +10,6 @@ use std::io::{BufRead, BufReader, Write};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
-/// Default overlap between adjacent maximal-locus windows (matches `main.rs`).
-///
-/// The overlap is the only region where adjacent sub-loci share reads (the
-/// phasing signal). A wider overlap gives more phasing evidence, but the merge
-/// attributes each overlap region to a single chunk's *edge* (see
-/// `stitch_fasta` / `merge_vcf_files`), where assembly is weakest — so widening
-/// it trades recall for phasing. Until overlap variants are recovered as the
-/// union of both chunks, keep the tested 500 bp default.
-pub const DEFAULT_OVERLAP_BP: usize = 500;
-
 /// Minimum shared reads required before a boundary is allowed to *flip* the
 /// phase. Below this, the previous phase is carried forward rather than flipped
 /// on weak/noisy evidence — a major switch-error source on large loci.
@@ -72,30 +62,25 @@ pub fn plan_locus_chunks(
     locus_start: usize,
     locus_end: usize,
     maximal_locus_size: usize,
-    overlap_bp: usize,
 ) -> AnyhowResult<Vec<(String, usize, usize)>> {
     let locus_len = locus_end.saturating_sub(locus_start);
     if locus_len == 0 {
         bail!("Empty locus interval");
     }
+    if maximal_locus_size == 0 {
+        bail!("maximal_locus_size must be greater than 0");
+    }
     if locus_len <= maximal_locus_size {
         return Ok(vec![(chromosome.to_string(), locus_start, locus_end)]);
     }
-    if maximal_locus_size <= overlap_bp {
-        bail!(
-            "maximal_locus_size ({maximal_locus_size}) must be greater than overlap ({overlap_bp} bp)"
-        );
-    }
-    let step = maximal_locus_size - overlap_bp;
+    // Sub-loci abut (no overlap); cross-sub-locus phasing uses reads shared by
+    // name between adjacent sub-loci, not a shared reference interval.
     let mut chunks = Vec::new();
     let mut start_pos = locus_start;
     while start_pos < locus_end {
         let end_pos = (start_pos + maximal_locus_size).min(locus_end);
         chunks.push((chromosome.to_string(), start_pos, end_pos));
-        if end_pos >= locus_end {
-            break;
-        }
-        start_pos += step;
+        start_pos = end_pos;
     }
     Ok(chunks)
 }
@@ -178,23 +163,46 @@ fn node_overlaps_interval(node_id: &str, overlap_start: usize, overlap_end: usiz
     node_start < overlap_end && node_end > overlap_start
 }
 
-fn hap_overlap_reads(
-    hap: &ParsedHaplotype,
+/// The read→haplotype partition the sub-locus assembly produced: for each
+/// haplotype, the reads on nodes UNIQUE to its path (heterozygous, allele-specific).
+///
+/// A homozygous window is a single node shared by every haplotype path, and its
+/// read set contains all reads crossing it — counting reads over *all* path nodes
+/// would make every haplotype's set nearly identical, so phasing could not tell
+/// identity from flip. Only unique (het) nodes carry phasing signal, so restrict
+/// to those. Uses the entire sub-locus, so every read the assembly phased is
+/// included (no edge window / reach needed).
+fn discriminative_hap_reads(
+    haplotypes: &HashMap<usize, ParsedHaplotype>,
     node_info: &HashMap<String, asm::NodeInfo>,
-    overlap_start: usize,
-    overlap_end: usize,
-) -> HashSet<String> {
-    let mut reads = HashSet::new();
-    for node in &hap.path {
-        // `get_read_name_list` unwraps, so guard on membership (mirrors
-        // `path_read_names`): a path node missing from this segment's GFA must
-        // not panic and abort the whole (wgs) merge.
-        if node_overlaps_interval(node, overlap_start, overlap_end) && node_info.contains_key(node)
-        {
-            reads.extend(asm::get_read_name_list(node_info, node.clone()));
+) -> HashMap<usize, HashSet<String>> {
+    // Nodes each haplotype traverses across the whole sub-locus.
+    let per_hap_nodes: HashMap<usize, HashSet<String>> = haplotypes
+        .iter()
+        .map(|(hap, parsed)| (*hap, parsed.path.iter().cloned().collect::<HashSet<String>>()))
+        .collect();
+
+    let mut out = HashMap::new();
+    for (hap, nodes) in &per_hap_nodes {
+        let mut reads = HashSet::new();
+        for node in nodes {
+            // Skip nodes also traversed by another haplotype (homozygous/shared) —
+            // they carry both haplotypes' reads and cannot phase.
+            let shared = per_hap_nodes
+                .iter()
+                .any(|(other, other_nodes)| other != hap && other_nodes.contains(node));
+            if shared {
+                continue;
+            }
+            // `get_read_name_list` unwraps, so guard on membership: a path node
+            // missing from this segment's GFA must not panic the (wgs) merge.
+            if node_info.contains_key(node) {
+                reads.extend(asm::get_read_name_list(node_info, node.clone()));
+            }
         }
+        out.insert(*hap, reads);
     }
-    reads
+    out
 }
 
 fn load_chromosome_reference(reference_fa: &str, chromosome: &str) -> AnyhowResult<String> {
@@ -283,8 +291,15 @@ fn load_segment(prefix: &str, index: usize) -> AnyhowResult<Segment> {
 
     for record in reader.records() {
         let record = record.with_context(|| format!("Failed to read FASTA from {fasta_path:?}"))?;
-        let header = record.id();
-        let (chromosome, start, end, hap_index, path) = parse_fasta_header(header)?;
+        // The assembler writes a TAB-separated header `{coord}.{hap}\tSupports:N\t{path}`,
+        // but `record.id()` returns only the first whitespace-delimited token (the coord),
+        // dropping the path. Reconstruct the full header from id + desc so the node path is
+        // recovered — without it `hap.path` is empty and boundary phasing sees no reads.
+        let header = match record.desc() {
+            Some(desc) => format!("{}\t{}", record.id(), desc),
+            None => record.id().to_string(),
+        };
+        let (chromosome, start, end, hap_index, path) = parse_fasta_header(&header)?;
         ref_start = ref_start.min(start);
         ref_end = ref_end.max(end);
         let read_names = path_read_names(&node_info, &path);
@@ -315,45 +330,24 @@ fn load_segment(prefix: &str, index: usize) -> AnyhowResult<Segment> {
     })
 }
 
-/// Map global haplotype indices (from segment 0) to local hap indices in `right`.
-/// Uses read overlap in the shared reference interval between adjacent segments.
-fn match_haplotypes_at_overlap(
+/// Map global haplotype indices (from segment 0) to local hap indices in `right`
+/// by linking the two sub-loci's read→haplotype partitions.
+///
+/// Each sub-locus's assembly already phases its reads into two sets over all of
+/// its hets. A read crossing the junction appears in both sub-loci under the same
+/// name, phased independently on each side, so intersecting the per-haplotype
+/// read sets reveals which `left` local hap corresponds to which `right` local
+/// hap. No reference overlap and no edge window are needed — non-crossing reads
+/// are simply absent from the other sub-locus and contribute nothing.
+fn match_haplotypes_by_shared_reads(
     left: &Segment,
     right: &Segment,
     left_gfa: &HashMap<String, asm::NodeInfo>,
     right_gfa: &HashMap<String, asm::NodeInfo>,
     number_of_haplotypes: usize,
 ) -> AnyhowResult<Vec<usize>> {
-    let overlap_start = right.ref_start;
-    let overlap_end = left.ref_end.min(right.ref_end);
-    if overlap_start >= overlap_end {
-        warn!(
-            "Segments {} and {} do not share reference overlap; using identity phasing",
-            left.prefix, right.prefix
-        );
-        return Ok((0..number_of_haplotypes).collect());
-    }
-
-    let left_reads: HashMap<usize, HashSet<String>> = left
-        .haplotypes
-        .iter()
-        .map(|(hap, parsed)| {
-            (
-                *hap,
-                hap_overlap_reads(parsed, left_gfa, overlap_start, overlap_end),
-            )
-        })
-        .collect();
-    let right_reads: HashMap<usize, HashSet<String>> = right
-        .haplotypes
-        .iter()
-        .map(|(hap, parsed)| {
-            (
-                *hap,
-                hap_overlap_reads(parsed, right_gfa, overlap_start, overlap_end),
-            )
-        })
-        .collect();
+    let left_reads = discriminative_hap_reads(&left.haplotypes, left_gfa);
+    let right_reads = discriminative_hap_reads(&right.haplotypes, right_gfa);
 
     let empty = HashSet::new();
 
@@ -400,7 +394,7 @@ fn match_haplotypes_at_overlap(
     }
 
     info!(
-        "Phasing {} -> {} at overlap {}:{}-{} (best read-overlap score={}, flipped={})",
+        "Phasing {} -> {} at boundary {}:{} (shared-read score={}, flipped={})",
         left.prefix,
         right.prefix,
         left.haplotypes
@@ -408,8 +402,7 @@ fn match_haplotypes_at_overlap(
             .next()
             .map(|h| h.chromosome.as_str())
             .unwrap_or("?"),
-        overlap_start,
-        overlap_end,
+        left.ref_end,
         best_score,
         best_mapping != identity
     );
@@ -419,7 +412,7 @@ fn match_haplotypes_at_overlap(
 /// Compose an accumulated `global -> left-local` map with a pairwise
 /// `left-local -> right-local` map to yield `global -> right-local`.
 ///
-/// `match_haplotypes_at_overlap` returns the pairwise map between two *adjacent*
+/// `match_haplotypes_by_shared_reads` returns the pairwise map between two *adjacent*
 /// segments, keyed by the left segment's local indices. Without composing it
 /// through the running global map, a phase flip at one boundary is silently
 /// dropped for every downstream segment — the dominant switch-error source on
@@ -488,7 +481,7 @@ fn build_global_to_local_maps(
                         _ => asm::load_graph(&left_gfa_path)?.0,
                     };
                     let right_gfa = asm::load_graph(&right_gfa_path)?.0;
-                    let mapping = match_haplotypes_at_overlap(
+                    let mapping = match_haplotypes_by_shared_reads(
                         left_seg,
                         right_seg,
                         &left_gfa,
@@ -761,7 +754,7 @@ fn merge_vcf_files(
     sample_id: &str,
     output_prefix: &str,
     vcf_kind: &str,
-) -> AnyhowResult<()> {
+) -> AnyhowResult<Vec<usize>> {
     let template_prefix = merge_chunks
         .iter()
         .find_map(|chunk| chunk.segment.as_ref().map(|segment| segment.prefix.clone()))
@@ -769,8 +762,18 @@ fn merge_vcf_files(
     let template_path = format!("{template_prefix}.{vcf_kind}.vcf.gz");
     let template_reader = bcf::Reader::from_path(&template_path)
         .with_context(|| format!("Failed to open template VCF {template_path}"))?;
+    // `from_template` already copies the template's sample column (the per-segment
+    // VCFs carry `sample_id`), so only add the sample if it isn't there yet —
+    // otherwise htslib rejects the duplicate ("Duplicated sample name").
+    let template_has_sample = template_reader
+        .header()
+        .samples()
+        .iter()
+        .any(|s| *s == sample_id.as_bytes());
     let mut header = bcf::Header::from_template(template_reader.header());
-    header.push_sample(sample_id.as_bytes());
+    if !template_has_sample {
+        header.push_sample(sample_id.as_bytes());
+    }
 
     let output_path = format!("{output_prefix}.{vcf_kind}.vcf.gz");
     let mut writer = bcf::Writer::from_path(&output_path, &header, false, bcf::Format::Vcf)
@@ -778,6 +781,8 @@ fn merge_vcf_files(
 
     let mut seen_positions: HashSet<(String, i64, String)> = HashSet::new();
     let mut prev_assembly_end: Option<usize> = None;
+    // Records emitted per planned sub-locus (0 = contributed nothing to the merge).
+    let mut emitted_per_chunk = vec![0usize; merge_chunks.len()];
 
     for (chunk_idx, chunk) in merge_chunks.iter().enumerate() {
         let segment = match &chunk.segment {
@@ -829,12 +834,53 @@ fn merge_vcf_files(
                 swap_genotype_haplotypes(&mut record, number_of_haplotypes);
             }
             writer.write(&record)?;
+            emitted_per_chunk[chunk_idx] += 1;
         }
         prev_assembly_end = Some(chunk.ref_end);
     }
 
     info!("Wrote merged {vcf_kind} VCF: {output_path}");
-    Ok(())
+    Ok(emitted_per_chunk)
+}
+
+/// Emit a prominent summary of which planned sub-loci contributed variants.
+///
+/// Whole sub-loci can silently drop out of the merged output — skipped for low
+/// depth, caught-and-skipped after an assembly failure, or assembled but calling
+/// nothing. Each dropout removes every variant in a ~sub-locus-sized window and
+/// caps recall, yet only surfaces as scattered `warn!`s. This turns that into one
+/// actionable report so a recall cliff is obvious.
+fn report_merge_completeness(merge_chunks: &[MergeChunk], germline_emitted: &[usize]) {
+    let total = merge_chunks.len();
+    let mut dead: Vec<String> = Vec::new();
+    for (idx, chunk) in merge_chunks.iter().enumerate() {
+        if germline_emitted.get(idx).copied().unwrap_or(0) > 0 {
+            continue;
+        }
+        let reason = if chunk.segment.is_none() {
+            "no assembly (skipped for low depth or failed)"
+        } else {
+            "assembled but no germline variants called"
+        };
+        dead.push(format!(
+            "  {}:{}-{} ({reason})",
+            chunk.chrom, chunk.ref_start, chunk.ref_end
+        ));
+    }
+
+    let contributing = total - dead.len();
+    if dead.is_empty() {
+        info!("Merge completeness: all {total} sub-loci contributed germline variants");
+        return;
+    }
+    warn!(
+        "Merge completeness: {contributing}/{total} sub-loci contributed germline variants. \
+         {} sub-loci produced NO germline calls (this directly caps recall):\n{}\n\
+         To diagnose one, re-run just that sub-locus with `--verbose` and check its mean depth \
+         (see `--min-mean-depth`, default 2.0) and assembly logs.",
+        dead.len(),
+        dead.join("\n")
+    );
 }
 
 /// Stitch per-window haplograph outputs into full-length FASTA, VCF, and methylation BED files.
@@ -848,23 +894,15 @@ pub fn start(
     sample_id: &str,
     reference_fa: &str,
     maximal_locus_size: usize,
-    overlap_bp: usize,
 ) -> AnyhowResult<()> {
     let (chromosome, locus_start, locus_end) = util::split_locus(locus.to_string());
-    let planned = plan_locus_chunks(
-        &chromosome,
-        locus_start,
-        locus_end,
-        maximal_locus_size,
-        overlap_bp,
-    )?;
+    let planned = plan_locus_chunks(&chromosome, locus_start, locus_end, maximal_locus_size)?;
     info!(
-        "Merging {} planned sub-loci for locus {}:{}-{} (overlap={} bp)",
+        "Merging {} planned sub-loci for locus {}:{}-{}",
         planned.len(),
         chromosome,
         locus_start,
-        locus_end,
-        overlap_bp
+        locus_end
     );
 
     let merge_chunks = build_merge_plan(output_prefix, &planned);
@@ -906,7 +944,7 @@ pub fn start(
         output_prefix,
     )?;
 
-    merge_vcf_files(
+    let germline_emitted = merge_vcf_files(
         &merge_chunks,
         &global_to_local,
         number_of_haplotypes,
@@ -923,29 +961,57 @@ pub fn start(
         "somatic",
     )?;
 
+    // Report before cleanup so a silent per-sub-locus recall cliff is visible.
+    report_merge_completeness(&merge_chunks, &germline_emitted);
+
     remove_segment_tmp_files(output_prefix)?;
 
     Ok(())
 }
 
-/// True for segment artifact names `{prefix}_*.{gfa,fasta,bed,vcf.gz}` (not merged `{prefix}.*`).
-fn is_segment_tmp_artifact(name: &str, output_prefix: &str) -> bool {
-    let tag = format!("{output_prefix}_");
-    if !name.starts_with(&tag) {
+/// Per-segment artifact extensions produced by the assemble/call pipeline.
+const SEGMENT_TMP_EXTENSIONS: &[&str] = &[
+    ".gfa",
+    ".fasta",
+    ".fa",
+    ".bed",
+    ".vcf",
+    ".vcf.gz",
+    ".vcf.gz.tbi",
+    ".vcf.gz.csi",
+];
+
+/// True for a segment artifact *file name* `{base}_*.{ext}` (not the merged
+/// `{base}.*` outputs). `base` is the file-name portion of the output prefix;
+/// directory scoping is handled by the caller (which only scans the prefix's
+/// own directory), so matching here is purely on the basename.
+fn is_segment_tmp_artifact(file_name: &str, prefix_base: &str) -> bool {
+    let tag = format!("{prefix_base}_");
+    if !file_name.starts_with(&tag) {
         return false;
     }
-    name.ends_with(".gfa")
-        || name.ends_with(".fasta")
-        || name.ends_with(".bed")
-        || name.ends_with(".vcf.gz")
-        || name.ends_with(".vcf.gz.tbi")
+    SEGMENT_TMP_EXTENSIONS
+        .iter()
+        .any(|ext| file_name.ends_with(ext))
 }
 
-/// Delete per-segment intermediates (`{output_prefix}_0.gfa`, …) after merge.
+/// Delete per-segment intermediates (`{output_prefix}_0.gfa`, …) after merge,
+/// keeping only the merged `{output_prefix}.*` outputs. Scans the prefix's own
+/// directory (so a prefix like `out/run_` is handled, not just bare CWD names)
+/// and matches on the basename.
 pub fn remove_segment_tmp_files(output_prefix: &str) -> AnyhowResult<()> {
-    let cwd = std::env::current_dir().context("Failed to get current directory")?;
+    let prefix_path = Path::new(output_prefix);
+    let dir = match prefix_path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => std::env::current_dir().context("Failed to get current directory")?,
+    };
+    let prefix_base = prefix_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(output_prefix);
+
     let mut removed = 0usize;
-    for entry in fs::read_dir(&cwd).with_context(|| format!("Failed to read {}", cwd.display()))? {
+    for entry in fs::read_dir(&dir).with_context(|| format!("Failed to read {}", dir.display()))? {
         let entry = entry?;
         let path = entry.path();
         if !path.is_file() {
@@ -954,7 +1020,7 @@ pub fn remove_segment_tmp_files(output_prefix: &str) -> AnyhowResult<()> {
         let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
             continue;
         };
-        if !is_segment_tmp_artifact(name, output_prefix) {
+        if !is_segment_tmp_artifact(name, prefix_base) {
             continue;
         }
         fs::remove_file(&path)
@@ -963,7 +1029,8 @@ pub fn remove_segment_tmp_files(output_prefix: &str) -> AnyhowResult<()> {
     }
     if removed > 0 {
         info!(
-            "Removed {removed} segment tmp file(s) matching {output_prefix}_*.{{gfa,fasta,bed,vcf.gz}}"
+            "Removed {removed} segment tmp file(s) matching {prefix_base}_* in {}",
+            dir.display()
         );
     }
     Ok(())
@@ -975,15 +1042,25 @@ mod tests {
 
     #[test]
     fn is_segment_tmp_artifact_matches_segment_not_merged_outputs() {
-        let prefix = "run/out";
-        assert!(is_segment_tmp_artifact("run/out_0.gfa", prefix));
-        assert!(is_segment_tmp_artifact("run/out_0.fasta", prefix));
-        assert!(is_segment_tmp_artifact("run/out_1.germline.vcf.gz", prefix));
-        assert!(is_segment_tmp_artifact("run/out_0.Hap.0.bed", prefix));
-        assert!(!is_segment_tmp_artifact("run/out.fasta", prefix));
-        assert!(!is_segment_tmp_artifact("run/out.germline.vcf.gz", prefix));
-        assert!(!is_segment_tmp_artifact("run/out.Hap.0.bed", prefix));
-        assert!(!is_segment_tmp_artifact("other/out_0.gfa", prefix));
+        // `prefix_base` is the file-name portion of the output prefix; the caller
+        // scopes to the right directory, so matching is on the basename only.
+        let base = "out";
+        // Segment intermediates → removed.
+        assert!(is_segment_tmp_artifact("out_0.gfa", base));
+        assert!(is_segment_tmp_artifact("out_0.fasta", base));
+        assert!(is_segment_tmp_artifact("out_1.germline.vcf.gz", base));
+        assert!(is_segment_tmp_artifact("out_1.germline.vcf.gz.tbi", base));
+        assert!(is_segment_tmp_artifact("out_1.germline.vcf.gz.csi", base));
+        assert!(is_segment_tmp_artifact("out_0.Hap.0.bed", base));
+        // Nested adaptive-subdivide artifacts → also removed by the top-level `out_` tag.
+        assert!(is_segment_tmp_artifact("out_3_0.gfa", base));
+        // Merged outputs (`out.*`) → kept.
+        assert!(!is_segment_tmp_artifact("out.fasta", base));
+        assert!(!is_segment_tmp_artifact("out.germline.vcf.gz", base));
+        assert!(!is_segment_tmp_artifact("out.germline.vcf.gz.csi", base));
+        assert!(!is_segment_tmp_artifact("out.Hap.0.bed", base));
+        // A different prefix is untouched.
+        assert!(!is_segment_tmp_artifact("other_0.gfa", base));
     }
 
     #[test]
@@ -995,6 +1072,48 @@ mod tests {
         assert_eq!(end, 2000);
         assert_eq!(hap, 1);
         assert_eq!(path.len(), 2);
+    }
+
+    #[test]
+    fn fasta_header_roundtrip_recovers_path_through_bio_reader() {
+        // Regression: the bio FASTA reader splits the header at the first
+        // whitespace (the TAB), so `record.id()` alone drops the path. Reading
+        // the assembler's real header format must recover the node path via
+        // `id + desc` — otherwise boundary phasing sees an empty path.
+        use std::io::Write as _;
+        let fpath =
+            std::env::temp_dir().join("haplograph_merge_header_roundtrip_test.fasta");
+        {
+            let mut f = File::create(&fpath).unwrap();
+            writeln!(
+                f,
+                ">chr1:100-300.0\tSupports:5\tH.chr1:100-200.0|H.chr1:200-300.0"
+            )
+            .unwrap();
+            writeln!(f, "ACGTACGT").unwrap();
+        }
+
+        let reader = FastaReader::from_file(&fpath).unwrap();
+        let mut recovered: Vec<String> = Vec::new();
+        for record in reader.records() {
+            let record = record.unwrap();
+            let header = match record.desc() {
+                Some(desc) => format!("{}\t{}", record.id(), desc),
+                None => record.id().to_string(),
+            };
+            let (_c, _s, _e, _h, path) = parse_fasta_header(&header).unwrap();
+            recovered = path;
+        }
+        let _ = std::fs::remove_file(&fpath);
+
+        assert_eq!(
+            recovered,
+            vec![
+                "H.chr1:100-200.0".to_string(),
+                "H.chr1:200-300.0".to_string()
+            ],
+            "node path must survive a bio FASTA read/parse round-trip"
+        );
     }
 
     #[test]
@@ -1129,6 +1248,148 @@ mod tests {
     }
 
     #[test]
+    fn match_haplotypes_at_boundary_phases_abutting_subloci() {
+        // Two sub-loci that ABUT at ref 200 (zero overlap). A read crossing the
+        // junction lands in left's right-edge node (100-200) and right's left-edge
+        // node (200-300) under the same name, linking the phase with no overlap.
+        let seg = |prefix: &str, s: usize, e: usize, node0: &str, node1: &str, r0: &str, r1: &str| {
+            Segment {
+                index: 0,
+                prefix: prefix.to_string(),
+                ref_start: s,
+                ref_end: e,
+                haplotypes: HashMap::from([
+                    (
+                        0,
+                        ParsedHaplotype {
+                            hap_index: 0,
+                            chromosome: "chr1".to_string(),
+                            ref_start: s,
+                            ref_end: e,
+                            sequence: String::new(),
+                            path: vec![node0.to_string()],
+                            read_names: asm::parse_read_names(r0),
+                        },
+                    ),
+                    (
+                        1,
+                        ParsedHaplotype {
+                            hap_index: 1,
+                            chromosome: "chr1".to_string(),
+                            ref_start: s,
+                            ref_end: e,
+                            sequence: String::new(),
+                            path: vec![node1.to_string()],
+                            read_names: asm::parse_read_names(r1),
+                        },
+                    ),
+                ]),
+            }
+        };
+        let node = |id: &str, reads: &str| {
+            (
+                id.to_string(),
+                asm::NodeInfo {
+                    seq: String::new(),
+                    cigar: String::new(),
+                    support_reads: 2,
+                    allele_frequency: "0.5".to_string(),
+                    read_names: reads.to_string(),
+                    read_names_set: asm::parse_read_names(reads),
+                    methyl_info: HashMap::new(),
+                },
+            )
+        };
+
+        // Crossing reads rA,rB belong to LEFT hap0 and RIGHT hap1 → expect a flip.
+        let left = seg("left", 0, 200, "H.chr1:100-200.0", "H.chr1:100-200.1", "rA,rB", "rC");
+        let right = seg("right", 200, 400, "H.chr1:200-300.0", "H.chr1:200-300.1", "rZ", "rA,rB");
+        let left_gfa =
+            HashMap::from([node("H.chr1:100-200.0", "rA,rB"), node("H.chr1:100-200.1", "rC")]);
+        let right_gfa =
+            HashMap::from([node("H.chr1:200-300.0", "rZ"), node("H.chr1:200-300.1", "rA,rB")]);
+
+        let mapping =
+            match_haplotypes_by_shared_reads(&left, &right, &left_gfa, &right_gfa, 2).unwrap();
+        assert_eq!(mapping, vec![1, 0], "boundary-spanning reads must link phase at zero overlap");
+    }
+
+    #[test]
+    fn match_haplotypes_ignores_shared_homozygous_nodes() {
+        // Each sub-locus edge has a HOMOZYGOUS node shared by both haplotype paths
+        // (carrying all reads) plus a heterozygous node per haplotype. Phasing must
+        // discriminate via the het nodes and ignore the shared node — otherwise the
+        // shared reads swamp the signal, identity/flip tie, and it never flips.
+        let node = |id: &str, reads: &str| {
+            (
+                id.to_string(),
+                asm::NodeInfo {
+                    seq: String::new(),
+                    cigar: String::new(),
+                    support_reads: 2,
+                    allele_frequency: "0.5".to_string(),
+                    read_names: reads.to_string(),
+                    read_names_set: asm::parse_read_names(reads),
+                    methyl_info: HashMap::new(),
+                },
+            )
+        };
+        let hap = |s: usize, e: usize, nodes: &[&str]| ParsedHaplotype {
+            hap_index: 0,
+            chromosome: "chr1".to_string(),
+            ref_start: s,
+            ref_end: e,
+            sequence: String::new(),
+            path: nodes.iter().map(|n| n.to_string()).collect(),
+            read_names: HashSet::new(),
+        };
+
+        // Left [0,200): shared homo node 0-100, het nodes 100-200 (.0 hap0, .1 hap1).
+        let left = Segment {
+            index: 0,
+            prefix: "left".to_string(),
+            ref_start: 0,
+            ref_end: 200,
+            haplotypes: HashMap::from([
+                (0, hap(0, 200, &["H.chr1:0-100.0", "H.chr1:100-200.0"])),
+                (1, hap(0, 200, &["H.chr1:0-100.0", "H.chr1:100-200.1"])),
+            ]),
+        };
+        // Right [200,400): het nodes 200-300, shared homo node 300-400.
+        let right = Segment {
+            index: 1,
+            prefix: "right".to_string(),
+            ref_start: 200,
+            ref_end: 400,
+            haplotypes: HashMap::from([
+                (0, hap(200, 400, &["H.chr1:200-300.0", "H.chr1:300-400.0"])),
+                (1, hap(200, 400, &["H.chr1:200-300.1", "H.chr1:300-400.0"])),
+            ]),
+        };
+        // Crossing reads rA1,rA2 are left-hap0 but right-hap1 → expect a FLIP.
+        let left_gfa = HashMap::from([
+            node("H.chr1:0-100.0", "rA1,rA2,rB1"), // shared homozygous: all reads
+            node("H.chr1:100-200.0", "rA1,rA2"),
+            node("H.chr1:100-200.1", "rB1"),
+        ]);
+        let right_gfa = HashMap::from([
+            node("H.chr1:200-300.0", "rB1"),
+            node("H.chr1:200-300.1", "rA1,rA2"),
+            node("H.chr1:300-400.0", "rA1,rA2,rB1"), // shared homozygous: all reads
+        ]);
+
+        // reach 150 pulls the shared homozygous nodes into the edge windows too,
+        // so the test only passes if they are correctly excluded.
+        let mapping =
+            match_haplotypes_by_shared_reads(&left, &right, &left_gfa, &right_gfa, 2).unwrap();
+        assert_eq!(
+            mapping,
+            vec![1, 0],
+            "must phase via het nodes despite shared homozygous reads"
+        );
+    }
+
+    #[test]
     fn match_haplotypes_does_not_flip_on_weak_evidence() {
         // A single shared read supports a flip but is below MIN_PHASE_SUPPORT,
         // so the boundary must stay identity (carry phase forward) not flip.
@@ -1191,7 +1452,7 @@ mod tests {
             node_info("H.chr1:1500-1600.1", "r1"),
         ]);
 
-        let mapping = match_haplotypes_at_overlap(&left, &right, &left_gfa, &right_gfa, 2).unwrap();
+        let mapping = match_haplotypes_by_shared_reads(&left, &right, &left_gfa, &right_gfa, 2).unwrap();
         assert_eq!(mapping, vec![0, 1], "one shared read must not flip the phase");
     }
 
@@ -1324,7 +1585,7 @@ mod tests {
             ),
         ]);
 
-        let mapping = match_haplotypes_at_overlap(&left, &right, &left_gfa, &right_gfa, 2).unwrap();
+        let mapping = match_haplotypes_by_shared_reads(&left, &right, &left_gfa, &right_gfa, 2).unwrap();
         assert_eq!(mapping, vec![1, 0]);
     }
 }

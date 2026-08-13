@@ -96,10 +96,6 @@ enum DevToolsCommands {
         #[arg(short, long, default_value_t = 2)]
         number_of_haplotypes: usize,
 
-        /// Overlap between adjacent sub-loci in bp (must match the haplograph run)
-        #[arg(long, default_value_t = merge::DEFAULT_OVERLAP_BP)]
-        overlap_bp: usize,
-
         /// Maximal sub-locus size used during haplograph (must match the haplograph run; default 200000)
         #[arg(long, default_value_t = 200_000)]
         maximal_locus_size: usize,
@@ -145,7 +141,6 @@ struct HaplographRunConfig {
     pileup: bool,
     number_of_haplotypes: usize,
     detection_technology: String,
-    overlap_bp: usize,
     /// When set, a chunk whose window graph is too complex is split into smaller
     /// overlapping sub-chunks, assembled independently, and merged back together.
     adaptive_subdivide: bool,
@@ -230,7 +225,7 @@ fn run_haplograph_segment_depth(
         if graph_is_complex(&node_info) {
             let sub_size = (end.saturating_sub(start) / 2).max(ADAPTIVE_MIN_SIZE);
             let sub_chunks =
-                merge::plan_locus_chunks(chromosome, start, end, sub_size, config.overlap_bp)?;
+                merge::plan_locus_chunks(chromosome, start, end, sub_size)?;
             if sub_chunks.len() > 1 {
                 info!(
                     "Adaptive subdivide {chromosome}:{start}-{end} (depth {depth}, {} nodes) into {} sub-chunks",
@@ -255,7 +250,6 @@ fn run_haplograph_segment_depth(
                     &config.sampleid,
                     &config.reference_fa,
                     sub_size,
-                    config.overlap_bp,
                 )?;
                 return Ok(());
             }
@@ -402,16 +396,20 @@ enum Commands {
         #[arg(long, default_value_t = 200000)]
         maximal_locus_size: usize,
 
-        /// Overlap between adjacent sub-loci when splitting large regions (bp)
-        #[arg(long, default_value_t = merge::DEFAULT_OVERLAP_BP)]
-        overlap_bp: usize,
-
         /// Skip sub-loci whose mean read depth is below this threshold
         #[arg(long, default_value_t = 2.0)]
         min_mean_depth: f64,
 
+        /// Cap how many sub-loci assemble concurrently to bound peak memory and
+        /// remote-BAM fetch contention (0 = unbounded). Inner per-window
+        /// parallelism still fills idle cores within each sub-locus.
+        #[arg(long, default_value_t = 0)]
+        max_concurrent_chunks: usize,
+
         /// Recursively subdivide a sub-locus when its window graph is too complex
-        #[arg(long, default_value_t = false)]
+        /// (on by default; guards against large-chunk assembly failures). Disable
+        /// with `--adaptive-subdivide false`.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         adaptive_subdivide: bool,
 
         /// Verbose output
@@ -636,10 +634,6 @@ enum Commands {
         #[arg(long, default_value_t = 200_000)]
         maximal_locus_size: usize,
 
-        /// Overlap between adjacent chunks (bp)
-        #[arg(long, default_value_t = merge::DEFAULT_OVERLAP_BP)]
-        overlap_bp: usize,
-
         /// Scale chunk size down for very large regions (more, smaller chunks for load balancing)
         #[arg(long, default_value_t = false)]
         adaptive_chunking: bool,
@@ -654,7 +648,9 @@ enum Commands {
         max_concurrent_chunks: usize,
 
         /// Recursively subdivide a chunk when its window graph is too complex
-        #[arg(long, default_value_t = false)]
+        /// (on by default; guards against large-chunk assembly failures). Disable
+        /// with `--adaptive-subdivide false`.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         adaptive_subdivide: bool,
 
         /// Verbose output
@@ -683,8 +679,8 @@ fn main() -> Result<()> {
             threshold_methyl_likelihood,
             detection_technology,
             maximal_locus_size,
-            overlap_bp,
             min_mean_depth,
+            max_concurrent_chunks,
             adaptive_subdivide,
             verbose,
         } => {
@@ -715,7 +711,6 @@ fn main() -> Result<()> {
             info!("Maximal Window size: {}", window_size);
             info!("Primary read only: {}", primary_only);
             info!("Minimum mean depth for sub-loci: {}", min_mean_depth);
-            info!("Sub-locus overlap: {} bp", overlap_bp);
 
             let (reference_seqs, reference_chromosome_seqs) =
                 util::get_ref_seq_from_chromosome(&reference_fa, &chromosome);
@@ -733,22 +728,14 @@ fn main() -> Result<()> {
                 pileup,
                 number_of_haplotypes,
                 detection_technology: detection_technology.clone(),
-                overlap_bp,
                 adaptive_subdivide,
             });
 
             if end - start > maximal_locus_size {
                 info!("Locus size is larger than the maximal locus size: {}, splitting into overlapping intervals", end - start);
-                if maximal_locus_size <= overlap_bp {
-                    anyhow::bail!(
-                        "maximal_locus_size ({}) must be greater than overlap ({} bp)",
-                        maximal_locus_size,
-                        overlap_bp
-                    );
-                }
-                let step = maximal_locus_size - overlap_bp;
+                let step = maximal_locus_size;
                 let mut locus_list = Vec::new();
-                // Windows of length maximal_locus_size, advanced by step so adjacent windows share overlap_bp.
+                // Sub-loci of length maximal_locus_size, abutting (no overlap).
                 let mut start_pos = start;
                 while start_pos < end {
                     let end_pos = std::cmp::min(start_pos + maximal_locus_size, end);
@@ -762,37 +749,85 @@ fn main() -> Result<()> {
 
                 let eligible_loci: Vec<(String, usize, usize)> = locus_list
                     .par_iter()
-                    .filter_map(|locus| {
-                        let mean_depth = util::with_thread_local_bam(&alignment_bam, |bam| {
-                            util::mean_depth(bam, &locus.0, locus.1, locus.2).ok()
-                        })?;
-                        if mean_depth < min_mean_depth {
-                            warn!(
-                                "Skipping sub-locus {}:{}-{} (mean depth {:.2} < {:.2})",
-                                locus.0, locus.1, locus.2, mean_depth, min_mean_depth
-                            );
-                            return None;
+                    .filter(|locus| {
+                        match util::with_thread_local_bam(&alignment_bam, |bam| {
+                            util::mean_depth(bam, &locus.0, locus.1, locus.2)
+                        }) {
+                            Ok(mean_depth) if mean_depth < min_mean_depth => {
+                                warn!(
+                                    "Skipping sub-locus {}:{}-{} (mean depth {:.2} < {:.2})",
+                                    locus.0, locus.1, locus.2, mean_depth, min_mean_depth
+                                );
+                                false
+                            }
+                            Ok(_) => true,
+                            // A depth-check *error* (e.g. a transient remote read) must NOT
+                            // silently drop the sub-locus — that deletes every variant in it
+                            // and caps recall. Keep it and let assembly proceed.
+                            Err(err) => {
+                                warn!(
+                                    "Depth check failed for {}:{}-{} ({err:#}); \
+                                     processing the sub-locus anyway",
+                                    locus.0, locus.1, locus.2
+                                );
+                                true
+                            }
                         }
-                        Some(locus.clone())
                     })
+                    .cloned()
                     .collect();
 
-                let processed: Result<()> =
-                    eligible_loci
+                // Contain per-sub-locus failures so one bad chunk (an assembly
+                // `Err` or a panic on a hard graph) does NOT abort the whole
+                // large-locus run and discard every other chunk. A failed chunk
+                // simply produces no segment files; the merge falls back to
+                // reference for it and lists it in the completeness report.
+                let process_locus = |output_index: usize, locus: &(String, usize, usize)| -> usize {
+                    info!("Interval: {}:{}-{}", locus.0, locus.1, locus.2);
+                    let segment_prefix = format!("{}_{}", output_prefix, output_index);
+                    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        run_haplograph_segment(&run_config, &locus.0, locus.1, locus.2, &segment_prefix)
+                    }));
+                    match outcome {
+                        Ok(Ok(())) => 0,
+                        Ok(Err(err)) => {
+                            warn!("Sub-locus {}:{}-{} failed: {err:#}", locus.0, locus.1, locus.2);
+                            1
+                        }
+                        Err(_) => {
+                            warn!("Sub-locus {}:{}-{} panicked; skipping", locus.0, locus.1, locus.2);
+                            1
+                        }
+                    }
+                };
+
+                // The sub-locus is the parallel axis. `--max-concurrent-chunks`
+                // caps concurrency in bounded batches to limit peak memory and
+                // remote-BAM fetch contention (0 = unbounded).
+                let indexed: Vec<(usize, &(String, usize, usize))> =
+                    eligible_loci.iter().enumerate().collect();
+                let failures: usize = if max_concurrent_chunks == 0 {
+                    indexed
                         .par_iter()
-                        .enumerate()
-                        .try_for_each(|(output_index, locus)| {
-                            info!("Interval: {}:{}-{}", locus.0, locus.1, locus.2);
-                            let segment_prefix = format!("{}_{}", output_prefix, output_index);
-                            run_haplograph_segment(
-                                &run_config,
-                                &locus.0,
-                                locus.1,
-                                locus.2,
-                                &segment_prefix,
-                            )
-                        });
-                processed?;
+                        .map(|(i, locus)| process_locus(*i, locus))
+                        .sum()
+                } else {
+                    indexed
+                        .chunks(max_concurrent_chunks)
+                        .map(|batch| {
+                            batch
+                                .par_iter()
+                                .map(|(i, locus)| process_locus(*i, locus))
+                                .sum::<usize>()
+                        })
+                        .sum()
+                };
+                if failures > 0 {
+                    warn!(
+                        "{failures}/{} sub-loci failed and were skipped (see merge completeness report below)",
+                        eligible_loci.len()
+                    );
+                }
 
                 if eligible_loci.is_empty() {
                     warn!("All sub-loci were skipped due to low coverage");
@@ -805,7 +840,6 @@ fn main() -> Result<()> {
                         &sampleid,
                         &reference_fa,
                         maximal_locus_size,
-                        overlap_bp,
                     )?;
                     info!("Merging haplotypes completed");
                 }
@@ -1010,7 +1044,6 @@ fn main() -> Result<()> {
                     reference_fa,
                     sampleid,
                     number_of_haplotypes,
-                    overlap_bp,
                     maximal_locus_size,
                     verbose,
                 } => {
@@ -1028,7 +1061,6 @@ fn main() -> Result<()> {
                         &sampleid,
                         &reference_fa,
                         maximal_locus_size,
-                        overlap_bp,
                     )?;
                 }
             }
@@ -1101,7 +1133,6 @@ fn main() -> Result<()> {
             threshold_methyl_likelihood,
             detection_technology,
             maximal_locus_size,
-            overlap_bp,
             adaptive_chunking,
             min_mean_depth,
             max_concurrent_chunks,
@@ -1121,15 +1152,7 @@ fn main() -> Result<()> {
             info!("Regions from BED: {}", bed_file);
             info!("Output prefix: {}", output_prefix);
             info!("Chunk size: {} (adaptive={})", maximal_locus_size, adaptive_chunking);
-            info!("Chunk overlap: {} bp", overlap_bp);
 
-            if maximal_locus_size <= overlap_bp {
-                anyhow::bail!(
-                    "maximal_locus_size ({}) must be greater than overlap ({} bp)",
-                    maximal_locus_size,
-                    overlap_bp
-                );
-            }
 
             let bed_list = util::import_bed(&bed_file);
             if bed_list.is_empty() {
@@ -1181,7 +1204,6 @@ fn main() -> Result<()> {
                         pileup,
                         number_of_haplotypes,
                         detection_technology: detection_technology.clone(),
-                        overlap_bp,
                         adaptive_subdivide,
                     }),
                 );
@@ -1205,7 +1227,7 @@ fn main() -> Result<()> {
                 }
                 let size = adaptive_locus_size(region_len, maximal_locus_size, adaptive_chunking);
                 let region_prefix = format!("{output_prefix}.r{region_idx}");
-                let chunks = merge::plan_locus_chunks(chrom, *start, *end, size, overlap_bp)?;
+                let chunks = merge::plan_locus_chunks(chrom, *start, *end, size)?;
                 let cfg = configs.get(chrom).unwrap().clone();
                 for (ci, (c, s, e)) in chunks.iter().enumerate() {
                     let seg_prefix = format!("{region_prefix}_{ci}");
@@ -1299,7 +1321,6 @@ fn main() -> Result<()> {
                         &sampleid,
                         &reference_fa,
                         region.size,
-                        overlap_bp,
                     )
                 }));
                 match outcome {
