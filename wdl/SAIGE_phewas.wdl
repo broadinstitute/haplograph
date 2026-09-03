@@ -265,7 +265,6 @@ task RunStep2_singlevariant {
                 --GMMATmodelFile="${model_file}" \
                 --varianceRatioFile="${variance_ratio}" \
                 --is_Firth_beta=TRUE \
-                --is_overrideflip=TRUE \
                 --is_fastTest=FALSE \
                 --LOCO=FALSE \
                 --is_output_moreDetails=TRUE
