@@ -11,14 +11,14 @@ workflow SAIGE_phewas {
         File plink_fam_file
         File sparseGRM
         File sparseGRM_IDlist
-        File phenotype_file 
+        Array[String] phecode_list
         File homoplasmic_vcf
         File homoplasmic_vcf_csi
         File? heteroplasmic_vcf
         File? heteroplasmic_vcf_csi
         File? GroupFile
         String chromosome
-        File phecode_list_file # phecode list should be sorted alphabetically
+        File phenotype_file
         String trait_type
         String output_prefix
         String saige_docker
@@ -40,7 +40,6 @@ workflow SAIGE_phewas {
         String disk_size = "local-disk 50 HDD"
         Int preemptible = 1
     }
-    Array[String] phecode_list = read_lines(phecode_list_file)
     
     # Step 1: fit one null GLMM per phecode in a single batch task
     call RunFitNullGLMM {
