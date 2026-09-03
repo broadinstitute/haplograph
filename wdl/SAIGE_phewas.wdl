@@ -28,6 +28,14 @@ workflow SAIGE_phewas {
         Int single_variant_min_mac = 20
         Float gene_set_minimal_af = 0
         Float gene_set_min_mac = 0.5
+
+        # MAC category bounds for categorical variance ratios, shared by Step 1 and Step 2 so the
+        # two cannot drift. SAIGE requires length(min_exclude) == length(max_include) + 1, and
+        # length(min_exclude) == the number of "null" rows Step 1 writes to the varianceRatio file.
+        # If these disagree between steps, SAIGE applies each ratio to the wrong MAC bin silently.
+        String cate_var_ratio_min_mac_exclude = "100,500"
+        String cate_var_ratio_max_mac_include = "500"
+
         Int cpu = 2
         String disk_size = "local-disk 50 HDD"
         Int preemptible = 1
@@ -47,6 +55,8 @@ workflow SAIGE_phewas {
             trait_type        = trait_type,
             output_prefix     = output_prefix,
             saige_docker      = saige_docker,
+            cate_var_ratio_min_mac_exclude = cate_var_ratio_min_mac_exclude,
+            cate_var_ratio_max_mac_include = cate_var_ratio_max_mac_include,
             memory            = memory,
             cpu               = cpu,
             disk              = disk_size,
@@ -60,13 +70,16 @@ workflow SAIGE_phewas {
             vcf_csi          = homoplasmic_vcf_csi,
             variance_ratios  = RunFitNullGLMM.variance_ratio_txts,
             GMMATmodelFiles  = RunFitNullGLMM.null_model_rdas,
+            sparseGRM        = sparseGRM,
+            sparseGRM_IDlist = sparseGRM_IDlist,
             vcffield         = vcffield,
             chromo           = chromosome,
-            phecode_list     = RunFitNullGLMM.successful_phecode_list,
-            trait_type       = trait_type,
+            phecode_list     = read_lines(RunFitNullGLMM.successful_phecode_list),
             output_prefix    = output_prefix,
             minimal_af       = single_variant_minimal_af,
             min_mac          = single_variant_min_mac,
+            cate_var_ratio_min_mac_exclude = cate_var_ratio_min_mac_exclude,
+            cate_var_ratio_max_mac_include = cate_var_ratio_max_mac_include,
             memory           = memory,
             saige_docker     = saige_docker,
             cpu              = cpu,
@@ -82,13 +95,17 @@ workflow SAIGE_phewas {
                 vcf_csi          = select_first([heteroplasmic_vcf_csi, ""]),
                 variance_ratios  = RunFitNullGLMM.variance_ratio_txts,
                 GMMATmodelFiles  = RunFitNullGLMM.null_model_rdas,
+                sparseGRM        = sparseGRM,
+                sparseGRM_IDlist = sparseGRM_IDlist,
                 vcffield         = vcffield,
                 chromo           = chromosome,
-                phecode_list     = RunFitNullGLMM.successful_phecode_list,
+                phecode_list     = read_lines(RunFitNullGLMM.successful_phecode_list),
                 output_prefix    = output_prefix,
                 minimal_af       = gene_set_minimal_af,
                 min_mac          = gene_set_min_mac,
                 GroupFile        = select_first([GroupFile, ""]),
+                cate_var_ratio_min_mac_exclude = cate_var_ratio_min_mac_exclude,
+                cate_var_ratio_max_mac_include = cate_var_ratio_max_mac_include,
                 memory           = memory,
                 saige_docker     = saige_docker,
                 cpu              = cpu,
@@ -124,6 +141,10 @@ task RunFitNullGLMM {
         String output_prefix
         String saige_docker
 
+        # Must match the values passed to step2_SPAtests.R. See the workflow-level inputs.
+        String cate_var_ratio_min_mac_exclude = "10,20.5"
+        String cate_var_ratio_max_mac_include = "20.5"
+
         # Runtime parameters
         String memory
         Int cpu
@@ -154,8 +175,8 @@ task RunFitNullGLMM {
                 --sampleIDColinphenoFile=person_id \
                 --traitType=~{trait_type} \
                 --isCateVarianceRatio=TRUE \
-                --cateVarRatioMinMACVecExclude=100,500 \
-                --cateVarRatioMaxMACVecInclude=500,1000000 \
+                --cateVarRatioMinMACVecExclude=~{cate_var_ratio_min_mac_exclude} \
+                --cateVarRatioMaxMACVecInclude=~{cate_var_ratio_max_mac_include} \
                 --IsOverwriteVarianceRatioFile=TRUE \
                 --outputPrefix="~{output_prefix}_step1Out_${phecode}" \
                 ~{inv_norm_arg}; then
@@ -194,13 +215,19 @@ task RunStep2_singlevariant {
         File vcf_csi
         Array[File] variance_ratios
         Array[File] GMMATmodelFiles
+        # Step 1 in this workflow always fits with --useSparseGRMtoFitNULL=TRUE, so Step 2 must be
+        # given the same sparse GRM — otherwise SAIGE silently falls back to the "null" variance
+        # ratios instead of the sparse-GRM ones (the guard for this is commented out upstream).
+        File? sparseGRM
+        File? sparseGRM_IDlist
         String vcffield
         String chromo
         Array[String] phecode_list
-        String trait_type = "binary"
         String output_prefix
         Float minimal_af
         Int min_mac
+        String cate_var_ratio_min_mac_exclude = "10,20.5"
+        String cate_var_ratio_max_mac_include = "20.5"
 
         # Runtime parameters
         String memory
@@ -231,10 +258,15 @@ task RunStep2_singlevariant {
                 --SAIGEOutputFile=~{output_prefix}_step2Out_${phecode}_singlevar \
                 --minMAF=~{minimal_af} \
                 --minMAC=~{min_mac} \
+                ~{"--sparseGRMFile=" + sparseGRM} \
+                ~{"--sparseGRMSampleIDFile=" + sparseGRM_IDlist} \
+                --cateVarRatioMinMACVecExclude=~{cate_var_ratio_min_mac_exclude} \
+                --cateVarRatioMaxMACVecInclude=~{cate_var_ratio_max_mac_include} \
                 --GMMATmodelFile="${model_file}" \
                 --varianceRatioFile="${variance_ratio}" \
                 --is_Firth_beta=TRUE \
                 --is_overrideflip=TRUE \
+                --is_fastTest=FALSE \
                 --LOCO=FALSE \
                 --is_output_moreDetails=TRUE
         done
@@ -274,6 +306,11 @@ task RunStep2_geneset {
         Float minimal_af
         Float min_mac
         File GroupFile
+        # See RunStep2_singlevariant — Step 1 fits with the sparse GRM, so Step 2 needs it too.
+        File? sparseGRM
+        File? sparseGRM_IDlist
+        String cate_var_ratio_min_mac_exclude = "10,20.5"
+        String cate_var_ratio_max_mac_include = "20.5"
 
         # Runtime parameters
         String memory
@@ -304,6 +341,10 @@ task RunStep2_geneset {
                 --SAIGEOutputFile=~{output_prefix}_step2Out_${phecode}_geneset \
                 --minMAF=~{minimal_af} \
                 --minMAC=~{min_mac} \
+                ~{"--sparseGRMFile=" + sparseGRM} \
+                ~{"--sparseGRMSampleIDFile=" + sparseGRM_IDlist} \
+                --cateVarRatioMinMACVecExclude=~{cate_var_ratio_min_mac_exclude} \
+                --cateVarRatioMaxMACVecInclude=~{cate_var_ratio_max_mac_include} \
                 --GMMATmodelFile="${model_file}" \
                 --varianceRatioFile="${variance_ratio}" \
                 --is_Firth_beta=TRUE \
