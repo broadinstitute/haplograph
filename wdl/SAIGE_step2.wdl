@@ -146,6 +146,7 @@ task RunFitNullGLMM {
                 --bimFile="~{plink_bim_file}" \
                 --famFile="~{plink_fam_file}" \
                 --useSparseGRMtoFitNULL=TRUE \
+                --useSparseGRMforVarRatio=TRUE \
                 --sparseGRMFile="~{sparseGRM}" \
                 --sparseGRMSampleIDFile="~{sparseGRM_IDlist}" \
                 --phenoFile="~{phenotype_file}" \
