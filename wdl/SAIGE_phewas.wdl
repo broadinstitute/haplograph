@@ -140,6 +140,8 @@ task RunFitNullGLMM {
         File sparseGRM_IDlist
         File phenotype_file
         Array[String] phecode_list
+        Array[String] covariate_list = ["lr_PC1","lr_PC2","lr_PC3","lr_PC4","lr_PC5","lr_PC6","lr_PC7","lr_PC8","lr_PC9","lr_PC10","lr_PC11","lr_PC12","lr_PC13","lr_PC14","lr_PC15","lr_PC16","lr_PC17","lr_PC18","lr_PC19","lr_PC20","sex","age","age2","age_sex","age2_sex", "coverage", "GC"]
+        Array[String] categorical_covariate = ["sex", "GC"]
         String trait_type
         String output_prefix
         String saige_docker
@@ -174,8 +176,8 @@ task RunFitNullGLMM {
                 --sparseGRMSampleIDFile="~{sparseGRM_IDlist}" \
                 --phenoFile="~{phenotype_file}" \
                 --phenoCol="${phecode}" \
-                --covarColList=PC1,PC2,PC3,PC4,PC5,PC6,PC7,PC8,PC9,PC10,PC11,PC12,PC13,PC14,PC15,PC16,sex,age,age2,age_sex,age2_sex \
-                --qCovarColList=sex \
+                --covarColList= "~{sep = "," covariate_list}" \
+                --qCovarColList="~{sep = "," categorical_covariate}" \
                 --sampleIDColinphenoFile=person_id \
                 --traitType=~{trait_type} \
                 --isCateVarianceRatio=TRUE \
@@ -358,7 +360,7 @@ task RunStep2_geneset {
                 --groupFile="~{GroupFile}" \
                 --annotation_in_groupTest="non_coding_transcript_exon,start_lost,stop_gained;start_lost,missense,synonymous,frameshift,stop_gained,stop_lost,stop_retained,dloop" \
                 --maxMAF_in_groupTest=0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5 \
-                --pCutoffforFirth=0.05 \
+                --lr_PCutoffforFirth=0.05 \
                 --is_output_markerList_in_groupTest=TRUE \
                 --is_output_moreDetails=TRUE
         done
