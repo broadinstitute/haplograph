@@ -231,6 +231,7 @@ task RunStep2_singlevariant {
         Array[String] phecode_list
         String output_prefix
         Boolean is_overridefilp = false
+        Boolean is_fastTest = true
         Float minimal_af
         Int min_mac
         String cate_var_ratio_min_mac_exclude = "10,20.5"
@@ -273,7 +274,7 @@ task RunStep2_singlevariant {
                 --GMMATmodelFile="${model_file}" \
                 --varianceRatioFile="${variance_ratio}" \
                 --is_Firth_beta=TRUE \
-                --is_fastTest=FALSE \
+                ~{true="--is_fastTest=TRUE" false="--is_fastTest=FALSE" is_fastTest} \
                 --LOCO=FALSE \
                 ~{true="--is_overrideflip=TRUE" false="" is_overridefilp} \
                 --is_output_moreDetails=TRUE
