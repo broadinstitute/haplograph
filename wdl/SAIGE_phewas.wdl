@@ -23,7 +23,10 @@ workflow SAIGE_phewas {
         String output_prefix
         String saige_docker
         String vcffield
+        Boolean is_overridefilp
+
         String memory = "8G"
+        
         Float single_variant_minimal_af = 0.01
         Int single_variant_min_mac = 20
         Float gene_set_minimal_af = 0
@@ -77,6 +80,7 @@ workflow SAIGE_phewas {
             output_prefix    = output_prefix,
             minimal_af       = single_variant_minimal_af,
             min_mac          = single_variant_min_mac,
+            is_overridefilp  = is_overridefilp,
             cate_var_ratio_min_mac_exclude = cate_var_ratio_min_mac_exclude,
             cate_var_ratio_max_mac_include = cate_var_ratio_max_mac_include,
             memory           = memory,
@@ -224,10 +228,12 @@ task RunStep2_singlevariant {
         String chromo
         Array[String] phecode_list
         String output_prefix
+        Boolean is_overridefilp = false
         Float minimal_af
         Int min_mac
         String cate_var_ratio_min_mac_exclude = "10,20.5"
         String cate_var_ratio_max_mac_include = "20.5"
+
 
         # Runtime parameters
         String memory
@@ -267,6 +273,7 @@ task RunStep2_singlevariant {
                 --is_Firth_beta=TRUE \
                 --is_fastTest=FALSE \
                 --LOCO=FALSE \
+                ~{true="--is_overrideflip=TRUE" false="" is_overridefilp} \
                 --is_output_moreDetails=TRUE
         done
     >>>
