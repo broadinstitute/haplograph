@@ -176,8 +176,8 @@ task RunFitNullGLMM {
                 --sparseGRMSampleIDFile="~{sparseGRM_IDlist}" \
                 --phenoFile="~{phenotype_file}" \
                 --phenoCol="${phecode}" \
-                --covarColList= "~{sep = "," covariate_list}" \
-                --qCovarColList="~{sep = "," categorical_covariate}" \
+                --covarColList="~{sep=',' covariate_list}" \
+                --qCovarColList="~{sep=',' categorical_covariate}" \
                 --sampleIDColinphenoFile=person_id \
                 --traitType=~{trait_type} \
                 --isCateVarianceRatio=TRUE \
