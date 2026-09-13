@@ -164,8 +164,24 @@ task RunFitNullGLMM {
 
         phecodes=(~{sep=' ' phecode_list})
         successful_phecodes=()
+        declare -A seen=()
+        unique_phecodes=()
 
+        # Cromwell glob() is unordered and unique-by-basename, so a duplicate phecode
+        # overwrites the same .rda/.varianceRatio.txt but is recorded twice in the
+        # success list — Step 2 then has more names than files.
         for phecode in "${phecodes[@]}"; do
+            if [[ -n "${seen[$phecode]+x}" ]]; then
+                echo "WARNING: duplicate phecode ${phecode} in phecode_list, skipping" >&2
+                continue
+            fi
+            seen[$phecode]=1
+            unique_phecodes+=("${phecode}")
+        done
+
+        for phecode in "${unique_phecodes[@]}"; do
+            model_file="~{output_prefix}_step1Out_${phecode}.rda"
+            vr_file="~{output_prefix}_step1Out_${phecode}.varianceRatio.txt"
             if step1_fitNULLGLMM.R \
                 --bedFile="~{plink_bed_file}" \
                 --bimFile="~{plink_bim_file}" \
@@ -185,14 +201,20 @@ task RunFitNullGLMM {
                 --cateVarRatioMaxMACVecInclude=~{cate_var_ratio_max_mac_include} \
                 --IsOverwriteVarianceRatioFile=TRUE \
                 --outputPrefix="~{output_prefix}_step1Out_${phecode}" \
-                ~{inv_norm_arg}; then
+                ~{inv_norm_arg} \
+                && [[ -f "${model_file}" && -f "${vr_file}" ]]; then
                 successful_phecodes+=("${phecode}")
             else
-                echo "WARNING: phecode ${phecode} failed, skipping" >&2
+                echo "WARNING: phecode ${phecode} failed or missing ${model_file} / ${vr_file}, skipping" >&2
             fi
         done
 
-        printf '%s\n' "${successful_phecodes[@]}" > successful_phecodes.txt
+        if [[ ${#successful_phecodes[@]} -gt 0 ]]; then
+            printf '%s\n' "${successful_phecodes[@]}" > successful_phecodes.txt
+        else
+            : > successful_phecodes.txt
+            echo "WARNING: no phecodes produced Step 1 outputs" >&2
+        fi
     >>>
 
     output {
@@ -253,10 +275,41 @@ task RunStep2_singlevariant {
         variance_ratios=(~{sep=' ' variance_ratios})
         model_files=(~{sep=' ' GMMATmodelFiles})
 
-        for i in "${!phecodes[@]}"; do
-            phecode="${phecodes[$i]}"
-            variance_ratio="${variance_ratios[$i]}"
-            model_file="${model_files[$i]}"
+        # glob() order is not the success-list order. Match by exact basename so
+        # e.g. EM_200 does not pick up EM_200.1, and a length mismatch cannot
+        # silently pair the wrong null model.
+        if [[ ${#phecodes[@]} -eq 0 ]]; then
+            echo "WARNING: no successful phecodes for Step 2" >&2
+            exit 0
+        fi
+        if [[ ${#model_files[@]} -eq 0 || ${#variance_ratios[@]} -eq 0 ]]; then
+            echo "ERROR: Step 1 produced no model or variance-ratio files" >&2
+            exit 1
+        fi
+
+        for phecode in "${phecodes[@]}"; do
+            expected_rda="~{output_prefix}_step1Out_${phecode}.rda"
+            expected_vr="~{output_prefix}_step1Out_${phecode}.varianceRatio.txt"
+            model_file=""
+            variance_ratio=""
+            for f in "${model_files[@]}"; do
+                if [[ "$(basename "${f}")" == "${expected_rda}" ]]; then
+                    model_file="${f}"
+                    break
+                fi
+            done
+            for f in "${variance_ratios[@]}"; do
+                if [[ "$(basename "${f}")" == "${expected_vr}" ]]; then
+                    variance_ratio="${f}"
+                    break
+                fi
+            done
+            if [[ -z "${model_file}" || -z "${variance_ratio}" ]]; then
+                echo "ERROR: no Step 1 outputs matching ${phecode}" >&2
+                echo "  expected rda: ${expected_rda}" >&2
+                echo "  expected vr:  ${expected_vr}" >&2
+                exit 1
+            fi
 
             step2_SPAtests.R \
                 --vcfFile=~{vcf} \
@@ -336,10 +389,39 @@ task RunStep2_geneset {
         variance_ratios=(~{sep=' ' variance_ratios})
         model_files=(~{sep=' ' GMMATmodelFiles})
 
-        for i in "${!phecodes[@]}"; do
-            phecode="${phecodes[$i]}"
-            variance_ratio="${variance_ratios[$i]}"
-            model_file="${model_files[$i]}"
+        # Same basename lookup as RunStep2_singlevariant — do not zip by index.
+        if [[ ${#phecodes[@]} -eq 0 ]]; then
+            echo "WARNING: no successful phecodes for Step 2" >&2
+            exit 0
+        fi
+        if [[ ${#model_files[@]} -eq 0 || ${#variance_ratios[@]} -eq 0 ]]; then
+            echo "ERROR: Step 1 produced no model or variance-ratio files" >&2
+            exit 1
+        fi
+
+        for phecode in "${phecodes[@]}"; do
+            expected_rda="~{output_prefix}_step1Out_${phecode}.rda"
+            expected_vr="~{output_prefix}_step1Out_${phecode}.varianceRatio.txt"
+            model_file=""
+            variance_ratio=""
+            for f in "${model_files[@]}"; do
+                if [[ "$(basename "${f}")" == "${expected_rda}" ]]; then
+                    model_file="${f}"
+                    break
+                fi
+            done
+            for f in "${variance_ratios[@]}"; do
+                if [[ "$(basename "${f}")" == "${expected_vr}" ]]; then
+                    variance_ratio="${f}"
+                    break
+                fi
+            done
+            if [[ -z "${model_file}" || -z "${variance_ratio}" ]]; then
+                echo "ERROR: no Step 1 outputs matching ${phecode}" >&2
+                echo "  expected rda: ${expected_rda}" >&2
+                echo "  expected vr:  ${expected_vr}" >&2
+                exit 1
+            fi
 
             step2_SPAtests.R \
                 --vcfFile=~{vcf} \
