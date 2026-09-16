@@ -40,7 +40,9 @@ workflow SAIGE_phewas {
         String cate_var_ratio_max_mac_include = "500"
 
         Int cpu = 2
-        String disk_size = "local-disk 50 HDD"
+        # 50G is tight: AoU sparse GRM + plink + 15 null .rda files. Empty Step 1
+        # outputs are often a full /tmp or a full local-disk, not a SAIGE bug.
+        String disk_size = "local-disk 200 HDD"
         Int preemptible = 1
     }
     
@@ -140,7 +142,7 @@ task RunFitNullGLMM {
         File sparseGRM_IDlist
         File phenotype_file
         Array[String] phecode_list
-        Array[String] covariate_list = ["lr_PC1","lr_PC2","lr_PC3","lr_PC4","lr_PC5","lr_PC6","lr_PC7","lr_PC8","lr_PC9","lr_PC10","lr_PC11","lr_PC12","lr_PC13","lr_PC14","lr_PC15","lr_PC16","lr_PC17","lr_PC18","lr_PC19","lr_PC20","sex","age","age2","age_sex","age2_sex", "coverage", "GC"]
+        Array[String] covariate_list = ["PC1","PC2","PC3","PC4","PC5","PC6","PC7","PC8","PC9","PC10","PC11","PC12","PC13","PC14","PC15","PC16","sex","age","age2","age_sex","age2_sex","coverage", "GC"]
         Array[String] categorical_covariate = ["sex", "GC"]
         String trait_type
         String output_prefix
@@ -162,6 +164,12 @@ task RunFitNullGLMM {
     command <<<
         set -uxo pipefail
 
+        # R tempfile()/save() default to /tmp, which on Terra/dataproc is a small
+        # boot disk. A failed write leaves a 0-byte .rda that glob() still collects.
+        export TMPDIR="${PWD}/tmp" TMP="${PWD}/tmp" TEMP="${PWD}/tmp"
+        mkdir -p "${TMPDIR}"
+        df -h . /tmp >&2 || true
+
         phecodes=(~{sep=' ' phecode_list})
         successful_phecodes=()
         declare -A seen=()
@@ -182,7 +190,9 @@ task RunFitNullGLMM {
         for phecode in "${unique_phecodes[@]}"; do
             model_file="~{output_prefix}_step1Out_${phecode}.rda"
             vr_file="~{output_prefix}_step1Out_${phecode}.varianceRatio.txt"
-            if step1_fitNULLGLMM.R \
+            # SAIGE often writes .rda + .varianceRatio.txt and then exits non-zero
+            # (R warnings / glm.fit). Success is the files, not the R exit code.
+            step1_fitNULLGLMM.R \
                 --bedFile="~{plink_bed_file}" \
                 --bimFile="~{plink_bim_file}" \
                 --famFile="~{plink_fam_file}" \
@@ -201,13 +211,20 @@ task RunFitNullGLMM {
                 --cateVarRatioMaxMACVecInclude=~{cate_var_ratio_max_mac_include} \
                 --IsOverwriteVarianceRatioFile=TRUE \
                 --outputPrefix="~{output_prefix}_step1Out_${phecode}" \
-                ~{inv_norm_arg} \
-                && [[ -f "${model_file}" && -f "${vr_file}" ]]; then
+                ~{inv_norm_arg}
+            rc=$?
+            # -s: exist AND non-empty. SAIGE creates 0-byte placeholders, then
+            # save() can fail (full /tmp, full local-disk) and leave them empty.
+            if [[ -s "${model_file}" && -s "${vr_file}" ]]; then
+                if [[ "${rc}" -ne 0 ]]; then
+                    echo "WARNING: phecode ${phecode} step1 exited ${rc} but outputs exist; keeping" >&2
+                fi
                 successful_phecodes+=("${phecode}")
             else
-                echo "WARNING: phecode ${phecode} failed or missing ${model_file} / ${vr_file}, skipping" >&2
+                echo "WARNING: phecode ${phecode} failed (exit ${rc}); missing or empty ${model_file} ($(stat -c%s "${model_file}" 2>/dev/null || echo 0) bytes) / ${vr_file} ($(stat -c%s "${vr_file}" 2>/dev/null || echo 0) bytes)" >&2
             fi
         done
+        echo "Step 1 kept ${#successful_phecodes[@]} / ${#unique_phecodes[@]} phecodes" >&2
 
         if [[ ${#successful_phecodes[@]} -gt 0 ]]; then
             printf '%s\n' "${successful_phecodes[@]}" > successful_phecodes.txt
@@ -271,6 +288,9 @@ task RunStep2_singlevariant {
     command <<<
         set -euxo pipefail
 
+        export TMPDIR="${PWD}/tmp" TMP="${PWD}/tmp" TEMP="${PWD}/tmp"
+        mkdir -p "${TMPDIR}"
+
         phecodes=(~{sep=' ' phecode_list})
         variance_ratios=(~{sep=' ' variance_ratios})
         model_files=(~{sep=' ' GMMATmodelFiles})
@@ -278,9 +298,22 @@ task RunStep2_singlevariant {
         # glob() order is not the success-list order. Match by exact basename so
         # e.g. EM_200 does not pick up EM_200.1, and a length mismatch cannot
         # silently pair the wrong null model.
+        # If successful_phecodes.txt was empty (SAIGE exited non-zero after
+        # writing files), recover names from the localized .rda files.
+        expected_prefix="~{output_prefix}_step1Out_"
         if [[ ${#phecodes[@]} -eq 0 ]]; then
-            echo "WARNING: no successful phecodes for Step 2" >&2
-            exit 0
+            echo "WARNING: successful_phecode_list was empty; inferring phecodes from Step 1 .rda files" >&2
+            for f in "${model_files[@]+"${model_files[@]}"}"; do
+                [[ -s "${f}" ]] || continue
+                stem="$(basename "${f}" .rda)"
+                if [[ "${stem}" == "${expected_prefix}"* ]]; then
+                    phecodes+=("${stem#"${expected_prefix}"}")
+                fi
+            done
+        fi
+        if [[ ${#phecodes[@]} -eq 0 ]]; then
+            echo "ERROR: no phecodes to test (success list empty and no inferable .rda files)" >&2
+            exit 1
         fi
         if [[ ${#model_files[@]} -eq 0 || ${#variance_ratios[@]} -eq 0 ]]; then
             echo "ERROR: Step 1 produced no model or variance-ratio files" >&2
@@ -293,13 +326,13 @@ task RunStep2_singlevariant {
             model_file=""
             variance_ratio=""
             for f in "${model_files[@]}"; do
-                if [[ "$(basename "${f}")" == "${expected_rda}" ]]; then
+                if [[ "$(basename "${f}")" == "${expected_rda}" && -s "${f}" ]]; then
                     model_file="${f}"
                     break
                 fi
             done
             for f in "${variance_ratios[@]}"; do
-                if [[ "$(basename "${f}")" == "${expected_vr}" ]]; then
+                if [[ "$(basename "${f}")" == "${expected_vr}" && -s "${f}" ]]; then
                     variance_ratio="${f}"
                     break
                 fi
@@ -385,14 +418,28 @@ task RunStep2_geneset {
     command <<<
         set -euxo pipefail
 
+        export TMPDIR="${PWD}/tmp" TMP="${PWD}/tmp" TEMP="${PWD}/tmp"
+        mkdir -p "${TMPDIR}"
+
         phecodes=(~{sep=' ' phecode_list})
         variance_ratios=(~{sep=' ' variance_ratios})
         model_files=(~{sep=' ' GMMATmodelFiles})
 
         # Same basename lookup as RunStep2_singlevariant — do not zip by index.
+        expected_prefix="~{output_prefix}_step1Out_"
         if [[ ${#phecodes[@]} -eq 0 ]]; then
-            echo "WARNING: no successful phecodes for Step 2" >&2
-            exit 0
+            echo "WARNING: successful_phecode_list was empty; inferring phecodes from Step 1 .rda files" >&2
+            for f in "${model_files[@]+"${model_files[@]}"}"; do
+                [[ -s "${f}" ]] || continue
+                stem="$(basename "${f}" .rda)"
+                if [[ "${stem}" == "${expected_prefix}"* ]]; then
+                    phecodes+=("${stem#"${expected_prefix}"}")
+                fi
+            done
+        fi
+        if [[ ${#phecodes[@]} -eq 0 ]]; then
+            echo "ERROR: no phecodes to test (success list empty and no inferable .rda files)" >&2
+            exit 1
         fi
         if [[ ${#model_files[@]} -eq 0 || ${#variance_ratios[@]} -eq 0 ]]; then
             echo "ERROR: Step 1 produced no model or variance-ratio files" >&2
@@ -405,13 +452,13 @@ task RunStep2_geneset {
             model_file=""
             variance_ratio=""
             for f in "${model_files[@]}"; do
-                if [[ "$(basename "${f}")" == "${expected_rda}" ]]; then
+                if [[ "$(basename "${f}")" == "${expected_rda}" && -s "${f}" ]]; then
                     model_file="${f}"
                     break
                 fi
             done
             for f in "${variance_ratios[@]}"; do
-                if [[ "$(basename "${f}")" == "${expected_vr}" ]]; then
+                if [[ "$(basename "${f}")" == "${expected_vr}" && -s "${f}" ]]; then
                     variance_ratio="${f}"
                     break
                 fi
