@@ -29,8 +29,10 @@ workflow SAIGE_phewas {
         
         Float single_variant_minimal_af = 0.01
         Int single_variant_min_mac = 20
+        Float single_variant_max_missing = 1
         Float gene_set_minimal_af = 0
         Float gene_set_min_mac = 0.5
+        Float gene_set_max_missing = 0.5
 
         # MAC category bounds for categorical variance ratios, shared by Step 1 and Step 2 so the
         # two cannot drift. SAIGE requires length(min_exclude) == length(max_include) + 1, and
@@ -82,6 +84,7 @@ workflow SAIGE_phewas {
             output_prefix    = output_prefix,
             minimal_af       = single_variant_minimal_af,
             min_mac          = single_variant_min_mac,
+            max_missing      = single_variant_max_missing,
             is_overridefilp  = is_overridefilp,
             cate_var_ratio_min_mac_exclude = cate_var_ratio_min_mac_exclude,
             cate_var_ratio_max_mac_include = cate_var_ratio_max_mac_include,
@@ -108,6 +111,7 @@ workflow SAIGE_phewas {
                 output_prefix    = output_prefix,
                 minimal_af       = gene_set_minimal_af,
                 min_mac          = gene_set_min_mac,
+                max_missing      = gene_set_max_missing,
                 GroupFile        = select_first([GroupFile, ""]),
                 cate_var_ratio_min_mac_exclude = cate_var_ratio_min_mac_exclude,
                 cate_var_ratio_max_mac_include = cate_var_ratio_max_mac_include,
@@ -273,6 +277,7 @@ task RunStep2_singlevariant {
         Boolean is_fastTest = true
         Float minimal_af
         Int min_mac
+        Float max_missing
         String cate_var_ratio_min_mac_exclude = "10,20.5"
         String cate_var_ratio_max_mac_include = "20.5"
 
@@ -353,6 +358,7 @@ task RunStep2_singlevariant {
                 --SAIGEOutputFile=~{output_prefix}_step2Out_${phecode}_singlevar \
                 --minMAF=~{minimal_af} \
                 --minMAC=~{min_mac} \
+                --maxMissing=~{max_missing} \
                 ~{"--sparseGRMFile=" + sparseGRM} \
                 ~{"--sparseGRMSampleIDFile=" + sparseGRM_IDlist} \
                 --cateVarRatioMinMACVecExclude=~{cate_var_ratio_min_mac_exclude} \
@@ -400,6 +406,7 @@ task RunStep2_geneset {
         String output_prefix
         Float minimal_af
         Float min_mac
+        Float max_missing
         File GroupFile
         # See RunStep2_singlevariant — Step 1 fits with the sparse GRM, so Step 2 needs it too.
         File? sparseGRM
@@ -479,6 +486,7 @@ task RunStep2_geneset {
                 --SAIGEOutputFile=~{output_prefix}_step2Out_${phecode}_geneset \
                 --minMAF=~{minimal_af} \
                 --minMAC=~{min_mac} \
+                --maxMissing=~{max_missing}
                 ~{"--sparseGRMFile=" + sparseGRM} \
                 ~{"--sparseGRMSampleIDFile=" + sparseGRM_IDlist} \
                 --cateVarRatioMinMACVecExclude=~{cate_var_ratio_min_mac_exclude} \
