@@ -27,8 +27,8 @@ workflow SAIGE_phewas {
 
         String memory = "8G"
         
-        Float single_variant_minimal_af = 0.01
-        Int single_variant_min_mac = 20
+        Float single_variant_minimal_af = 0.000001
+        Int single_variant_min_mac = 10
         Float single_variant_max_missing = 1
         Float gene_set_minimal_af = 0
         Float gene_set_min_mac = 0.5
