@@ -17,7 +17,7 @@ workflow SAIGE_phewas {
         File? heteroplasmic_vcf
         File? heteroplasmic_vcf_csi
         File? GroupFile
-        String chromosome
+        Array[String] chromosome_list
         File phenotype_file
         String trait_type
         String output_prefix
@@ -79,7 +79,7 @@ workflow SAIGE_phewas {
             sparseGRM        = sparseGRM,
             sparseGRM_IDlist = sparseGRM_IDlist,
             vcffield         = vcffield,
-            chromo           = chromosome,
+            chromo_list           = chromosome_list,
             phecode_list     = read_lines(RunFitNullGLMM.successful_phecode_list),
             output_prefix    = output_prefix,
             minimal_af       = single_variant_minimal_af,
@@ -106,7 +106,7 @@ workflow SAIGE_phewas {
                 sparseGRM        = sparseGRM,
                 sparseGRM_IDlist = sparseGRM_IDlist,
                 vcffield         = vcffield,
-                chromo           = chromosome,
+                chromo_list           = chromosome_list,
                 phecode_list     = read_lines(RunFitNullGLMM.successful_phecode_list),
                 output_prefix    = output_prefix,
                 minimal_af       = gene_set_minimal_af,
@@ -270,7 +270,7 @@ task RunStep2_singlevariant {
         File? sparseGRM
         File? sparseGRM_IDlist
         String vcffield
-        String chromo
+        Array[String] chromo_list
         Array[String] phecode_list
         String output_prefix
         Boolean is_overridefilp = false
@@ -348,28 +348,28 @@ task RunStep2_singlevariant {
                 echo "  expected vr:  ${expected_vr}" >&2
                 exit 1
             fi
-
-            step2_SPAtests.R \
-                --vcfFile=~{vcf} \
-                --vcfFileIndex=~{vcf_csi} \
-                --vcfField=~{vcffield} \
-                --AlleleOrder=ref-first \
-                --chrom=~{chromo} \
-                --SAIGEOutputFile=~{output_prefix}_step2Out_${phecode}_singlevar \
-                --minMAF=~{minimal_af} \
-                --minMAC=~{min_mac} \
-                --maxMissing=~{max_missing} \
-                ~{"--sparseGRMFile=" + sparseGRM} \
-                ~{"--sparseGRMSampleIDFile=" + sparseGRM_IDlist} \
-                --cateVarRatioMinMACVecExclude=~{cate_var_ratio_min_mac_exclude} \
-                --cateVarRatioMaxMACVecInclude=~{cate_var_ratio_max_mac_include} \
-                --GMMATmodelFile="${model_file}" \
-                --varianceRatioFile="${variance_ratio}" \
-                --is_Firth_beta=TRUE \
-                ~{true="--is_fastTest=TRUE" false="--is_fastTest=FALSE" is_fastTest} \
-                --LOCO=FALSE \
-                ~{true="--is_overrideflip=TRUE" false="" is_overridefilp} \
-                --is_output_moreDetails=TRUE
+            for chromo in "${chromo_list[@]}"; do
+                step2_SPAtests.R \
+                    --vcfFile=~{vcf} \
+                    --vcfFileIndex=~{vcf_csi} \
+                    --vcfField=~{vcffield} \
+                    --AlleleOrder=ref-first \
+                    --chrom=${chromo} \
+                    --SAIGEOutputFile=~{output_prefix}_step2Out_${phecode}_${chromo}_singlevar \
+                    --minMAF=~{minimal_af} \
+                    --minMAC=~{min_mac} \
+                    --maxMissing=~{max_missing} \
+                    ~{"--sparseGRMFile=" + sparseGRM} \
+                    ~{"--sparseGRMSampleIDFile=" + sparseGRM_IDlist} \
+                    --cateVarRatioMinMACVecExclude=~{cate_var_ratio_min_mac_exclude} \
+                    --cateVarRatioMaxMACVecInclude=~{cate_var_ratio_max_mac_include} \
+                    --GMMATmodelFile="${model_file}" \
+                    --varianceRatioFile="${variance_ratio}" \
+                    --is_Firth_beta=TRUE \
+                    ~{true="--is_fastTest=TRUE" false="--is_fastTest=FALSE" is_fastTest} \
+                    --LOCO=FALSE \
+                    ~{true="--is_overrideflip=TRUE" false="" is_overridefilp} \
+                    --is_output_moreDetails=TRUE
         done
     >>>
 
@@ -401,7 +401,7 @@ task RunStep2_geneset {
         Array[File] variance_ratios
         Array[File] GMMATmodelFiles
         String vcffield
-        String chromo
+        Array[String] chromo_list
         Array[String] phecode_list
         String output_prefix
         Float minimal_af
@@ -476,31 +476,31 @@ task RunStep2_geneset {
                 echo "  expected vr:  ${expected_vr}" >&2
                 exit 1
             fi
-
-            step2_SPAtests.R \
-                --vcfFile=~{vcf} \
-                --vcfFileIndex=~{vcf_csi} \
-                --vcfField=~{vcffield} \
-                --AlleleOrder=ref-first \
-                --chrom=~{chromo} \
-                --SAIGEOutputFile=~{output_prefix}_step2Out_${phecode}_geneset \
-                --minMAF=~{minimal_af} \
-                --minMAC=~{min_mac} \
-                --maxMissing=~{max_missing}
-                ~{"--sparseGRMFile=" + sparseGRM} \
-                ~{"--sparseGRMSampleIDFile=" + sparseGRM_IDlist} \
-                --cateVarRatioMinMACVecExclude=~{cate_var_ratio_min_mac_exclude} \
-                --cateVarRatioMaxMACVecInclude=~{cate_var_ratio_max_mac_include} \
-                --GMMATmodelFile="${model_file}" \
-                --varianceRatioFile="${variance_ratio}" \
-                --is_Firth_beta=TRUE \
-                --LOCO=FALSE \
-                --groupFile="~{GroupFile}" \
-                --annotation_in_groupTest="non_coding_transcript_exon,start_lost,stop_gained;start_lost,missense,synonymous,frameshift,stop_gained,stop_lost,stop_retained,dloop" \
-                --maxMAF_in_groupTest=0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5 \
-                --lr_PCutoffforFirth=0.05 \
-                --is_output_markerList_in_groupTest=TRUE \
-                --is_output_moreDetails=TRUE
+            for chromo in "${chromo_list[@]}"; do
+                step2_SPAtests.R \
+                    --vcfFile=~{vcf} \
+                    --vcfFileIndex=~{vcf_csi} \
+                    --vcfField=~{vcffield} \
+                    --AlleleOrder=ref-first \
+                    --chrom=${chromo} \
+                    --SAIGEOutputFile=~{output_prefix}_step2Out_${phecode}_${chromo}_geneset \
+                    --minMAF=~{minimal_af} \
+                    --minMAC=~{min_mac} \
+                    --maxMissing=~{max_missing}
+                    ~{"--sparseGRMFile=" + sparseGRM} \
+                    ~{"--sparseGRMSampleIDFile=" + sparseGRM_IDlist} \
+                    --cateVarRatioMinMACVecExclude=~{cate_var_ratio_min_mac_exclude} \
+                    --cateVarRatioMaxMACVecInclude=~{cate_var_ratio_max_mac_include} \
+                    --GMMATmodelFile="${model_file}" \
+                    --varianceRatioFile="${variance_ratio}" \
+                    --is_Firth_beta=TRUE \
+                    --LOCO=FALSE \
+                    --groupFile="~{GroupFile}" \
+                    --annotation_in_groupTest="non_coding_transcript_exon,start_lost,stop_gained;start_lost,missense,synonymous,frameshift,stop_gained,stop_lost,stop_retained,dloop" \
+                    --maxMAF_in_groupTest=0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5 \
+                    --lr_PCutoffforFirth=0.05 \
+                    --is_output_markerList_in_groupTest=TRUE \
+                    --is_output_moreDetails=TRUE
         done
     >>>
 
