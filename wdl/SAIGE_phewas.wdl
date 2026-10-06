@@ -19,7 +19,7 @@ workflow SAIGE_phewas {
         File? GroupFile
         Array[String] chromosome_list
         Array[String] covariate_list  = ["PC1","PC2","PC3","PC4","PC5","PC6","PC7","PC8","PC9","PC10","PC11","PC12","PC13","PC14","PC15","PC16","sex","age","age2","age_sex","age2_sex"]
-        Array[String] categorical_covariate_list = ["sex", "GC"]
+        Array[String] categorical_covariate_list = ["sex"]
         File phenotype_file
         String trait_type
         String output_prefix
