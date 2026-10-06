@@ -18,6 +18,8 @@ workflow SAIGE_phewas {
         File? heteroplasmic_vcf_csi
         File? GroupFile
         Array[String] chromosome_list
+        Array[String] covariate_list  = ["PC1","PC2","PC3","PC4","PC5","PC6","PC7","PC8","PC9","PC10","PC11","PC12","PC13","PC14","PC15","PC16","sex","age","age2","age_sex","age2_sex"]
+        Array[String] categorical_covariate_list = ["sex", "GC"]
         File phenotype_file
         String trait_type
         String output_prefix
@@ -63,6 +65,9 @@ workflow SAIGE_phewas {
             saige_docker      = saige_docker,
             cate_var_ratio_min_mac_exclude = cate_var_ratio_min_mac_exclude,
             cate_var_ratio_max_mac_include = cate_var_ratio_max_mac_include,
+            covariate_list = covariate_list,
+            categorical_covariate = categorical_covariate_list,
+
             memory            = memory,
             cpu               = cpu,
             disk              = disk_size,
@@ -146,8 +151,8 @@ task RunFitNullGLMM {
         File sparseGRM_IDlist
         File phenotype_file
         Array[String] phecode_list
-        Array[String] covariate_list = ["PC1","PC2","PC3","PC4","PC5","PC6","PC7","PC8","PC9","PC10","PC11","PC12","PC13","PC14","PC15","PC16","sex","age","age2","age_sex","age2_sex","coverage", "GC"]
-        Array[String] categorical_covariate = ["sex", "GC"]
+        Array[String] covariate_list
+        Array[String] categorical_covariate
         String trait_type
         String output_prefix
         String saige_docker
