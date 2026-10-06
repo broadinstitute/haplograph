@@ -299,6 +299,7 @@ task RunStep2_singlevariant {
         phecodes=(~{sep=' ' phecode_list})
         variance_ratios=(~{sep=' ' variance_ratios})
         model_files=(~{sep=' ' GMMATmodelFiles})
+        chromo_list=(~{sep=' ' chromo_list})
 
         # glob() order is not the success-list order. Match by exact basename so
         # e.g. EM_200 does not pick up EM_200.1, and a length mismatch cannot
@@ -370,6 +371,7 @@ task RunStep2_singlevariant {
                     --LOCO=FALSE \
                     ~{true="--is_overrideflip=TRUE" false="" is_overridefilp} \
                     --is_output_moreDetails=TRUE
+            done
         done
     >>>
 
@@ -431,6 +433,7 @@ task RunStep2_geneset {
         phecodes=(~{sep=' ' phecode_list})
         variance_ratios=(~{sep=' ' variance_ratios})
         model_files=(~{sep=' ' GMMATmodelFiles})
+        chromo_list=(~{sep=' ' chromo_list})
 
         # Same basename lookup as RunStep2_singlevariant — do not zip by index.
         expected_prefix="~{output_prefix}_step1Out_"
@@ -486,7 +489,7 @@ task RunStep2_geneset {
                     --SAIGEOutputFile=~{output_prefix}_step2Out_${phecode}_${chromo}_geneset \
                     --minMAF=~{minimal_af} \
                     --minMAC=~{min_mac} \
-                    --maxMissing=~{max_missing}
+                    --maxMissing=~{max_missing} \
                     ~{"--sparseGRMFile=" + sparseGRM} \
                     ~{"--sparseGRMSampleIDFile=" + sparseGRM_IDlist} \
                     --cateVarRatioMinMACVecExclude=~{cate_var_ratio_min_mac_exclude} \
@@ -501,6 +504,7 @@ task RunStep2_geneset {
                     --lr_PCutoffforFirth=0.05 \
                     --is_output_markerList_in_groupTest=TRUE \
                     --is_output_moreDetails=TRUE
+            done
         done
     >>>
 
