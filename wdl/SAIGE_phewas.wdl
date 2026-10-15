@@ -28,6 +28,9 @@ workflow SAIGE_phewas {
         Boolean is_overridefilp
 
         String memory = "8G"
+        # Step 1 (fitNULLGLMM) loads the full AoU sparse GRM + plink into R; 8G gets OOM-killed
+        # (SIGKILL / exit 137), leaving 0-byte .rda outputs. Keep Step 1 on its own larger knob.
+        String step1_memory = "32G"
         
         Float single_variant_minimal_af = 0.0001
         Int single_variant_min_mac = 20
@@ -68,7 +71,7 @@ workflow SAIGE_phewas {
             covariate_list = covariate_list,
             categorical_covariate = categorical_covariate_list,
 
-            memory            = memory,
+            memory            = step1_memory,
             cpu               = cpu,
             disk              = disk_size,
             preemptible       = preemptible
