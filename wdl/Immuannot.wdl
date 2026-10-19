@@ -131,7 +131,8 @@ task immunoAnnotate {
     input {
         File target_asm
         String prefix
-        Int threads = 2
+        Int threads = 4
+        RuntimeAttr? runtime_attr_override
     }
 
     command <<<
@@ -166,13 +167,23 @@ task immunoAnnotate {
     }
 
     Int disk_size = 100 + ceil(2 * size(target_asm, "GiB"))
-
+    RuntimeAttr default_attr = object {
+        cpu_cores:          4,
+        mem_gb:             16,
+        disk_gb:            disk_size,
+        boot_disk_gb:       10,
+        preemptible_tries:  2,
+        max_retries:        1,
+        docker:             "us.gcr.io/broad-dsp-lrma/hangsuunc/immuannot:v1"
+    }
+    RuntimeAttr runtime_attr = select_first([runtime_attr_override, default_attr])
     runtime {
-        cpu: 4
-        memory: "16 GiB"
-        disks: "local-disk " + disk_size + " HDD"
-        preemptible: 2
-        maxRetries: 1
-        docker: "us.gcr.io/broad-dsp-lrma/hangsuunc/immuannot:v1"
+        cpu:                    select_first([runtime_attr.cpu_cores,         default_attr.cpu_cores])
+        memory:                 select_first([runtime_attr.mem_gb,            default_attr.mem_gb]) + " GiB"
+        disks: "local-disk " +  select_first([runtime_attr.disk_gb,           default_attr.disk_gb]) + " HDD"
+        bootDiskSizeGb:         select_first([runtime_attr.boot_disk_gb,      default_attr.boot_disk_gb])
+        preemptible:            select_first([runtime_attr.preemptible_tries, default_attr.preemptible_tries])
+        maxRetries:             select_first([runtime_attr.max_retries,       default_attr.max_retries])
+        docker:                 select_first([runtime_attr.docker,            default_attr.docker])
     }
 }

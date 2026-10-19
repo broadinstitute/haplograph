@@ -17,6 +17,8 @@ workflow SAIGE_phewas {
         File? heteroplasmic_vcf
         File? heteroplasmic_vcf_csi
         File? GroupFile
+        Array[File]? null_model_rdas_list
+        Array[File]? variance_ratio_txts_list
         Array[String] chromosome_list
         Array[String] covariate_list  = ["PC1","PC2","PC3","PC4","PC5","PC6","PC7","PC8","PC9","PC10","PC11","PC12","PC13","PC14","PC15","PC16","sex","age","age2","age_sex","age2_sex"]
         Array[String] categorical_covariate_list = ["sex"]
@@ -54,41 +56,47 @@ workflow SAIGE_phewas {
     }
     
     # Step 1: fit one null GLMM per phecode in a single batch task
-    call RunFitNullGLMM {
-        input:
-            plink_bed_file    = plink_bed_file,
-            plink_bim_file    = plink_bim_file,
-            plink_fam_file    = plink_fam_file,
-            sparseGRM         = sparseGRM,
-            sparseGRM_IDlist  = sparseGRM_IDlist,
-            phenotype_file    = phenotype_file,
-            phecode_list      = phecode_list,
-            trait_type        = trait_type,
-            output_prefix     = output_prefix,
-            saige_docker      = saige_docker,
-            cate_var_ratio_min_mac_exclude = cate_var_ratio_min_mac_exclude,
-            cate_var_ratio_max_mac_include = cate_var_ratio_max_mac_include,
-            covariate_list = covariate_list,
-            categorical_covariate = categorical_covariate_list,
+    if (!defined(null_model_rdas_list) || !defined(variance_ratio_txts_list)) { 
+        call RunFitNullGLMM {
+            input:
+                plink_bed_file    = plink_bed_file,
+                plink_bim_file    = plink_bim_file,
+                plink_fam_file    = plink_fam_file,
+                sparseGRM         = sparseGRM,
+                sparseGRM_IDlist  = sparseGRM_IDlist,
+                phenotype_file    = phenotype_file,
+                phecode_list      = phecode_list,
+                trait_type        = trait_type,
+                output_prefix     = output_prefix,
+                saige_docker      = saige_docker,
+                cate_var_ratio_min_mac_exclude = cate_var_ratio_min_mac_exclude,
+                cate_var_ratio_max_mac_include = cate_var_ratio_max_mac_include,
+                covariate_list = covariate_list,
+                categorical_covariate = categorical_covariate_list,
 
-            memory            = step1_memory,
-            cpu               = cpu,
-            disk              = disk_size,
-            preemptible       = preemptible
+                memory            = step1_memory,
+                cpu               = cpu,
+                disk              = disk_size,
+                preemptible       = preemptible
+        }
     }
+    # When Step 1 ran, use its successful subset; otherwise use the workflow phecode_list.
+    Array[String] step2_phecode_list = if defined(RunFitNullGLMM.successful_phecode_list)
+        then read_lines(select_first([RunFitNullGLMM.successful_phecode_list]))
+        else phecode_list
 
     # Step 2a: single-variant test (homoplasmic VCF) for all phecodes
     call RunStep2_singlevariant {
         input:
             vcf              = homoplasmic_vcf,
             vcf_csi          = homoplasmic_vcf_csi,
-            variance_ratios  = RunFitNullGLMM.variance_ratio_txts,
-            GMMATmodelFiles  = RunFitNullGLMM.null_model_rdas,
+            variance_ratios  = select_first([variance_ratio_txts_list, RunFitNullGLMM.variance_ratio_txts]),
+            GMMATmodelFiles  = select_first([null_model_rdas_list, RunFitNullGLMM.null_model_rdas]),
             sparseGRM        = sparseGRM,
             sparseGRM_IDlist = sparseGRM_IDlist,
             vcffield         = vcffield,
             chromo_list           = chromosome_list,
-            phecode_list     = read_lines(RunFitNullGLMM.successful_phecode_list),
+            phecode_list     = step2_phecode_list,
             output_prefix    = output_prefix,
             minimal_af       = single_variant_minimal_af,
             min_mac          = single_variant_min_mac,
@@ -109,13 +117,13 @@ workflow SAIGE_phewas {
             input:
                 vcf              = select_first([heteroplasmic_vcf, ""]),
                 vcf_csi          = select_first([heteroplasmic_vcf_csi, ""]),
-                variance_ratios  = RunFitNullGLMM.variance_ratio_txts,
-                GMMATmodelFiles  = RunFitNullGLMM.null_model_rdas,
+                variance_ratios  = select_first([variance_ratio_txts_list, RunFitNullGLMM.variance_ratio_txts]),
+                GMMATmodelFiles  = select_first([null_model_rdas_list, RunFitNullGLMM.null_model_rdas]),
                 sparseGRM        = sparseGRM,
                 sparseGRM_IDlist = sparseGRM_IDlist,
                 vcffield         = vcffield,
                 chromo_list           = chromosome_list,
-                phecode_list     = read_lines(RunFitNullGLMM.successful_phecode_list),
+                phecode_list     = step2_phecode_list,
                 output_prefix    = output_prefix,
                 minimal_af       = gene_set_minimal_af,
                 min_mac          = gene_set_min_mac,
@@ -133,8 +141,8 @@ workflow SAIGE_phewas {
 
 
     output {
-        Array[File] null_model_rdas        = RunFitNullGLMM.null_model_rdas
-        Array[File] variance_ratio_txts    = RunFitNullGLMM.variance_ratio_txts
+        Array[File]? null_model_rdas        = RunFitNullGLMM.null_model_rdas
+        Array[File]? variance_ratio_txts    = RunFitNullGLMM.variance_ratio_txts
         Array[File] singlevariant_outputs  = RunStep2_singlevariant.outputfiles
         Array[File]? geneset_outputs        = RunStep2_geneset.outputfiles
     }
