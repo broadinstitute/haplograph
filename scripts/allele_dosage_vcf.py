@@ -15,8 +15,8 @@ that resolution, so HLA-A*01:01 and HLA-A*01:02 both count as HLA-A*01. The bare
 gene is not a marker. KIR stays nested, coarse to fine, and likewise omits the
 bare gene.
 
-Classic HLA genes (A, B, C, DRB1, DQA1, DQB1, DPA1, DPB1) with more than four
-allele rows in one sample are counted from the set of distinct alleles.
+Classical HLA calls are resolved within each haplotype, preserving homozygotes.
+Competing calls are usable only at resolutions where they agree.
 
 What IS an error is counting annotation rows instead of gene copies. When one
 locus yields several rows -- overlapping annotations, two candidate consensus
@@ -30,14 +30,17 @@ genes (C4, KIR2DL4/3DP1/3DS1) sit at non-overlapping coordinates and survive.
 Haplotype-aware by design: the (sample, hap) pair is part of the locus key, so a
 homozygote keeps both copies.
 
-Caveat: a sample absent from a marker's Counter reads as dosage 0, which merges
-"this haplotype lacks the gene" with "this haplotype did not assemble". For the
-called / absent / missing distinction use hla_kir_dosage_matrix.py instead.
+Additive dosage is the default. Unresolved dosage is '.' in VCF and NA in the
+matrix. Exact dosage requires two observed haplotypes and usable locus calls;
+variable genes additionally require a spanned block. C4 has no completeness
+anchors: use --assume-complete only for independently verified complete input.
+Counters hold confirmed observed copies; use dosage_matrix or dosage_value to
+include uncertainty rather than interpreting a Counter's absent entry as zero.
 
 Library use
 -----------
     import pandas as pd
-    from allele_dosage import collapse_copies, allele_dosages, dosage_matrix
+    from allele_dosage_vcf import collapse_copies, allele_dosages, dosage_matrix
 
     df = pd.read_csv("hprc.immuannot.csv", sep=None, engine="python")
     Allele_dict = allele_dosages(collapse_copies(df))   # {marker: {sample: n}}
@@ -49,7 +52,7 @@ Library use
 
 CLI
 ---
-    python allele_dosage.py --annot hprc.immuannot.csv --out hprc
+    python allele_dosage_vcf.py --annot hprc.immuannot.csv --out hprc
 writes <out>.dosage_matrix.tsv, <out>.duplicate_loci.tsv, and <out>.dosage.vcf.
 """
 from __future__ import annotations
@@ -73,13 +76,11 @@ VARIABLE_COPY_GENES = frozenset({
     "KIR3DL1", "KIR3DP1", "KIR3DS1",
 })
 
-# Diploid classical loci. More than four allele rows for one sample is
-# redundant annotation, not extra copies; dosage then comes from the set.
+# Classical loci on alternate contigs are representations of one haplotype.
 CLASSIC_HLA_GENES = frozenset({
     "HLA-A", "HLA-B", "HLA-C",
     "HLA-DRB1", "HLA-DQA1", "HLA-DQB1", "HLA-DPA1", "HLA-DPB1",
 })
-CLASSIC_HLA_MAX_CALLS = 4
 
 HLA_DIGITS = 2            # 2, 4, 6, or 8: the one HLA resolution emitted
 KIR_DIGITS = (3, 5, 7)    # KIR resolutions emitted, coarse to fine
@@ -219,7 +220,7 @@ COLUMN_CANDIDATES = {
     "sample": ("Sample", "sample", "research_id"),
     "hap": ("Hap", "hap", "Haplotype", "haplotype"),
     "gene": ("Gene", "gene"),
-    "allele": ("Consensus_Allele", "Allele", "allele", "consensus"),
+    "allele": ("Consensus_Allele", "Allele", "Alleles", "template_allele", "consensus"),
     "contig": ("Contig", "contig"),
     "start": ("Spos", "start", "Start"),
     "end": ("Epos", "end", "End"),
@@ -283,7 +284,7 @@ def marker_keys(gene, allele, hla_digits=HLA_DIGITS, kir_digits=KIR_DIGITS):
     if not name or not g:
         return []
     if g.startswith("KIR"):
-        keys = [f"{g}*{name[:n]}" for n in kir_digits]
+        keys = [f"{g}*{name[:n]}" for n in kir_digits if len(name) >= n]
     else:
         if hla_digits not in (2, 4, 6, 8):
             raise ValueError(f"hla_digits must be 2, 4, 6, or 8, got {hla_digits}")
@@ -312,14 +313,24 @@ def _locus_ids(d, grp, starts, ends):
     return ids
 
 
+def candidate_alleles(row, allele_col):
+    """All competing calls retained for one physical copy, including no-call."""
+    if "_candidate_alleles" in row:
+        return row["_candidate_alleles"]
+    value = row[allele_col] if allele_col is not None else None
+    return (None if pd.isna(value) or str(value).strip().lower() in
+            ("", "na", "nan", "none", ".", "undetermined") else str(value).strip(),)
+
+
 def collapse_copies(df, verbose=True, cross_contig="keep", one_per_hap=None,
                     **overrides):
     """Collapse redundant annotation rows so each row is one gene copy.
 
     Rows for the same gene on the same (sample, haplotype, contig) whose
     intervals overlap are one locus and keep one representative: a row carrying
-    an allele is preferred, then the longest annotation. Non-overlapping copies
-    of a gene are left alone, so real duplications survive.
+    an allele is preferred, then the longest annotation. All usable competing
+    calls survive in _candidate_alleles for resolution-aware counting.
+    Non-overlapping copies of a gene are left alone, so real duplications survive.
 
     cross_contig : what to do when one (sample, haplotype, gene) has copies on
         several contigs -- usually redundant/alternate contigs of the same
@@ -365,11 +376,19 @@ def collapse_copies(df, verbose=True, cross_contig="keep", one_per_hap=None,
               "contig are merged by position only")
 
     d = df.sort_values(key + [c["start"], c["end"]]).copy()
+    candidates = [candidate_alleles(r, c["allele"]) for _, r in d.iterrows()]
+    d["_candidate_alleles"] = candidates
     d["_locus"] = _locus_ids(d, d.groupby(key, sort=False).ngroup().to_numpy(),
                              d[c["start"]].to_numpy(), d[c["end"]].to_numpy())
     d["_has"] = (d[c["allele"]].notna() if c["allele"] is not None
                  else False)
     d["_len"] = d[c["end"]] - d[c["start"]]
+    calls = d.groupby("_locus")["_candidate_alleles"].agg(
+        lambda rows: tuple(dict.fromkeys(a for calls in rows for a in calls)))
+    # Missing annotations add no alternative when a usable call exists at the
+    # same locus. Two different usable calls remain competing candidates.
+    calls = calls.map(lambda values: tuple(v for v in values if v is not None) or (None,))
+    d["_candidate_alleles"] = d["_locus"].map(calls)
     out = (d.sort_values(["_locus", "_has", "_len"])
              .drop_duplicates("_locus", keep="last")
              .drop(columns=["_locus", "_has", "_len"])
@@ -466,48 +485,137 @@ def copy_number_outliers(df, expected=2, genes=None, collapse=True, **overrides)
 # --------------------------------------------------------------------------- #
 # Counting                                                                     #
 # --------------------------------------------------------------------------- #
+class AlleleDosages(defaultdict):
+    """Confirmed copy counters plus samples whose gene dosage is unresolved."""
+    def __init__(self):
+        super().__init__(Counter)
+        self.uncertain = defaultdict(set)
+        self.uncertain_resolution = defaultdict(set)
+        self.samples = []
+
+
+def marker_resolution(marker):
+    gene, _, allele = marker.partition("*")
+    return len(allele) if gene.startswith("KIR") else len(allele.split(":")) if allele else 0
+
+
+def dosage_value(dosages, marker, sample, additive=True):
+    """Exact dosage or None; a confirmed carrier is known in dominant mode."""
+    if hasattr(dosages, "samples") and sample not in dosages.samples:
+        return None
+    count = int(dosages.get(marker, {}).get(sample, 0))
+    if not additive and count:
+        return 1
+    if sample in getattr(dosages, "uncertain", {}).get(_marker_gene(marker), set()):
+        return None
+    resolution_key = (_marker_gene(marker), marker_resolution(marker))
+    if sample in getattr(dosages, "uncertain_resolution", {}).get(resolution_key, set()):
+        return None
+    return count if additive else int(count > 0)
+
+
 def allele_dosages(df, hla_digits=HLA_DIGITS, kir_digits=KIR_DIGITS,
-                   collapse=False, verbose=True, **overrides):
-    """{marker: Counter({sample: copies})} summed over the sample's haplotypes.
+                   collapse=True, verbose=True, assume_complete=False, **overrides):
+    """Confirmed observed counts with completeness and resolution uncertainty.
 
-    Allele rows are stored per sample and gene first. Every row counts, except
-    for a classic HLA gene whose list is longer than four: those rows are
-    collapsed to the set of distinct alleles, and each allele counts once.
-    collapse=True runs collapse_copies first; pass an already-collapsed frame
-    otherwise. Counters behave like the plain dicts the notebook version built,
-    so Allele_dict[marker][sample] and .get(sample, 0) still work.
+    Collapse physical copies by default. Classical HLA copy counts must agree
+    across alternate contig representations of each haplotype. Distinct loci
+    within a contig retain their multiplicity. No sample-wide set operation is
+    used. A diploid sample needs exactly two nonmissing hap IDs.
+    assume_complete certifies absence/completeness, not unknown allele identity.
     """
-    if collapse:
-        df = collapse_copies(df, verbose=verbose, **overrides)
     c = resolve_columns(df, **overrides)
-    genes = df[c["gene"]].astype(str)
-    samples = df[c["sample"]].astype(str)
-    alleles = (df[c["allele"]] if c["allele"] is not None
-               else pd.Series([None] * len(df), index=df.index))
-    calls = defaultdict(lambda: defaultdict(list))   # sample -> gene -> [allele]
-    for gene, allele, sample in zip(genes, alleles, samples):
-        allele = None if pd.isna(allele) else str(allele)
-        calls[sample][gene].append(allele)
-
-    out = defaultdict(Counter)
-    for sample, by_gene in calls.items():
-        for gene, alleles in by_gene.items():
-            if gene in CLASSIC_HLA_GENES and len(alleles) > CLASSIC_HLA_MAX_CALLS:
-                alleles = set(alleles)
-            for allele in alleles:
-                for key in marker_keys(gene, allele, hla_digits, kir_digits):
-                    out[key][sample] += 1
+    d = df.copy()
+    for role in ("sample", "hap", "gene", "contig"):
+        if c[role] is not None:
+            d[c[role]] = d[c[role]].map(lambda v: str(v).strip() if pd.notna(v) else "")
+    d[c["gene"]] = d[c["gene"]].str.split("*").str[0]
+    if collapse:
+        d = collapse_copies(d, verbose=verbose, **overrides)
+    out = AlleleDosages()
+    out.samples = sorted(d[c["sample"]].unique())
+    hap_col = c["hap"]
+    invalid_hap = {"", "nan", "None", "NA", "."}
+    haps = {s: set(g[hap_col]) - invalid_hap if hap_col else set()
+            for s, g in d.groupby(c["sample"])}
+    # Variable-gene absence is known only when the corresponding block spans.
+    coverage, covered_contig, gene_block = {}, {}, {}
+    if all(c[k] is not None for k in ("hap", "contig", "start", "end")) and len(d):
+        from hap_block_haplotypes import BLOCKS, collect_block_haplotypes
+        gene_block = {g: name for name, spec in BLOCKS.items() for g in spec["genes"]}
+        blocks = collect_block_haplotypes(
+            d, sample_col=c["sample"], hap_col=hap_col, gene_col=c["gene"],
+            allele_col=c["allele"], contig_col=c["contig"], start_col=c["start"],
+            end_col=c["end"], assume_complete=assume_complete, verbose=False)
+        coverage = {(r.sample, r.hap, str(r.block)): bool(r.complete)
+                    for r in blocks.itertuples()}
+        covered_contig = {(r.sample, r.hap, str(r.block)): r.contig
+                          for r in blocks.itertuples()}
+    group_cols = [c["sample"], c["gene"]] + ([hap_col] if hap_col else [])
+    observed = set()
+    for group, frame in d.groupby(group_cols, dropna=False):
+        sample, gene = group[:2]
+        hap = group[2] if hap_col else ""
+        observed.add((sample, hap, gene))
+        # A spanned contig does not certify additional representations of the
+        # same variable gene on alternate contigs as extra biological copies.
+        if (not assume_complete and c["contig"] is not None and
+                (gene in VARIABLE_COPY_GENES or gene.startswith(("KIR", "C4")))):
+            chosen = covered_contig.get((sample, hap, gene_block.get(gene)))
+            if chosen is not None and set(frame[c["contig"]]) != {chosen}:
+                out.uncertain[gene].add(sample)
+        representations = ([g for _, g in frame.groupby(c["contig"])]
+                           if gene in CLASSIC_HLA_GENES and hap_col and c["contig"] else [frame])
+        resolutions = ((0,) if gene.startswith("C4") else kir_digits
+                       if gene.startswith("KIR") else (hla_digits // 2,))
+        rep_counts = []
+        for representation in representations:
+            counts = Counter()
+            for _, locus in representation.iterrows():
+                alternatives = [set(marker_keys(gene, v, hla_digits, kir_digits))
+                                for v in candidate_alleles(locus, c["allele"])]
+                possible = set.union(*alternatives)
+                certain = set.intersection(*alternatives)
+                for marker in possible:
+                    out[marker]  # retain ambiguous-only markers
+                counts.update(certain)
+                for resolution in resolutions:
+                    choices = {tuple(sorted(m for m in markers if marker_resolution(m) == resolution))
+                               for markers in alternatives}
+                    if len(choices) != 1 or not next(iter(choices)):
+                        out.uncertain_resolution[(gene, resolution)].add(sample)
+            rep_counts.append(counts)
+        markers = set().union(*(set(counts) for counts in rep_counts))
+        for marker in markers:
+            out[marker][sample] += min(counts[marker] for counts in rep_counts)
+        for resolution in resolutions:
+            signatures = {tuple(sorted((m, n) for m, n in counts.items()
+                                       if marker_resolution(m) == resolution))
+                          for counts in rep_counts}
+            if len(signatures) > 1:
+                out.uncertain_resolution[(gene, resolution)].add(sample)
+    for gene in {_marker_gene(m) for m in out}:
+        variable = gene in VARIABLE_COPY_GENES or gene.startswith(("KIR", "C4"))
+        for sample in out.samples:
+            if len(haps[sample]) != 2:
+                out.uncertain[gene].add(sample)
+            for hap in haps[sample]:
+                if variable:
+                    if not assume_complete and not coverage.get((sample, hap, gene_block.get(gene)), False):
+                        out.uncertain[gene].add(sample)
+                elif (sample, hap, gene) not in observed:
+                    out.uncertain[gene].add(sample)
     return out
 
 
 def dosage_matrix(df=None, samples=None, dosages=None, **kwargs):
-    """allele_dosages as a markers x samples DataFrame of integers (0 filled)."""
+    """Markers x samples nullable integers; unresolved dosage stays missing."""
     d = allele_dosages(df, **kwargs) if dosages is None else dosages
-    mat = pd.DataFrame.from_dict({k: dict(v) for k, v in d.items()},
-                                 orient="index")
-    if samples is not None:
-        mat = mat.reindex(columns=list(samples))
-    mat = mat.fillna(0).astype(int).sort_index(axis=0).sort_index(axis=1)
+    samples = list(samples) if samples is not None else getattr(
+        d, "samples", sorted({s for counts in d.values() for s in counts}))
+    mat = pd.DataFrame([[dosage_value(d, m, s) for s in samples] for m in d],
+                       index=list(d), columns=samples, dtype="Int64")
+    mat = mat.sort_index(axis=0).sort_index(axis=1)
     mat.index.name = "marker"
     return mat
 
@@ -580,10 +688,11 @@ def place_markers(markers, coordinates):
 
 
 def write_dosage_vcf(allele_dict, samples, path, coordinates=None,
-                     mode="dominant", min_dosage=0, exclude_samples=(),
+                     mode="additive", min_dosage=0, exclude_samples=(),
                      source="HLA_KIR_Allele_digit2_VCF"):
     """Write a DS-dosage VCF, one row per marker, one column per sample.
 
+    Default "additive" keeps copy counts. Unresolved dosage is '.'.
     mode "dominant" maps copy counts 0, 1, 2+ to dosages 0, 1, 1. KIR, C4,
     TAP, and MICA are copy-number variable, so they keep the raw count in
     either mode. "additive" keeps the raw count for every marker. Samples in
@@ -629,18 +738,16 @@ def write_dosage_vcf(allele_dict, samples, path, coordinates=None,
         fp.write("".join(line + "\n" for line in meta))
         fp.write("#" + "\t".join(header) + "\n")
         for chrom, pos, marker, gene in placed:
-            dosages = allele_dict.get(marker, {})
             # KIR, C4, TAP, and MICA vary in copy number, so a second copy is
             # a real dosage even when every other gene is coded dominant.
             raw = keeps_copy_count(gene) or mode == "additive"
             row = []
             total = 0
             for sample in sample_list:
-                dosage = int(dosages.get(sample, 0))
-                if not raw and dosage > 1:
-                    dosage = 1
-                total += dosage
-                row.append(str(dosage))
+                dosage = dosage_value(allele_dict, marker, sample, additive=raw)
+                if dosage is not None:
+                    total += dosage
+                row.append("." if dosage is None else str(dosage))
             if min_dosage and total < min_dosage:
                 continue
             token = _safe_token(marker)
@@ -667,10 +774,13 @@ def main():
                     help="HLA resolution to keep: 2 -> A*01, 4 -> A*01:01, "
                          "6 -> A*01:01:01, 8 -> A*01:01:01:01")
     ap.add_argument("--kir-digits", type=int, nargs="+", default=list(KIR_DIGITS))
-    ap.add_argument("--additive", action="store_true",
-                    help="write the raw copy count (0, 1, 2); default is "
-                         "dominant (0, 1, 1). KIR, C4, TAP, and MICA stay raw "
-                         "either way")
+    coding = ap.add_mutually_exclusive_group()
+    coding.add_argument("--additive", action="store_true", help="raw copy dosage (default)")
+    coding.add_argument("--dominant", action="store_true",
+                        help="carrier coding; KIR, C4, TAP, and MICA retain raw dosage")
+    ap.add_argument("--assume-complete", action="store_true",
+                    help="certify complete gene annotation on each observed haplotype; "
+                         "does not resolve uncalled or conflicting alleles")
     ap.add_argument("--mode", choices=("dominant", "additive"), default=None,
                     help="same choice as --additive: dominant (0, 1, 1) or "
                          "additive (0, 1, 2). KIR, C4, TAP, and MICA stay raw")
@@ -687,6 +797,8 @@ def main():
         ap.add_argument(f"--col-{role}", default=None,
                         help=f"name of the {role} column")
     args = ap.parse_args()
+    if (args.additive and args.mode == "dominant") or (args.dominant and args.mode == "additive"):
+        ap.error("dosage mode flags disagree")
 
     overrides = {role: getattr(args, f"col_{role}") for role in COLUMN_CANDIDATES}
     df = pd.read_csv(args.annot, sep=None, engine="python")
@@ -698,15 +810,15 @@ def main():
 
     dosages = allele_dosages(df, collapse=not args.no_collapse,
                              hla_digits=args.hla_digits,
-                             kir_digits=tuple(args.kir_digits), **overrides)
+                             kir_digits=tuple(args.kir_digits),
+                             assume_complete=args.assume_complete, **overrides)
     mat = dosage_matrix(dosages=dosages)
-    mat.to_csv(f"{args.out}.dosage_matrix.tsv", sep="\t")
+    mat.to_csv(f"{args.out}.dosage_matrix.tsv", sep="\t", na_rep="NA")
     print(f"{mat.shape[0]} markers x {mat.shape[1]} samples -> "
           f"{args.out}.dosage_matrix.tsv")
 
     if not args.no_vcf:
-        cols = resolve_columns(df, **overrides)
-        all_samples = sorted(set(df[cols["sample"]].astype(str)))
+        all_samples = dosages.samples
         excluded = set()
         if args.exclude_samples:
             with open(args.exclude_samples) as fh:
@@ -716,9 +828,7 @@ def main():
               f"the table, {len(all_samples) - len(sample_list)} excluded")
         coordinates = (load_coordinates(args.coords) if args.coords
                        else GENE_COORDINATES)
-        if args.additive and args.mode == "dominant":
-            ap.error("--additive and --mode dominant disagree")
-        mode = "additive" if args.additive or args.mode == "additive" else "dominant"
+        mode = "dominant" if args.dominant or args.mode == "dominant" else "additive"
         n_markers = write_dosage_vcf(
             dosages, sample_list, f"{args.out}.dosage.vcf",
             coordinates=coordinates, mode=mode,
