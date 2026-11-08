@@ -17,11 +17,18 @@ The allele names must really be in the index: read a saved matrix back with
 numbers and every allele name in the output would be one. An allele-name column
 left in place (`allele`, `marker`, `index`, …) is promoted with a warning; an
 index of bare row numbers is an error rather than a table full of integers.
-Before any linkage statistic, each entry becomes presence (dosage > 0) or
+Missing calls remain unknown and are excluded pairwise. n_samples is the
+number observed for both alleles; n_group_samples is the full group size.
+Before any linkage statistic, each observed entry becomes presence (dosage > 0) or
 absence (dosage == 0). A heterozygote and a homozygote are both carriers, and a
 KIR allele at copy number 3 is the same as one at copy number 1. Zygosity and
 copy number stay visible only in `allele_freq`, which is still counted from the
 original dosages.
+
+These are carrier associations, not haplotype LD or dosage correlations.
+Estimating haplotype LD requires phased calls or a separate haplotype model.
+Allele frequencies use complete locus totals; partially missing locus calls
+are excluded from that dosage-frequency denominator.
 
 Scope
 -----
@@ -34,11 +41,13 @@ read its rows side by side.
 
 Columns
 -------
-  r, r2                 Pearson correlation of the two presence/absence
+  carrier_r, carrier_r2 (aliases: r, r2)
+                        Pearson correlation of the two presence/absence
                         indicators, and its square. For a 0/1 coding this r is
                         the phi coefficient, so it matches `Wn`.
-  D, dmax, Dprime       linkage coefficient D = p11 - p_a*p_b on the carrier
-                        table, the gametic bound from this group's carrier
+  carrier_D, carrier_dmax, carrier_Dprime (aliases: D, dmax, Dprime)
+                        Binary association coefficient D = p11 - p_a*p_b on the carrier
+                        table, the feasible bound from the pair's carrier
                         frequencies, and D/Dmax. Because the bound uses the same
                         margins as D, |D'| stays within 1 apart from rounding.
   Wn                    signed Cramer's V (= phi) on the same 2x2 table, the
@@ -147,9 +156,8 @@ def _as_dosage(dosage: pd.DataFrame, samples_in: str) -> pd.DataFrame:
         raise TypeError(f"non-numeric sample columns: {non_numeric[:5]}{hint}")
     df = df.astype(np.float64)
 
-    if df.isna().any().any():
-        print(f"[warn] {int(df.isna().sum().sum())} missing dosages treated as 0")
-        df = df.fillna(0.0)
+    if np.isinf(df.values).any():
+        raise ValueError("infinite dosages present")
     if (df.values < 0).any():
         raise ValueError("negative dosages present")
     return df
@@ -284,7 +292,7 @@ def _carrier_stats(C: np.ndarray, n: int):
 
 
 def _dprime(delta: np.ndarray, p: np.ndarray):
-    """Normalise the composite LD coefficient by the gametic bound."""
+    """Normalise binary carrier covariance by its feasible table bound."""
     pa, pb = p[:, None], p[None, :]
     pos = np.minimum(pa * (1 - pb), pb * (1 - pa))
     neg = np.maximum(-pa * pb, -(1 - pa) * (1 - pb))
@@ -329,6 +337,10 @@ def pair_ld(
     verbose: bool = True,
 ) -> pd.DataFrame:
     """Presence/absence r2, D' and Wn for every allele pair.
+
+    Missing calls are excluded pairwise. n_samples reports the complete-case
+    count for each pair; n_group_samples reports group size. Explicit carrier_*
+    columns and their legacy aliases describe carrier association, not haplotype LD.
 
     Dosages are turned into a presence/absence matrix first: an entry greater
     than 0 is a carrier. r, D' and Wn are then all computed on that matrix.
@@ -391,8 +403,11 @@ def pair_ld(
 
     # ---- filter alleles once, over all samples ------------------------------
     carriers_all = (X_all > 0).sum(axis=1)
+    complete_totals = np.nansum(T_all, axis=1)
+    complete_copies = np.where(np.isfinite(T_all), X_all, 0).sum(axis=1)
     with np.errstate(divide="ignore", invalid="ignore"):
-        freq_overall = np.where(T_all.sum(1) > 0, X_all.sum(1) / T_all.sum(1), 0.0)
+        freq_overall = np.where(complete_totals > 0,
+                                complete_copies / complete_totals, 0.0)
 
     keep = (carriers_all >= min_carriers) & (freq_overall >= min_freq)
     if keep.sum() < 2:
@@ -407,7 +422,7 @@ def pair_ld(
     alleles = alleles_all[keep]
     loci = loci_all[keep]
     # Carriage, not copy number. Dosage 1 and dosage 2 are both present.
-    P = (X > 0).astype(np.float64)
+    P = np.where(np.isnan(X), np.nan, (X > 0).astype(np.float64))
     n_alleles = P.shape[0]
 
     # ---- pair index ----------------------------------------------------------
@@ -450,35 +465,55 @@ def pair_ld(
         Ps = P[:, idx]
         n = Ps.shape[1]
 
-        # r is phi; the covariance of two 0/1 indicators is D = p11 - pa*pb.
-        r_pa, Dcoef = _corr(Ps)
-        pfreq = Ps.mean(axis=1)
-        dp, dmax = _dprime(Dcoef, pfreq)
+        # Pair-specific complete cases: unknown calls never become absences.
+        observed = np.isfinite(Ps).astype(np.float64)
+        present = np.nan_to_num(Ps)
+        absent = observed - present
+        pair_n = observed @ observed.T
+        n11 = present @ present.T
+        n10 = present @ absent.T
+        n01 = absent @ present.T
+        n00 = absent @ absent.T
+        ca, cb = n11 + n10, n11 + n01
+        with np.errstate(divide="ignore", invalid="ignore"):
+            pa, pb = ca / pair_n, cb / pair_n
+            Dcoef = n11 / pair_n - pa * pb
+            denominator = np.sqrt(ca * (pair_n - ca) * cb * (pair_n - cb))
+            phi = np.where(denominator > 0,
+                           (n11 * n00 - n10 * n01) / denominator, np.nan)
+            r_pa = np.clip(phi, -1.0, 1.0)
+            dmax = np.where(Dcoef >= 0,
+                            np.minimum(pa * (1 - pb), pb * (1 - pa)),
+                            np.minimum(pa * pb, (1 - pa) * (1 - pb)))
+            dp = np.where(dmax > 0, Dcoef / dmax, np.nan)
+        p_chi2 = chi2_dist.sf(pair_n * r_pa**2, df=1)
 
         Xs = X[:, idx]
-        Ts = T[:, idx].sum(axis=1)
+        totals = T[:, idx]
+        # A partially missing locus has an unknown total copy count.
+        valid = np.isfinite(Xs) & np.isfinite(totals)
+        Ts = np.where(valid, totals, 0).sum(axis=1)
         with np.errstate(divide="ignore", invalid="ignore"):
-            afreq = np.where(Ts > 0, Xs.sum(axis=1) / Ts, 0.0)
-
-        phi, p_chi2, n11, n10, n01, n00, carriers = _carrier_stats(Ps, n)
+            afreq = np.where(Ts > 0, np.where(valid, Xs, 0).sum(axis=1) / Ts, np.nan)
 
         blk = pd.DataFrame(
             {
                 "population": name,
-                "n_samples": n,
+                "n_samples": pair_n[ia, ib].astype(int),
+                "n_group_samples": n,
                 "allele_a": alleles[ia],
                 "allele_b": alleles[ib],
                 "locus_a": loci[ia],
                 "locus_b": loci[ib],
                 "same_locus": same_locus,
-                "n_carriers_a": carriers[ia].astype(int),
-                "n_carriers_b": carriers[ib].astype(int),
+                "n_carriers_a": ca[ia, ib].astype(int),
+                "n_carriers_b": cb[ia, ib].astype(int),
                 "n11": n11[ia, ib].astype(int),
                 "n10": n10[ia, ib].astype(int),
                 "n01": n01[ia, ib].astype(int),
                 "n00": n00[ia, ib].astype(int),
-                "carrier_freq_a": carriers[ia] / n,
-                "carrier_freq_b": carriers[ib] / n,
+                "carrier_freq_a": pa[ia, ib],
+                "carrier_freq_b": pb[ia, ib],
                 "allele_freq_a": afreq[ia],
                 "allele_freq_b": afreq[ib],
                 "r": r_pa[ia, ib],
@@ -491,14 +526,19 @@ def pair_ld(
             }
         )
 
+        # Explicit names distinguish carrier association from haplotype LD.
+        for legacy in ("r", "r2", "D", "dmax", "Dprime"):
+            blk["carrier_" + legacy] = blk[legacy]
+
         # The carrier-frequency bound contains D. Anything past 1 is rounding.
         blk["dprime_out_of_bounds"] = blk["Dprime"].abs() > (1.0 + 1e-8)
+        pair_sizes = blk["n_samples"].replace(0, np.nan)
         blk["min_expected_cell"] = np.minimum.reduce(
             [
-                blk["n_carriers_a"] * blk["n_carriers_b"] / n,
-                blk["n_carriers_a"] * (n - blk["n_carriers_b"]) / n,
-                (n - blk["n_carriers_a"]) * blk["n_carriers_b"] / n,
-                (n - blk["n_carriers_a"]) * (n - blk["n_carriers_b"]) / n,
+                blk["n_carriers_a"] * blk["n_carriers_b"] / pair_sizes,
+                blk["n_carriers_a"] * (blk["n_samples"] - blk["n_carriers_b"]) / pair_sizes,
+                (blk["n_samples"] - blk["n_carriers_a"]) * blk["n_carriers_b"] / pair_sizes,
+                (blk["n_samples"] - blk["n_carriers_a"]) * (blk["n_samples"] - blk["n_carriers_b"]) / pair_sizes,
             ]
         )
         blk["sparse_table"] = blk["min_expected_cell"] < 5
