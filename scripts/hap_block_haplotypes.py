@@ -5,8 +5,12 @@ Immuannot annotation table (e.g. hprc.immuannot.csv).
 
 This is `collect_haplotype_features` from hap_structure_plot.py repurposed: instead
 of grouping haplotypes into ranked structures for plotting, it keeps every
-(sample, haplotype) and reports, for each of eight gene blocks, the gene order of
+(sample, haplotype) and reports, for each of nine gene blocks, the gene order of
 that block on that haplotype -- or 0 when the block is not completely assembled.
+
+The class II stretch is three tiled blocks rather than one: DR (DRB1..DRA),
+delta = DO/DQ (DQA1..DOB), and TAP (DMB..DOB), the antigen-processing cluster
+in the 114 kb between DOB and DMB that previously belonged to no block.
 
 Definition of complete
 ----------------------
@@ -18,7 +22,12 @@ are reported, and the structure is oriented so the first anchor reads on the lef
 
 Anchors are not always the first/last gene of the block's gene list: the first
 gene of the DR block (HLA-DRB5) varies in copy number and so cannot witness
-completeness; DR is anchored on DRB1..DRA instead.
+completeness; DR is anchored on DRB1..DRA instead. An anchor need not be a
+member of the block at all -- TAP is bounded by DOB and DMB, which are reported
+in the neighbouring delta and epsilon blocks -- so that adjacent blocks tile
+rather than overlap. A haplotype that spans such a block but carries none of its
+own genes is complete with an empty structure (reason spanned_no_block_gene)
+and contributes no VCF marker.
 
 Haplotypes with no such contig get structure "0" and a reason
 (anchor_missing:<gene> / anchors_on_different_contigs).
@@ -27,6 +36,9 @@ RCCX is the exception: it has "anchors": None. The block is nothing but
 copy-variable C4 genes, so no gene's presence can witness a traversal. Every C4
 copy on the haplotype is reported for inspection, across contigs if need be.
 These observations remain incomplete unless --assume-complete is supplied.
+That flag certifies an annotation, never its absence: a haplotype on which no
+C4 gene was found stays incomplete even with it, because a real deletion and a
+failed annotation are indistinguishable here.
 Multiple contigs cannot establish gene order and remain incomplete regardless.
 Such a block is listed by contig then position, flipped when most copies read
 on the minus strand.
@@ -42,10 +54,16 @@ HLA resolution is `--hla-digits` (0, 2, 4, 6, or 8; default 2), two digits per
 colon field: 0 -> HLA-A, 2 -> HLA-A*01, 4 -> HLA-A*01:01. KIR resolution is
 `--kir-digits` (0, 3, 5, or 7; default 3): 0 -> KIR2DL1, 3 -> KIR2DL1*001,
 5 -> KIR2DL1*00101. Digit 0 is the gene-level haplotype: the allele is dropped
-and `structure_allele` matches `structure` for that gene family. A call shorter
-than a positive resolution keeps the bare gene, so a 2-digit HLA name does not
-appear inside a 4-digit structure. IMGT expression suffixes such as N are kept;
-Immuannot's "new" novel tag is dropped.
+and `structure_allele` matches `structure` for that gene family. A call
+shallower than the requested resolution keeps every field it does have, so one
+coarsely typed gene no longer drags the whole haplotype to gene level: at 4
+digits a 2-digit HLA-N stays "HLA-N*01" beside a 4-digit "HLA-A*01:01". Each
+gene is therefore reported at the deepest resolution available for it, capped
+at the requested one; `allele_depth` reports how deep a label actually went.
+A value that is not an IMGT allele (a bare gene name, "novel", a single-digit
+field) yields the bare gene and marks the haplotype allele-incomplete -- it is
+never pasted on as a pseudo-allele. IMGT expression suffixes such as N are kept
+(only after a digit); Immuannot's "new" novel tag is dropped.
 
 Input
 -----
@@ -62,7 +80,7 @@ Library use
 
     annot = pd.read_csv("hprc.immuannot.csv", index_col=0)
     long = collect_block_haplotypes(annot)                 # one row per hap x block
-    wide = wide_structures(long)                           # one row per hap, 8 columns
+    wide = wide_structures(long)                           # one row per hap, 9 columns
     alpha = long[(long["block"] == "alpha") & long["complete"].eq(1)]
 
 CLI
@@ -72,23 +90,29 @@ writes <out>.block_haplotypes.tsv (long), <out>.block_structures_wide.tsv
 (gene order), <out>.block_haplotypes_wide.tsv (the resolution above),
 <out>.block_structure_counts.tsv, and one dosage VCF of that resolved
 haplotype. The VCF matches allele_dosage_vcf.py: DS is a float dosage and
-the haplotype is the HI field. The ID is the block name plus its index
-(DR_1, KIR_2, ...).
+the haplotype is the HI field. The ID is the block name plus a stable hash of
+the structure (DR_014a83b8), so one haplotype keeps one ID across cohorts and
+--min-dosage settings; ID and HI are the join keys, POS is only a label.
 Additive dosage (0, 1, 2) is the default; --dominant writes carrier status.
-Unresolved dosages are '.'. RCCX observed structures remain partial unless
---assume-complete certifies the annotations; multiple-contig RCCX order remains
-unresolved even with that assumption.
+A sample with one readable haplotype of a block gets the dosage observed on
+it, which is a lower bound on the truth since the unreadable haplotype can
+only add; --strict-missing writes '.' there instead. Only a sample with no
+readable haplotype of the block is '.'. RCCX observed structures remain partial unless
+--assume-complete certifies the annotations; multiple-contig RCCX order, and a
+haplotype with no C4 annotation at all, remain unresolved even with it.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
+import re
 import sys
 from datetime import date
 
 import numpy as np
 import pandas as pd
 
-from allele_dosage_vcf import candidate_alleles, collapse_copies
+from allele_dosage_vcf import candidate_tuples, collapse_copies
 
 # --------------------------------------------------------------------------- #
 # Blocks                                                                       #
@@ -113,16 +137,42 @@ BLOCKS = {
         # No anchors: the block is nothing but copy-variable C4 genes, so there is
         # no gene whose presence could witness a complete traversal. Every C4 copy
         # on the haplotype counts; a haplotype with no C4 at all is 0.
-        "genes": ["C4AL", "C4BL", "C4AS", "C4BS"],
+        # C4A / C4B are the unsuffixed names: a table that does not resolve the
+        # long/short forms must still map onto this block, or C4 dosage silently
+        # disappears (gene_block.get -> None -> permanently unresolved).
+        "genes": ["C4AL", "C4BL", "C4AS", "C4BS", "C4A", "C4B"],
         "anchors": None,
     },
     "DR": {
-        "genes": ["HLA-DRB5", "HLA-DRB3", "HLA-DRB4", "HLA-DRB1", "HLA-DRA"],
+        # DRB9/2/6/7/8 are copy-variable pseudogenes lying between DRA and DRB1
+        # in GRCh38 (32536000-32573000, inside the DRB1..DRA anchor span), so
+        # they belong to this block both positionally and for coverage.
+        "genes": ["HLA-DRB5", "HLA-DRB9", "HLA-DRB4", "HLA-DRB3", "HLA-DRB2",
+                  "HLA-DRB6", "HLA-DRB7", "HLA-DRB8", "HLA-DRB1", "HLA-DRA"],
         "anchors": ("HLA-DRB1", "HLA-DRA"),
     },
+    # delta is the DO/DQ block: DQA1..DOB, 32637406-32820466.
     "delta": {
         "genes": ["HLA-DOB", "HLA-DQA1", "HLA-DQA2", "HLA-DQB1", "HLA-DQB2"],
         "anchors": ("HLA-DQA1", "HLA-DOB"),
+    },
+    # The antigen-processing cluster in the 114 kb between DOB (ends 32820466)
+    # and DMB (starts 32934629). It belonged to no block before, so TAP1/TAP2
+    # mapped to block None and their dosage could never be resolved.
+    #
+    # The anchors are deliberately NOT members: DOB belongs to delta and DMB to
+    # epsilon, and BLOCK_GENES maps each gene to one block. They bound the span
+    # without being reported inside it, so this block tiles between its
+    # neighbours instead of overlapping them. PSMB9/PSMB8 lie in the same
+    # cluster and are listed so they are reported when a table annotates them;
+    # Immuannot typically does not, which is harmless (an absent gene simply
+    # never appears).
+    #
+    # Anchored DOB..DMB (ascending coordinates), so the structure reads
+    # TAP2,TAP1 in reference order and flipped is False on a forward haplotype.
+    "TAP": {
+        "genes": ["TAP2", "PSMB9", "PSMB8", "TAP1"],
+        "anchors": ("HLA-DOB", "HLA-DMB"),
     },
     "epsilon": {
         "genes": ["HLA-DMB", "HLA-DPB2", "HLA-DPA2", "HLA-DPB1", "HLA-DOA",
@@ -143,9 +193,35 @@ BLOCKS = {
 }
 
 BLOCK_ORDER = list(BLOCKS)
+BLOCK_GENES = {g: name for name, spec in BLOCKS.items() for g in spec["genes"]}
+
+
+def check_block_coverage(genes, blocks=None, where="VARIABLE_COPY_GENES"):
+    """Genes in `genes` that no block covers, as a sorted list.
+
+    A copy-variable gene outside every block maps to block None, whose coverage
+    is never True, so allele_dosage_vcf marks it unresolved for every sample
+    forever -- a silently empty column, not an error. Callers should treat a
+    non-empty result as a configuration bug.
+    """
+    covered = (BLOCK_GENES if blocks is None else
+               {g for spec in blocks.values() for g in spec["genes"]})
+    missing = sorted(set(genes) - set(covered))
+    if missing:
+        print(f"{where}: {len(missing)} copy-variable genes belong to no block "
+              f"and can never be resolved: {', '.join(missing)}", file=sys.stderr)
+    return missing
 
 # Single-letter IMGT expression suffixes (not Immuannot's "new" novel tag).
+# Only stripped when the preceding character is a digit, so the trailing letter
+# of a gene name ("MICA", "HLA-A") is never mistaken for a suffix.
 IMGT_EXPR_SUFFIX = frozenset("NLSQCA")
+
+# An IMGT colon field is 2-4 digits. Anything else in the allele column -- a
+# bare gene name, "novel", "partial", a single digit -- is not an allele call
+# and must fall back to the bare gene rather than be pasted on as one.
+ALLELE_FIELD = re.compile(r"^\d{2,4}$")
+KIR_ALLELE_MIN_DIGITS = 3   # a KIR name shorter than one field is malformed
 
 # Same resolution knobs as allele_dosage_vcf.py. A haplotype is one string, so
 # KIR keeps a single length here rather than the nested 3/5/7 markers that
@@ -175,6 +251,9 @@ BLOCK_ANCHOR = {
     "RCCX": ("chr6", 31982057),       # C4A
     "DR": ("chr6", 32439872),         # HLA-DRA
     "delta": ("chr6", 32637406),      # HLA-DQA1
+    "TAP": ("chr6", 32825415),        # TAP2 (inside the block; its DMB anchor
+                                      # coordinate is epsilon's, and the two
+                                      # blocks' POS windows must not overlap)
     "epsilon": ("chr6", 32934629),    # HLA-DMB
     "KIR": ("chr19", 54724442),       # KIR3DL3
 }
@@ -197,9 +276,19 @@ def trim_allele(gene, allele, hla_digits=HLA_DIGITS, kir_digits=KIR_DIGITS):
     kir_digits : 0, 3, 5, or 7 leading digits of a KIR name
                  (0 -> KIR2DL1, 3 -> KIR2DL1*001, 7 -> KIR2DL1*0010101).
     KIR genes take `kir_digits`; every other gene takes `hla_digits`. Digit 0
-    drops the allele. A call with fewer fields or digits than a positive
-    resolution contributes no allele. IMGT expression suffixes are kept and
-    Immuannot's "new" tag is dropped.
+    drops the allele. IMGT expression suffixes are kept and Immuannot's "new"
+    tag is dropped.
+
+    A call shallower than the requested resolution keeps every field it does
+    have: at 4 digits a 2-digit call stays `HLA-A*01` rather than collapsing to
+    the bare gene, so one coarsely typed gene no longer drags the whole
+    haplotype down to gene level. The structure therefore carries each gene at
+    the deepest resolution available for it, capped at the requested one. Use
+    `allele_depth` if you need to know how deep a label actually went.
+
+    A value that is not an IMGT allele at all -- a bare gene name, "novel", a
+    single-digit field -- yields the bare gene. It is never pasted on as a
+    pseudo-allele.
     """
     if hla_digits not in HLA_DIGIT_CHOICES:
         raise ValueError(
@@ -226,26 +315,39 @@ def trim_allele(gene, allele, hla_digits=HLA_DIGITS, kir_digits=KIR_DIGITS):
         name = name[:-3]
     if not name:
         return gene
-    suffix = name[-1] if name[-1] in IMGT_EXPR_SUFFIX else ""
+    # An expression suffix follows a digit; the trailing letter of a gene name
+    # ("MICA" -> "MIC", "KIR2DL1" -> "KIR2DL") does not.
+    suffix = (name[-1] if len(name) > 1 and name[-1] in IMGT_EXPR_SUFFIX
+              and name[-2].isdigit() else "")
     core = name[:-1] if suffix else name
     if not core:
         return gene
     if str(gene).startswith("KIR"):
-        if len(core) < kir_digits:
-            return gene
-        trimmed = core[:kir_digits]
+        if not core.isdigit() or len(core) < KIR_ALLELE_MIN_DIGITS:
+            return gene          # not a KIR allele name
+        trimmed = core[:kir_digits]          # shallower calls keep what they have
     else:
-        # Filename-safe exports write 01:02:01:01 as 01_02_01_01. At 4 digits
-        # a single underscore token has one field and used to fall back to
-        # the bare gene, so the whole haplotype stayed at gene level.
+        # Filename-safe exports write 01:02:01:01 as 01_02_01_01.
         if ":" not in core and "_" in core:
             core = core.replace("_", ":")
-        n_fields = hla_digits // 2
-        fields = core.split(":")
-        if len(fields) < n_fields or not all(fields[:n_fields]):
-            return gene
-        trimmed = ":".join(fields[:n_fields])
+        fields = core.split(":")[:hla_digits // 2]
+        if not fields or not all(ALLELE_FIELD.match(f) for f in fields):
+            return gene          # not an IMGT allele name
+        trimmed = ":".join(fields)
     return f"{gene}*{trimmed}{suffix}"
+
+
+def allele_depth(label, kir=False):
+    """How deep `label` actually went: HLA colon fields, or KIR digits.
+
+    0 for a bare gene name. Lets a caller see that a structure mixes
+    resolutions because one gene was only coarsely typed.
+    """
+    _, sep, allele = str(label).partition("*")
+    if not sep or not allele:
+        return 0
+    core = allele[:-1] if allele and allele[-1] in IMGT_EXPR_SUFFIX else allele
+    return len(core) if kir else len(core.split(":"))
 
 
 # --------------------------------------------------------------------------- #
@@ -313,30 +415,42 @@ def _normalise(annot, sample_col, hap_col, gene_col, allele_col,
     d["allele"] = _allele_series(annot, allele_col, gene_col)
     if "_candidate_alleles" in annot:
         d["_candidate_alleles"] = annot["_candidate_alleles"]
-    d["strand"] = (annot[strand_col].astype(str).str.strip()
-                   if strand_col in annot.columns else ".")
+    if strand_col in annot.columns:
+        d["strand"] = annot[strand_col].astype(str).str.strip()
+    else:
+        print(f"no {strand_col!r} column: anchorless (RCCX) structures cannot be "
+              "oriented and are reported in ascending coordinate order",
+              file=sys.stderr)
+        d["strand"] = "."
     d["hap_id"] = d["sample"] + "\t" + d["hap"]
     return d
 
 
 def _block_rows_anchorless(d, genes, hla_digits, kir_digits, orient_strand="+",
-                           assume_complete=False):
+                           assume_complete=False, hap_ids=None):
     """One record per haplotype for a block with no anchor genes (RCCX).
 
     Nothing can witness a complete traversal here, so every copy found on the
     haplotype is reported, across contigs if need be. Completeness must be
-    explicitly certified and order requires one contig. Order is by contig then
+    explicitly certified and order requires one contig; certification applies
+    only to a haplotype that actually carries an annotation, never to the
+    absence of one. Order is by contig then
     position, flipped when most copies read on the opposite strand (C4 is + in GRCh38).
     """
     sub = d[d["gene"].isin(set(genes))].copy()
     records = []
     if len(sub):
+        # Flip only on a positive minus-strand majority. Counting "everything
+        # that is not '+'" made an absent or uninformative Strand column ('.')
+        # reverse every structure, so two tables of the same data differing only
+        # in whether Strand was present gave mutually reversed C4 haplotypes.
+        other = "-" if orient_strand == "+" else "+"
         f = (sub.groupby("hap_id")["strand"]
-             .apply(lambda s: (s == orient_strand).sum() < (s != orient_strand).sum()))
+             .apply(lambda s: (s == other).sum() > (s == orient_strand).sum()))
         sub["flipped"] = sub["hap_id"].map(f)
         sub["key"] = np.where(sub["flipped"].to_numpy(bool), -sub["epos"], sub["spos"])
         sub["label_allele"] = sub["resolved_allele"]
-        sub = sub.sort_values(["hap_id", "contig", "key", "epos"])
+        sub = sub.sort_values(["hap_id", "contig", "key", "epos"], kind="stable")
         agg = sub.groupby("hap_id").agg(
             structure=("gene", ",".join),
             structure_allele=("label_allele", ",".join),
@@ -348,10 +462,11 @@ def _block_rows_anchorless(d, genes, hla_digits, kir_digits, orient_strand="+",
     else:
         agg = pd.DataFrame()
 
-    for hid in sorted(d["hap_id"].unique()):
+    agg_rows = agg.to_dict("index") if len(agg) else {}
+    for hid in (hap_ids if hap_ids is not None else sorted(d["hap_id"].unique())):
         sample, hap = hid.split("\t", 1)
-        if hid in agg.index:
-            a = agg.loc[hid]
+        a = agg_rows.get(hid)
+        if a is not None:
             one_contig = "," not in a["contigs"]
             records.append(dict(
                 sample=sample, hap=hap, complete=int(assume_complete and one_contig),
@@ -364,16 +479,22 @@ def _block_rows_anchorless(d, genes, hla_digits, kir_digits, orient_strand="+",
                 reason=("assumed_complete" if assume_complete else "completeness_unknown")
                        if one_contig else "order_unknown:multiple_contigs"))
         else:
+            # --assume-complete certifies an *annotation*, so it cannot certify
+            # the absence of one. A haplotype carrying no C4 gene at all is
+            # either a real deletion or a failed annotation, and nothing here
+            # distinguishes them; certifying it as complete with an empty
+            # structure made the VCF read it as "carries none of the C4
+            # haplotypes" (the non-empty filter drops the row, so every RCCX
+            # marker got 0/'.') instead of "unknown". It stays incomplete.
             records.append(dict(
-                sample=sample, hap=hap, complete=int(assume_complete),
-                allele_complete=int(assume_complete), contig="", n_genes=0,
-                structure="" if assume_complete else MISSING_VALUE,
-                structure_allele="" if assume_complete else MISSING_VALUE,
+                sample=sample, hap=hap, complete=0,
+                allele_complete=0, contig="", n_genes=0,
+                structure=MISSING_VALUE, structure_allele=MISSING_VALUE,
                 span_bp=0, flipped=False, reason="no_gene_of_block_found"))
     return records
 
 
-def _block_rows(d, genes, anchors, hla_digits, kir_digits):
+def _block_rows(d, genes, anchors, hla_digits, kir_digits, hap_ids=None):
     """One record per haplotype for a single block (see collect_block_haplotypes)."""
     a_left, a_right = anchors
     gene_set = set(genes)
@@ -401,27 +522,49 @@ def _block_rows(d, genes, anchors, hla_digits, kir_digits):
     ls, le = both[f"{a_left}_s"], both[f"{a_left}_e"]
     rs, re_ = both[f"{a_right}_s"], both[f"{a_right}_e"]
     fwd = ls <= rs                     # left anchor already on the left
-    both["lo"] = np.where(fwd, ls, rs)
-    both["hi"] = np.where(fwd, re_, le)
+    # The span is the UNION of the two anchor intervals, not left-start to
+    # right-end: a long terminal-anchor annotation must not shorten it.
+    both["lo"] = np.minimum(ls, rs)
+    both["hi"] = np.maximum(le, re_)
     both["flipped"] = ~fwd
 
-    # block genes inside the anchor span on the chosen contig
-    g = sub[sub["gene"].isin(gene_set)].merge(
+    # Block genes OVERLAPPING the anchor span on the chosen contig. Full
+    # containment would drop a gene that genuinely lies between the anchors but
+    # whose annotation runs past the terminal anchor's boundary -- routine here,
+    # where annotations nest (HLA-V contains HLA-P) and the terminal anchors are
+    # narrow -- and still report the haplotype as `spanned`.
+    # Span-filter every wanted gene, anchors included, THEN split: the anchors
+    # need not be members of the block (TAP is bounded by DOB and DMB, which
+    # belong to delta and epsilon), so the survival check below cannot be
+    # derived from the block's own genes alone. For a block whose anchors are
+    # members this is identical, since the anchors are then inside gene_set.
+    inside = sub.merge(
         both[["contig", "lo", "hi", "flipped"]].reset_index(),
         on=["hap_id", "contig"], how="inner")
-    g = g[(g["spos"] >= g["lo"]) & (g["epos"] <= g["hi"])].copy()
+    inside = inside[(inside["epos"] >= inside["lo"])
+                    & (inside["spos"] <= inside["hi"])]
+    anchors_inside = (inside[inside["gene"].isin((a_left, a_right))]
+                      .groupby("hap_id")["gene"].nunique())
+    g = inside[inside["gene"].isin(gene_set)].copy()
     f = g["flipped"].to_numpy(bool)
     g["key"] = np.where(f, -g["epos"], g["spos"])
     g["rel_start"] = np.where(f, g["hi"] - g["epos"], g["spos"] - g["lo"])
     g["label_gene"] = g["gene"]
     g["label_allele"] = g["resolved_allele"]
-    g = g.sort_values(["hap_id", "key", "epos"])
+    # stable: ties (one gene annotated twice at one position) must not reorder
+    # with the row order upstream, or a structure string could change silently
+    g = g.sort_values(["hap_id", "key", "epos"], kind="stable")
 
     agg = g.groupby("hap_id").agg(
         structure=("label_gene", ",".join),
         structure_allele=("label_allele", ",".join),
         n_genes=("label_gene", "size"),
         allele_ok=("allele_ok", "min"))
+
+    # Both anchors must survive into the reported structure. If one does not,
+    # the span is not the span we think it is and the structure is not
+    # trustworthy, so it must not go out as complete=1.
+    n_anchors_needed = len({a_left, a_right})
 
     # reasons for the haplotypes that are not complete
     has = {a: set(sub.loc[sub["gene"] == a, "hap_id"]) for a in (a_left, a_right)}
@@ -432,23 +575,54 @@ def _block_rows(d, genes, anchors, hla_digits, kir_digits):
         absent = [a for a in (a_left, a_right) if hid not in has[a]]
         if absent:
             return "anchor_missing:" + "+".join(absent)
-        if len(contigs_of.get(hid, set())) == 2:
+        if len(contigs_of.get(hid, ())) == 2:
             return "anchors_on_different_contigs"
         return "anchor_missing:unknown"
 
+    # Scalar .loc on a label index cost ~40 us a call and this loop runs over
+    # every haplotype once per block; dicts make it a hash lookup.
+    both_rows = both.to_dict("index")
+    agg_rows = agg.to_dict("index")
+    kept = anchors_inside.to_dict()
+    contigs_of = contigs_of.to_dict()
+
     records = []
-    for hid in sorted(d["hap_id"].unique()):
+    for hid in (hap_ids if hap_ids is not None else sorted(d["hap_id"].unique())):
         sample, hap = hid.split("\t", 1)
-        if hid in both.index:
-            row, a = both.loc[hid], agg.loc[hid] if hid in agg.index else None
+        row = both_rows.get(hid)
+        if row is not None and int(kept.get(hid, 0)) == n_anchors_needed:
+            a = agg_rows.get(hid)
+            if a is None:
+                # Both anchors spanned, but the block carries none of its own
+                # genes on this haplotype. Reachable only where the anchors are
+                # not block members (TAP), either as a real absence of the
+                # cluster or because the annotator does not call these genes.
+                # The traversal is real, so complete=1, but the structure is
+                # empty and the VCF's non-empty filter drops it, emitting no
+                # marker rather than a phantom "no genes here" haplotype.
+                records.append(dict(
+                    sample=sample, hap=hap, complete=1, contig=row["contig"],
+                    allele_complete=1, n_genes=0, structure="",
+                    structure_allele="", span_bp=int(row["hi"] - row["lo"]),
+                    flipped=bool(row["flipped"]),
+                    reason="spanned_no_block_gene"))
+                continue
             records.append(dict(
                 sample=sample, hap=hap, complete=1, contig=row["contig"],
-                allele_complete=int(a is not None and a["allele_ok"]),
-                n_genes=int(a["n_genes"]) if a is not None else 0,
-                structure=a["structure"] if a is not None else "",
-                structure_allele=a["structure_allele"] if a is not None else "",
+                allele_complete=int(bool(a["allele_ok"])),
+                n_genes=int(a["n_genes"]),
+                structure=a["structure"],
+                structure_allele=a["structure_allele"],
                 span_bp=int(row["hi"] - row["lo"]),
                 flipped=bool(row["flipped"]), reason="spanned"))
+        elif row is not None:
+            # Anchors share a contig, but one did not survive into the span --
+            # do not emit a structure we cannot vouch for.
+            records.append(dict(
+                sample=sample, hap=hap, complete=0, contig=row["contig"],
+                allele_complete=0, n_genes=0, structure=MISSING_VALUE,
+                structure_allele=MISSING_VALUE, span_bp=0, flipped=False,
+                reason="anchor_outside_span"))
         else:
             records.append(dict(
                 sample=sample, hap=hap, complete=0, contig="",
@@ -488,28 +662,43 @@ def collect_block_haplotypes(annot, blocks=None, *, sample_col="Sample",
     d = collapse_copies(d, sample="sample", hap="hap", gene="gene",
                         allele="allele", contig="contig", start="spos", end="epos",
                         verbose=verbose)
-    def resolve(row):
-        gene = row["gene"]
+    def resolve(gene, calls):
         labels = {trim_allele(gene, call, hla_digits, kir_digits)
-                  for call in candidate_alleles(row, "allele")}
+                  for call in calls}
         gene_level = (gene.startswith("C4") or
                       (kir_digits == 0 if gene.startswith("KIR") else hla_digits == 0))
         ok = len(labels) == 1 and (gene_level or gene not in labels)
         return (next(iter(labels)) if len(labels) == 1 else gene, ok)
-    resolved = [resolve(r) for _, r in d.iterrows()]
-    d["resolved_allele"] = [r[0] for r in resolved]
-    d["allele_ok"] = [r[1] for r in resolved]
-    n_haps = d["hap_id"].nunique()
+
+    # Memoised on (gene, candidate calls): a cohort has thousands of distinct
+    # pairs and millions of rows, so this replaces a per-row allele parse with
+    # a dict lookup. Reading the two columns as arrays also avoids iterrows,
+    # which was building one Series per row.
+    cache = {}
+    labels, oks = [], []
+    for key in zip(d["gene"].to_numpy(),
+                   candidate_tuples(d, "allele")):
+        hit = cache.get(key)
+        if hit is None:
+            hit = cache[key] = resolve(*key)
+        labels.append(hit[0])
+        oks.append(hit[1])
+    d["resolved_allele"] = labels
+    d["allele_ok"] = oks
+    hap_ids = sorted(d["hap_id"].unique())   # hoisted: was recomputed per block
+    n_haps = len(hap_ids)
 
     out = []
     for name, spec in blocks.items():
         anchors = spec.get("anchors")
         if anchors:
-            rows = _block_rows(d, spec["genes"], tuple(anchors), hla_digits, kir_digits)
+            rows = _block_rows(d, spec["genes"], tuple(anchors), hla_digits,
+                               kir_digits, hap_ids=hap_ids)
             how = f"anchors {anchors[0]}..{anchors[1]}"
         else:
             rows = _block_rows_anchorless(d, spec["genes"], hla_digits, kir_digits,
-                                           assume_complete=assume_complete)
+                                           assume_complete=assume_complete,
+                                           hap_ids=hap_ids)
             how = "no anchors, completeness assumed" if assume_complete else "no anchors, partial observation"
         for r in rows:
             r["block"] = name
@@ -578,20 +767,50 @@ def dominant_carriers(long, value="structure"):
               & long[value].astype(str).str.len().gt(0)]
     if value == "structure_allele" and "allele_complete" in ok:
         ok = ok[ok["allele_complete"].eq(1)]
+    # One grouping over (block, structure, sample) instead of a groupby per
+    # structure with a nested groupby inside it.
+    tally = (ok.assign(_sample=ok["sample"].astype(str))
+             .groupby(["block", value, "_sample"], observed=True).size())
     carriers = {}
-    for (block, structure), grp in ok.groupby(["block", value], observed=True):
-        counts = grp.groupby(grp["sample"].astype(str)).size()
-        carriers.setdefault(str(block), {})[structure] = counts.to_dict()
+    for (block, structure, sample), n in tally.items():
+        carriers.setdefault(str(block), {}).setdefault(structure, {})[sample] = int(n)
     return carriers
 
 
+# Width of the coordinate window a block's structures are hashed into. Only a
+# label: POS carries no biological meaning for a haplotype marker.
+STRUCTURE_POS_WINDOW = 100000
+
+
+def structure_id(block, structure):
+    """Stable marker ID for one block haplotype: `<block>_<sha1[:8]>`.
+
+    Derived from the structure string alone, so the same haplotype gets the
+    same ID in every cohort, at any --min-dosage, whatever else was observed.
+    The old `<block>_<rank>` numbering was an index into *this* table's sorted
+    structures, so `DR_3` named different haplotypes in different runs and
+    cross-cohort joins on ID silently mis-matched.
+    """
+    return f"{block}_{_structure_hash(block, structure)[:8]}"
+
+
+def _structure_hash(block, structure):
+    return hashlib.sha1(f"{block}\t{structure}".encode()).hexdigest()
+
+
 def _place_structures(carriers):
-    """(chrom, pos, block, structure) with a unique POS on each chromosome."""
+    """(chrom, pos, block, structure) with a unique POS on each chromosome.
+
+    POS is the block's anchor plus a stable per-structure offset, so it too is
+    reproducible across cohorts. Collisions are still bumped, so ID (and HI)
+    remain the join keys; POS is only a label.
+    """
     placed = []
     for block, structures in carriers.items():
         chrom, start = BLOCK_ANCHOR.get(block, ("chr6", 1))
-        for i, structure in enumerate(sorted(structures)):
-            placed.append((chrom, start + i, block, structure))
+        for structure in sorted(structures):
+            offset = int(_structure_hash(block, structure), 16) % STRUCTURE_POS_WINDOW
+            placed.append((chrom, start + offset, block, structure))
     placed.sort(key=lambda row: (_chrom_key(row[0]), row[1], row[2], row[3]))
     last = {}
     unique = []
@@ -605,15 +824,22 @@ def _place_structures(carriers):
 
 def write_structure_vcf(long, samples, path, value="structure", min_dosage=0,
                         exclude_samples=(), source="hap_block_haplotypes",
-                        additive=True):
+                        additive=True, partial_dosage=True):
     """DS-dosage VCF of block haplotypes, one row per haplotype.
 
     The record layout matches allele_dosage_vcf.py. The ID is the block name
-    plus a 1-based index within that block (DR_1). HI is the haplotype, with
+    plus a stable hash of the structure (DR_1f3a9c02), so the same haplotype
+    keeps the same ID across cohorts and `--min-dosage` settings. HI is the
+    haplotype, with
     the same characters removed that allele_dosage_vcf.py removes from an
     allele name. Dosage is additive (0, 1, 2) by default. Dominant is explicit.
-    Exact dosage requires two distinct complete haplotypes; unresolved dosage
-    is '.', except that a confirmed dominant carrier is always 1.
+    Exact dosage requires two distinct complete haplotypes. With one haplotype
+    readable, partial_dosage (the default) writes what was observed -- a lower
+    bound, since the unreadable haplotype can only add -- instead of '.'. Only
+    a sample with no readable haplotype of the block is '.'. partial_dosage
+    False restores the stricter behaviour, at the cost of treating "this
+    haplotype does not carry it" as ignorance. A confirmed dominant carrier is
+    1 either way.
     Samples in exclude_samples are
     dropped. A marker whose dosages sum to less than min_dosage is dropped;
     0 keeps every marker.
@@ -626,9 +852,16 @@ def write_structure_vcf(long, samples, path, value="structure", min_dosage=0,
     callable_rows = long["complete"].eq(1)
     if value == "structure_allele" and "allele_complete" in long:
         callable_rows &= long["allele_complete"].eq(1)
-    state = long.assign(_callable=callable_rows).groupby(["sample", "block"], observed=True)
-    complete = {key: len(g) == 2 and g["hap"].nunique() == 2 and g["_callable"].all()
-                for key, g in state}
+    # Aggregated rather than iterated: the old comprehension built a DataFrame
+    # per (sample, block), which is 8 per sample.
+    state = (long.assign(_callable=callable_rows)
+             .groupby(["sample", "block"], observed=True)
+             .agg(_n=("hap", "size"), _uniq=("hap", "nunique"),
+                  _ok=("_callable", "all"), _ncall=("_callable", "sum")))
+    complete = (state["_n"].eq(2) & state["_uniq"].eq(2) & state["_ok"]).to_dict()
+    # Samples with one readable haplotype and one that failed. What was read is
+    # a lower bound on the true dosage: the unreadable haplotype can only add.
+    partial = state["_ncall"].ge(1).to_dict()
     placed = _place_structures(carriers)
     unknown = sorted(set(carriers) - set(BLOCK_ANCHOR))
     if unknown:
@@ -658,7 +891,6 @@ def write_structure_vcf(long, samples, path, value="structure", min_dosage=0,
     meta.append('##INFO=<ID=HI,Number=1,Type=String,'
                 'Description="Haplotype Information">')
 
-    rank = {}
     n_written = 0
     with open(path, "w", buffering=1 << 20) as fp:
         fp.write("".join(line + "\n" for line in meta))
@@ -673,6 +905,15 @@ def write_structure_vcf(long, samples, path, value="structure", min_dosage=0,
                     dosage = 1
                 elif complete.get((sample, block), False):
                     dosage = encode_dosage(count, additive)
+                elif partial_dosage and partial.get((sample, block), False):
+                    # One haplotype read, one not. Writing '.' discarded it, and
+                    # at 40-50% half-complete samples that was most of the
+                    # cohort's information: the readable haplotype demonstrably
+                    # did not carry this structure, so the observed count is a
+                    # lower bound, not ignorance. Misclassification happens only
+                    # when the unreadable haplotype carries it -- at that
+                    # structure's frequency -- and always toward the null.
+                    dosage = encode_dosage(count, additive)
                 else:
                     dosage = None
                 if dosage is not None:
@@ -680,8 +921,7 @@ def write_structure_vcf(long, samples, path, value="structure", min_dosage=0,
                 row.append("." if dosage is None else str(dosage))
             if min_dosage and total < min_dosage:
                 continue
-            rank[block] = rank.get(block, 0) + 1
-            vid = f"{block}_{rank[block]}"
+            vid = structure_id(block, structure)
             fp.write(f"{chrom}\t{pos}\t{vid}\tA\tG\t.\t.\t"
                      f"HI={_safe_token(structure)}\tDS\t"
                      + "\t".join(row) + "\n")
@@ -735,9 +975,19 @@ def main():
     coding.add_argument("--dominant", dest="additive", action="store_false",
                         help="carrier coding 0, 1, 1")
     ap.set_defaults(additive=True)
+    ap.add_argument("--strict-missing", dest="partial_dosage",
+                    action="store_false",
+                    help="write '.' for a sample with only one readable "
+                         "haplotype of a block, instead of the observed "
+                         "dosage. The default reports what was read, which is "
+                         "a lower bound on the truth, and keeps those samples "
+                         "in the association")
+    ap.set_defaults(partial_dosage=True)
     ap.add_argument("--assume-complete", action="store_true",
-                    help="certify complete anchorless RCCX annotation on each haplotype; "
-                         "multi-contig order and uncalled alleles remain unresolved")
+                    help="certify the anchorless RCCX annotation on each haplotype "
+                         "that has one (RCCX only; anchored blocks are unaffected). "
+                         "Haplotypes with no C4 gene found, multi-contig order and "
+                         "uncalled alleles remain unresolved")
     ap.add_argument("--min-dosage", type=int, default=0,
                     help="drop a marker whose dosages sum to less than this")
     ap.add_argument("--exclude-samples", default=None,
@@ -787,7 +1037,7 @@ def main():
             long, samples, path, value="structure_allele",
             min_dosage=args.min_dosage, exclude_samples=excluded,
             source=f"hap_block_haplotypes_hla{args.hla_digits}_kir{args.kir_digits}",
-            additive=args.additive)
+            additive=args.additive, partial_dosage=args.partial_dosage)
         print(f"{n} haplotype markers -> {path}")
 
 

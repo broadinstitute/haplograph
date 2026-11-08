@@ -161,7 +161,17 @@ def to_superpop(code) -> str | float:
         return code
     return SUPERPOP.get(code, pd.NA)
 
-# Validated categorical palette, fixed order — never cycled.
+# Standard superpopulation colors, the same palette as hla_afnd_r2.
+GROUP_COLORS = {
+    "AFR": "#FF7F00",
+    "AMR": "#ECB01F",
+    "EAS": "#778500",
+    "EUR": "#377EB8",
+    "SAS": "#C44CFD",
+    "MID": "#4A90E2",
+    "OCE": "#E41A1C",
+}
+# Fallback for population-level labels, which are not superpopulations.
 SERIES_COLORS = [
     "#2a78d6", "#eb6834", "#1baf7a", "#eda100",
     "#e87ba4", "#6250d6", "#008300", "#e34948",
@@ -439,11 +449,23 @@ def group_order(groups: Iterable[str], group_by: str = "superpop") -> list[str]:
 
 
 def group_colors(groups: Sequence[str]) -> dict[str, str]:
-    """Colors follow the group identity, never its rank in a given panel."""
-    return {
-        g: OTHER_COLOR if (g == UNKNOWN or i >= len(SERIES_COLORS)) else SERIES_COLORS[i]
-        for i, g in enumerate(groups)
-    }
+    """Colors follow the group identity, never its rank in a given panel.
+
+    Superpopulations use ``GROUP_COLORS``. Other and unknown are gray.
+    Population codes, used when grouping is finer than superpopulation,
+    take the remaining categorical palette.
+    """
+    colors: dict[str, str] = {}
+    extra = 0
+    for group in groups:
+        if group in GROUP_COLORS:
+            colors[group] = GROUP_COLORS[group]
+        elif group in (UNKNOWN, "OTH"):
+            colors[group] = OTHER_COLOR
+        else:
+            colors[group] = SERIES_COLORS[extra % len(SERIES_COLORS)]
+            extra += 1
+    return colors
 
 
 def top_alleles(
@@ -484,6 +506,7 @@ def plot_gene(
     mode: str = "contribution",
     colors: dict[str, str] | None = None,
     label_bars: bool = True,
+    fontsize: float = 9,
 ) -> Axes:
     """Draw one gene's stacked bars onto an existing Axes."""
     wide = top_alleles(freq, gene, top_n, mode)
@@ -508,28 +531,27 @@ def plot_gene(
         )
         left = [l + v for l, v in zip(left, vals)]
 
-    n_hap = int(freq.loc[freq["Gene"] == gene, "gene_total"].iloc[0])
     ax.set_yticks(y)
-    ax.set_yticklabels([a.split("*", 1)[1] for a in keep], fontsize=9, color=INK)
+    ax.set_yticklabels([a.split("*", 1)[1] for a in keep], fontsize=fontsize, color="black")
     # Shared y-extent so bar thickness is identical across panels, even where a
     # gene has fewer than top_n alleles.
     ax.set_ylim(len(keep) - top_n - 0.7, len(keep) - 0.3)
-    ax.set_title(f"{gene}  ·  n = {n_hap} haplotypes", fontsize=10, color=INK, loc="left", pad=8)
-    ax.tick_params(axis="x", labelsize=9, colors=INK_MUTED, length=0)
-    ax.tick_params(axis="y", length=0)
+    ax.set_title(gene, fontsize=fontsize, color="black", loc="left", pad=8)
+    ax.tick_params(axis="x", labelsize=fontsize, colors="black", length=0)
+    ax.tick_params(axis="y", length=0, colors="black")
     ax.set_xlim(0, 1.0 if mode == "composition" else max(0.05, max(left) * 1.18))
     ax.xaxis.set_major_formatter(lambda v, _: f"{v:.0%}")
     ax.grid(axis="x", color=GRID, linewidth=0.8, zorder=0)
     ax.set_axisbelow(True)
     for side in ("top", "right", "left"):
         ax.spines[side].set_visible(False)
-    ax.spines["bottom"].set_color(GRID)
+    ax.spines["bottom"].set_color("black")
     ax.set_facecolor(SURFACE)
 
     if label_bars and mode == "contribution":
         pad = ax.get_xlim()[1] * 0.012
         for yi, total in zip(y, left):
-            ax.text(total + pad, yi, f"{total:.1%}", va="center", fontsize=8, color=INK_MUTED)
+            ax.text(total + pad, yi, f"{total:.1%}", va="center", fontsize=fontsize, color="black")
     return ax
 
 
@@ -542,12 +564,15 @@ def plot_frequencies(
     ncols: int = 2,
     ax: Axes | None = None,
     figsize: tuple[float, float] | None = None,
+    fontsize: float = 9,
 ) -> Figure:
     """Faceted stacked-bar figure, one panel per gene.
 
     `genes` defaults to every gene in `freq` (so whatever you asked
     `allele_frequencies` for), and also takes "classical", "all", or a list.
     Pass `ax=` to draw a single gene into an existing Axes instead.
+    `figsize` is `(width, height)` in inches; the default scales with the
+    number of panels and `top_n`. `fontsize` is in points.
     """
     if mode not in ("contribution", "composition"):
         raise HLAFrequencyError("mode must be 'contribution' or 'composition'")
@@ -563,7 +588,7 @@ def plot_frequencies(
     if ax is not None:
         if len(wanted) != 1:
             raise HLAFrequencyError("ax= draws a single gene; pass genes=['HLA-B']")
-        plot_gene(freq, wanted[0], ax, top_n=top_n, mode=mode, colors=colors)
+        plot_gene(freq, wanted[0], ax, top_n=top_n, mode=mode, colors=colors, fontsize=fontsize)
         return ax.figure
 
     ncols = max(1, min(ncols, len(wanted)))
@@ -573,28 +598,30 @@ def plot_frequencies(
     fig.patch.set_facecolor(SURFACE)
 
     for axis, gene in zip(axes.ravel(), wanted):
-        plot_gene(freq, gene, axis, top_n=top_n, mode=mode, colors=colors)
+        plot_gene(freq, gene, axis, top_n=top_n, mode=mode, colors=colors, fontsize=fontsize)
     for axis in axes.ravel()[len(wanted):]:
         axis.set_visible(False)
 
-    fig.legend(
+    legend = fig.legend(
         handles=[Patch(facecolor=colors[g], label=g) for g in groups],
         loc="upper left",
         bbox_to_anchor=(0.01, 1.0),
         ncol=min(len(groups), 8),
         frameon=False,
-        fontsize=9,
+        fontsize=fontsize,
+        labelcolor="black",
         title="Population" if group_by == "population" else "Superpopulation",
-        title_fontsize=9,
+        title_fontsize=fontsize,
         handlelength=1.0,
         handleheight=1.0,
     )
+    legend.get_title().set_color("black")
     fig.supxlabel(
         "Allele frequency among called haplotypes"
         if mode == "contribution"
         else "Share of carriers by group",
-        fontsize=9,
-        color=INK_MUTED,
+        fontsize=fontsize,
+        color="black",
     )
     fig.tight_layout(rect=(0, 0.015, 1, 0.94))
     return fig
@@ -650,7 +677,7 @@ class AlleleFrequencies:
         return frequency_matrix(self.table, mode)
 
     def plot(self, **kwargs) -> Figure:
-        """Faceted figure; takes genes, top_n, mode, ncols, ax, figsize."""
+        """Faceted figure; takes genes, top_n, mode, ncols, ax, figsize, fontsize."""
         return plot_frequencies(self.table, **kwargs)
 
     def save(self, out: str | Path, *, table_out: str | Path | None = None, dpi: int = 300, **kwargs) -> Figure:
@@ -710,6 +737,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--drop-unknown-pop", action="store_true", help="drop samples with no population")
     p.add_argument("--ncols", type=int, default=2)
+    p.add_argument(
+        "--figsize",
+        type=float,
+        nargs=2,
+        metavar=("WIDTH", "HEIGHT"),
+        help="figure size in inches (default scales with the number of panels)",
+    )
+    p.add_argument("--fontsize", type=float, default=9, help="font size in points (default 9)")
     p.add_argument("--out", type=Path, default=Path("hla_allele_frequency.png"))
     p.add_argument("--table-out", type=Path, help="also write the plotted values as TSV")
     args = p.parse_args(argv)
@@ -733,6 +768,8 @@ def main(argv: list[str] | None = None) -> int:
             top_n=args.top_n,
             mode=args.mode,
             ncols=args.ncols,
+            figsize=tuple(args.figsize) if args.figsize else None,
+            fontsize=args.fontsize,
         )
     except HLAFrequencyError as exc:
         print(f"error: {exc}", file=sys.stderr)

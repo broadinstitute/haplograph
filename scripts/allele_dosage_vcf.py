@@ -61,7 +61,9 @@ import argparse
 import sys
 from collections import Counter, defaultdict
 from datetime import date
+from functools import lru_cache
 
+import numpy as np
 import pandas as pd
 
 # Genes whose copy number genuinely varies between haplotypes; everything else
@@ -297,20 +299,65 @@ def marker_keys(gene, allele, hla_digits=HLA_DIGITS, kir_digits=KIR_DIGITS):
     return list(dict.fromkeys(keys))
 
 
+@lru_cache(maxsize=None)
+def _marker_set(gene, allele, hla_digits, kir_digits):
+    """Memoised `frozenset(marker_keys(...))`.
+
+    The distinct (gene, allele) pairs in a cohort number in the thousands while
+    the rows number in the millions, so this turns a per-row parse into a dict
+    lookup. Frozen so the cached object can be shared; callers use
+    `alternatives[0].union(*alternatives[1:])` rather than `set.union`.
+    """
+    return frozenset(marker_keys(gene, allele, hla_digits, kir_digits))
+
+
 # --------------------------------------------------------------------------- #
 # One row per gene copy                                                        #
 # --------------------------------------------------------------------------- #
 def _locus_ids(d, grp, starts, ends):
-    """Merge overlapping intervals within each group; returns a locus id per row."""
-    ids, run_end, run_id = [0] * len(d), None, -1
-    for i in range(len(d)):
-        if i == 0 or grp[i] != grp[i - 1] or starts[i] > run_end:
-            run_id += 1
-            run_end = ends[i]
-        else:
-            run_end = max(run_end, ends[i])
-        ids[i] = run_id
-    return ids
+    """Merge overlapping intervals within each group; returns a locus id per row.
+
+    Vectorised. The sequential `run_end = max(run_end, ends[i])` looks like it
+    forbids this, but within a group the rows are sorted by start, so the
+    running maximum over the *group* and over the current *run* give the same
+    answer: once a break happens at i (`starts[i] > cummax(ends[:i])`), every
+    later start is >= starts[i] and so already exceeds that stale maximum.
+    Comparing against the group-wide cumulative max is therefore equivalent,
+    and pandas computes it in Cython.
+    """
+    n = len(d)
+    if n == 0:
+        return np.zeros(0, dtype=np.int64)
+    grp = np.asarray(grp)
+    # highest end seen so far in this group, as of the previous row
+    group_cummax = pd.Series(ends).groupby(grp, sort=False).cummax().to_numpy()
+    prev_max = np.empty(n, dtype=np.float64)
+    prev_max[0] = np.nan
+    prev_max[1:] = group_cummax[:-1]
+    new_group = np.empty(n, dtype=bool)
+    new_group[0] = True
+    new_group[1:] = grp[1:] != grp[:-1]
+    # NaN comparison is False, so the first row of a group breaks via new_group
+    brk = new_group | (np.asarray(starts) > prev_max)
+    return np.cumsum(brk) - 1
+
+
+def candidate_tuples(frame, allele_col):
+    """`candidate_alleles` for a whole frame, without iterrows.
+
+    Returns one tuple of competing calls per row. Same semantics as
+    `candidate_alleles`, which stays for single-row/library use.
+    """
+    if "_candidate_alleles" in frame.columns:
+        return list(frame["_candidate_alleles"])
+    if allele_col is None or allele_col not in frame.columns:
+        return [(None,)] * len(frame)
+    column = frame[allele_col]
+    isna = pd.isna(column).to_numpy()
+    values = column.astype("object").to_numpy()
+    blank = ("", "na", "nan", "none", ".", "undetermined")
+    return [(None,) if isna[i] or str(v).strip().lower() in blank
+            else (str(v).strip(),) for i, v in enumerate(values)]
 
 
 def candidate_alleles(row, allele_col):
@@ -376,8 +423,7 @@ def collapse_copies(df, verbose=True, cross_contig="keep", one_per_hap=None,
               "contig are merged by position only")
 
     d = df.sort_values(key + [c["start"], c["end"]]).copy()
-    candidates = [candidate_alleles(r, c["allele"]) for _, r in d.iterrows()]
-    d["_candidate_alleles"] = candidates
+    d["_candidate_alleles"] = candidate_tuples(d, c["allele"])
     d["_locus"] = _locus_ids(d, d.groupby(key, sort=False).ngroup().to_numpy(),
                              d[c["start"]].to_numpy(), d[c["end"]].to_numpy())
     d["_has"] = (d[c["allele"]].notna() if c["allele"] is not None
@@ -494,6 +540,23 @@ class AlleleDosages(defaultdict):
         self.samples = []
 
 
+def _group_bounds(key_arrays):
+    """[(start, stop)] for each run of equal key tuples in already-sorted arrays.
+
+    Replaces iterating a pandas groupby, which builds a DataFrame per group.
+    """
+    n = len(key_arrays[0])
+    if n == 0:
+        return []
+    change = np.zeros(n, dtype=bool)
+    change[0] = True
+    for arr in key_arrays:
+        change[1:] |= arr[1:] != arr[:-1]
+    starts = np.flatnonzero(change)
+    return list(zip(starts.tolist(), np.append(starts[1:], n).tolist()))
+
+
+@lru_cache(maxsize=None)
 def marker_resolution(marker):
     gene, _, allele = marker.partition("*")
     return len(allele) if gene.startswith("KIR") else len(allele.split(":")) if allele else 0
@@ -514,14 +577,50 @@ def dosage_value(dosages, marker, sample, additive=True):
     return count if additive else int(count > 0)
 
 
+def dosage_column(dosages, marker, samples, additive=True):
+    """One marker's dosages across `samples`, as a list of int or None.
+
+    Per sample this is exactly `dosage_value`, but the work that depends only
+    on the marker -- the gene name, the resolution, the two uncertainty sets --
+    is done once instead of once per sample, and the known-sample membership
+    test uses a set. `dosage_value` tests `sample not in dosages.samples`
+    against a *list*, so filling a markers x samples matrix through it was
+    quadratic in the cohort: that, not the counting, was the bottleneck.
+    """
+    counter = dosages.get(marker, {})
+    known = getattr(dosages, "samples", None)
+    known = None if known is None else set(known)
+    gene = _marker_gene(marker)
+    unresolved = set(getattr(dosages, "uncertain", {}).get(gene, ()))
+    unresolved |= set(getattr(dosages, "uncertain_resolution", {})
+                      .get((gene, marker_resolution(marker)), ()))
+    column = []
+    for sample in samples:
+        if known is not None and sample not in known:
+            column.append(None)
+            continue
+        count = int(counter.get(sample, 0))
+        if not additive and count:
+            column.append(1)                      # a confirmed carrier is known
+        elif sample in unresolved:
+            column.append(None)
+        else:
+            column.append(count if additive else int(count > 0))
+    return column
+
+
 def allele_dosages(df, hla_digits=HLA_DIGITS, kir_digits=KIR_DIGITS,
                    collapse=True, verbose=True, assume_complete=False, **overrides):
     """Confirmed observed counts with completeness and resolution uncertainty.
 
-    Collapse physical copies by default. Classical HLA copy counts must agree
-    across alternate contig representations of each haplotype. Distinct loci
-    within a contig retain their multiplicity. No sample-wide set operation is
-    used. A diploid sample needs exactly two nonmissing hap IDs.
+    Collapse physical copies by default. For every gene, copies spread over
+    several contigs of one haplotype are reconciled against the contig that
+    spanned the gene's block; with no spanning contig to arbitrate, the copy
+    number is unresolved rather than summed. Classical HLA copy counts must
+    additionally agree across alternate contig representations. Distinct
+    non-overlapping loci on ONE contig retain their multiplicity, so a genuine
+    duplication still counts every copy. No sample-wide set operation is used.
+    A diploid sample needs exactly two nonmissing hap IDs.
     assume_complete certifies absence/completeness, not unknown allele identity.
     """
     c = resolve_columns(df, **overrides)
@@ -532,6 +631,9 @@ def allele_dosages(df, hla_digits=HLA_DIGITS, kir_digits=KIR_DIGITS,
     d[c["gene"]] = d[c["gene"]].str.split("*").str[0]
     if collapse:
         d = collapse_copies(d, verbose=verbose, **overrides)
+    if "_candidate_alleles" not in d.columns:   # collapse=False leaves it unset
+        d = d.copy()
+        d["_candidate_alleles"] = candidate_tuples(d, c["allele"])
     out = AlleleDosages()
     out.samples = sorted(d[c["sample"]].unique())
     hap_col = c["hap"]
@@ -541,8 +643,10 @@ def allele_dosages(df, hla_digits=HLA_DIGITS, kir_digits=KIR_DIGITS,
     # Variable-gene absence is known only when the corresponding block spans.
     coverage, covered_contig, gene_block = {}, {}, {}
     if all(c[k] is not None for k in ("hap", "contig", "start", "end")) and len(d):
-        from hap_block_haplotypes import BLOCKS, collect_block_haplotypes
+        from hap_block_haplotypes import (BLOCKS, check_block_coverage,
+                                          collect_block_haplotypes)
         gene_block = {g: name for name, spec in BLOCKS.items() for g in spec["genes"]}
+        check_block_coverage(VARIABLE_COPY_GENES)
         blocks = collect_block_haplotypes(
             d, sample_col=c["sample"], hap_col=hap_col, gene_col=c["gene"],
             allele_col=c["allele"], contig_col=c["contig"], start_col=c["start"],
@@ -553,29 +657,67 @@ def allele_dosages(df, hla_digits=HLA_DIGITS, kir_digits=KIR_DIGITS,
                           for r in blocks.itertuples()}
     group_cols = [c["sample"], c["gene"]] + ([hap_col] if hap_col else [])
     observed = set()
-    for group, frame in d.groupby(group_cols, dropna=False):
-        sample, gene = group[:2]
-        hap = group[2] if hap_col else ""
+    # Iterate the (sample, gene, haplotype) groups over numpy arrays rather than
+    # pandas group slices. `for group, frame in d.groupby(...)` materialised one
+    # DataFrame per group -- tens of thousands of them at cohort scale -- and
+    # that slicing, not the counting, dominated the runtime. Sorting by the same
+    # keys groupby sorts on keeps the group order (and so marker insertion
+    # order) unchanged.
+    d = d.sort_values(group_cols, kind="stable")
+    col_sample = d[c["sample"]].astype("object").to_numpy()
+    col_gene = d[c["gene"]].astype("object").to_numpy()
+    col_hap = (d[hap_col].astype("object").to_numpy() if hap_col
+               else np.full(len(d), "", dtype=object))
+    col_contig = (d[c["contig"]].astype("object").to_numpy()
+                  if c["contig"] is not None else None)
+    col_calls = d["_candidate_alleles"].to_numpy()
+    key_arrays = [col_sample, col_gene] + ([col_hap] if hap_col else [])
+    for lo, hi in _group_bounds(key_arrays):
+        sample, gene, hap = col_sample[lo], col_gene[lo], col_hap[lo]
         observed.add((sample, hap, gene))
-        # A spanned contig does not certify additional representations of the
-        # same variable gene on alternate contigs as extra biological copies.
-        if (not assume_complete and c["contig"] is not None and
-                (gene in VARIABLE_COPY_GENES or gene.startswith(("KIR", "C4")))):
-            chosen = covered_contig.get((sample, hap, gene_block.get(gene)))
-            if chosen is not None and set(frame[c["contig"]]) != {chosen}:
-                out.uncertain[gene].add(sample)
-        representations = ([g for _, g in frame.groupby(c["contig"])]
-                           if gene in CLASSIC_HLA_GENES and hap_col and c["contig"] else [frame])
+        # Copies of one gene on SEVERAL contigs of one haplotype are alternate
+        # representations of the same locus, not extra biological copies: the
+        # coordinates live in different frames, so overlap cannot detect them.
+        # Copies on ONE contig at non-overlapping coordinates are a real
+        # duplication (collapse_copies already merged the overlapping ones) and
+        # are kept as-is, however many -- a true CNV of 3 stays 3.
+        #
+        # This applies to EVERY gene. It used to be gated on VARIABLE_COPY_GENES
+        # or KIR/C4, while the per-contig reconciliation below was gated on
+        # CLASSIC_HLA_GENES; the two sets are disjoint, so everything else
+        # (HLA-DMB, DMA, DOA/DOB, DRA, MICB, TAP1/2, E/F/G/J/L/N, DQA2/DQB2,
+        # DPA2/DPB2) was counted once per contig and a diploid could emit DS=3.
+        rows = range(lo, hi)
+        if col_contig is not None:
+            here = col_contig[lo:hi]
+            present = set(here)
+            if len(present) > 1:
+                chosen = covered_contig.get((sample, hap, gene_block.get(gene)))
+                if chosen is not None and chosen in present:
+                    # One contig spanned the gene's block: trust that traversal
+                    # and drop the redundant representations on the others.
+                    rows = [lo + int(i) for i in np.flatnonzero(here == chosen)]
+                elif gene not in CLASSIC_HLA_GENES:
+                    # No spanning contig to arbitrate, and no cross-representation
+                    # reconciliation below -- the copy number is genuinely unknown.
+                    out.uncertain[gene].add(sample)
+        if gene in CLASSIC_HLA_GENES and hap_col and col_contig is not None:
+            by_contig = defaultdict(list)
+            for i in rows:
+                by_contig[col_contig[i]].append(i)
+            representations = [by_contig[k] for k in sorted(by_contig)]
+        else:
+            representations = [rows]
         resolutions = ((0,) if gene.startswith("C4") else kir_digits
                        if gene.startswith("KIR") else (hla_digits // 2,))
         rep_counts = []
         for representation in representations:
             counts = Counter()
-            for _, locus in representation.iterrows():
-                alternatives = [set(marker_keys(gene, v, hla_digits, kir_digits))
-                                for v in candidate_alleles(locus, c["allele"])]
-                possible = set.union(*alternatives)
-                certain = set.intersection(*alternatives)
+            for i in representation:
+                alternatives = [_marker_set(gene, v, hla_digits, kir_digits)
+                                for v in col_calls[i]]
+                possible = alternatives[0].union(*alternatives[1:])
+                certain = alternatives[0].intersection(*alternatives[1:])
                 for marker in possible:
                     out[marker]  # retain ambiguous-only markers
                 counts.update(certain)
@@ -613,7 +755,7 @@ def dosage_matrix(df=None, samples=None, dosages=None, **kwargs):
     d = allele_dosages(df, **kwargs) if dosages is None else dosages
     samples = list(samples) if samples is not None else getattr(
         d, "samples", sorted({s for counts in d.values() for s in counts}))
-    mat = pd.DataFrame([[dosage_value(d, m, s) for s in samples] for m in d],
+    mat = pd.DataFrame([dosage_column(d, m, samples) for m in d],
                        index=list(d), columns=samples, dtype="Int64")
     mat = mat.sort_index(axis=0).sort_index(axis=1)
     mat.index.name = "marker"
@@ -743,8 +885,8 @@ def write_dosage_vcf(allele_dict, samples, path, coordinates=None,
             raw = keeps_copy_count(gene) or mode == "additive"
             row = []
             total = 0
-            for sample in sample_list:
-                dosage = dosage_value(allele_dict, marker, sample, additive=raw)
+            for dosage in dosage_column(allele_dict, marker, sample_list,
+                                        additive=raw):
                 if dosage is not None:
                     total += dosage
                 row.append("." if dosage is None else str(dosage))
