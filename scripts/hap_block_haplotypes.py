@@ -70,7 +70,11 @@ Input
 The same table hap_structure_plot.py takes, with columns
     Sample  Hap  Gene  Strand  Consensus_Allele  Contig  Spos  Epos  [Tool]
 `Hap` identifies the haplotype within a sample; pass hap_col=None to treat each
-contig as its own unit instead. `Gene` may be a bare gene name or an allele
+contig as its own unit instead. A row whose `Hap` is blank takes the haplotype
+of the other rows on its contig, and the count of such rows is reported: rows
+added without a haplotype (framework genes bounding a block, say) would
+otherwise collect on one phantom haplotype per sample, inflating every block's
+denominator and anchoring nothing. `Gene` may be a bare gene name or an allele
 ("HLA-A*01:01"); anything after "*" is stripped.
 
 Library use
@@ -141,7 +145,7 @@ BLOCKS = {
         # long/short forms must still map onto this block, or C4 dosage silently
         # disappears (gene_block.get -> None -> permanently unresolved).
         "genes": ["C4AL", "C4BL", "C4AS", "C4BS", "C4A", "C4B"],
-        "anchors": None,
+        "anchors": ("STK19", "TNXB"),
     },
     "DR": {
         # DRB9/2/6/7/8 are copy-variable pseudogenes lying between DRA and DRB1
@@ -392,6 +396,45 @@ def _allele_series(annot, allele_col, gene_col):
     return None
 
 
+BLANK_VALUES = ("", "na", "nan", "none", ".", "<na>")
+
+
+def _recover_hap(d, hap_col):
+    """Fill a missing haplotype id from the row's contig, in place.
+
+    A contig belongs to exactly one haplotype of a sample, so a row whose Hap
+    is blank can take the Hap of the other rows on its contig. Without this,
+    every such row lands on one phantom haplotype per sample, named "nan":
+    it inflates the denominator (every block's completeness is divided by the
+    number of units per sample) and, worse, strands those genes where they
+    can anchor nothing. Framework genes added to bound a block -- STK19/TNXB
+    for RCCX -- are exactly the rows most likely to arrive without a Hap, and
+    stranded they make that block 0% complete rather than helping it.
+
+    Returns (n_blank, n_recovered).
+    """
+    blank = d["hap"].str.strip().str.lower().isin(BLANK_VALUES)
+    n_blank = int(blank.sum())
+    if not n_blank:
+        return 0, 0
+    known = d.loc[~blank].groupby(["sample", "contig"])["hap"].agg(
+        lambda s: s.iloc[0] if s.nunique() == 1 else np.nan)
+    fill = pd.MultiIndex.from_arrays(
+        [d.loc[blank, "sample"], d.loc[blank, "contig"]]).map(known)
+    fill = pd.Series(fill, index=d.index[blank])
+    ok = fill.notna()
+    d.loc[fill.index[ok], "hap"] = fill[ok].to_numpy()
+    n_rec = int(ok.sum())
+    print(f"{n_blank} rows have no {hap_col!r} value; {n_rec} took the "
+          f"haplotype of their contig", file=sys.stderr)
+    if n_blank - n_rec:
+        print(f"{n_blank - n_rec} rows could not be placed (their contig "
+              "carries no haplotype id, or more than one) and form a phantom "
+              "haplotype per sample that can never be complete; genes on it "
+              "cannot anchor anything", file=sys.stderr)
+    return n_blank, n_rec
+
+
 def _normalise(annot, sample_col, hap_col, gene_col, allele_col,
                contig_col, start_col, end_col, strand_col):
     """Rename the annotation table to the internal column names and type it."""
@@ -410,6 +453,8 @@ def _normalise(annot, sample_col, hap_col, gene_col, allele_col,
     }, index=annot.index)
     d["hap"] = (annot[hap_col].astype(str).str.strip() if hap_col is not None
                 else d["contig"])
+    if hap_col is not None:
+        _recover_hap(d, hap_col)
     # "HLA-A*01:01" -> "HLA-A"; a bare gene name is left alone
     d["gene"] = annot[gene_col].astype(str).str.strip().str.split("*").str[0]
     d["allele"] = _allele_series(annot, allele_col, gene_col)
